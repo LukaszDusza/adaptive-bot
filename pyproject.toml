@@ -1,0 +1,55 @@
+[project]
+name = "adaptive-bot"
+version = "0.1.0"
+description = "Adaptive Trading Bot with regime-based strategy switching"
+requires-python = ">=3.12"
+dependencies = [
+    "black>=25.1.0",
+    # Core data manipulation and analysis
+    "pandas>=2.0.0",
+    "numpy>=1.24.0",
+    
+    # Technical indicators
+    "pandas-ta>=0.3.14b",
+    "ta-lib>=0.4.28",
+    
+    # Backtesting frameworks
+    "vectorbt>=0.25.0",
+    "backtesting>=0.3.3",
+    "backtrader>=1.9.78",
+    
+    # Exchange connectivity
+    "ccxt>=4.0.0",
+    
+    # Async support for live trading
+    "aiohttp>=3.8.0",
+    "websockets>=11.0.0",
+    
+    # Data visualization and analysis
+    "matplotlib>=3.7.0",
+    "plotly>=5.15.0",
+    "seaborn>=0.12.0",
+    "streamlit>=1.28.0",
+    
+    # Configuration and utilities
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+    "loguru>=0.7.0",
+    
+    # Scientific computing
+    "scipy>=1.10.0",
+    "scikit-learn>=1.3.0",
+    
+    # Database
+    "sqlalchemy>=2.0.0",
+    "psycopg2-binary>=2.9.0",
+    "alembic>=1.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "jupyter>=1.0.0",
+    "ipykernel>=6.25.0",
+]
