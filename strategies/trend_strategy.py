@@ -25,6 +25,9 @@ class TrendSignalType(Enum):
     BUY = "buy"
     SELL = "sell"
     HOLD = "hold"
+    LONG_ENTRY = "long_entry"
+    SHORT_ENTRY = "short_entry"
+    EXIT = "exit"
 
 
 @dataclass

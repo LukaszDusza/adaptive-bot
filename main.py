@@ -62,6 +62,7 @@ from indicators.technical import TechnicalIndicators
 from data.bybit_provider import BybitDataProvider, BybitConfig, BybitDataManager
 from backtesting.vectorbt_engine import VectorbtAdaptiveEngine, VectorbtBacktestConfig
 from core.live_trading import LiveTradingEngine, LiveTradingConfig
+from core.portfolio_sync import get_synced_trading_config
 
 # Import legacy components for comparison
 from backtesting.validator import AdaptiveBotBacktester
@@ -491,6 +492,25 @@ async def run_live_trading(config: Dict[str, Any]):
         logger.error("API credentials required for live trading. Set BYBIT_API_KEY and BYBIT_API_SECRET environment variables.")
         return
     
+    # Try to get synchronized trading configuration from backtest results
+    synced_config = get_synced_trading_config()
+    if synced_config:
+        logger.info("Using synchronized trading configuration from backtest results")
+        logger.info(f"Synced symbols: {synced_config.get('symbols', [])}")
+        logger.info(f"Synced risk per trade: {synced_config.get('risk_per_trade', 0.02):.3f}")
+        logger.info(f"Allocation method: {synced_config.get('allocation_method', 'default')}")
+        
+        # Update config with synced parameters
+        config['symbols'] = synced_config.get('symbols', config['symbols'])
+        config['risk_per_trade'] = synced_config.get('risk_per_trade', config['risk_per_trade'])
+        config['max_positions'] = synced_config.get('max_positions', config['max_positions'])
+        
+        # Store strategy parameters for later use
+        config['synced_strategy_parameters'] = synced_config.get('strategy_parameters', {})
+        config['symbol_weights'] = synced_config.get('symbol_weights', {})
+    else:
+        logger.info("No synchronized trading configuration available, using default parameters")
+    
     # Create live trading configuration
     live_config = LiveTradingConfig(
         api_key=config['bybit_api_key'],
@@ -501,8 +521,13 @@ async def run_live_trading(config: Dict[str, Any]):
         max_positions=config['max_positions'],
         risk_per_trade=config['risk_per_trade'],
         initial_capital=config['initial_capital'],
+        leverage=int(os.getenv('LEVERAGE', config.get('leverage', 2))),
         max_daily_loss=config['max_daily_loss'],
-        max_drawdown=config['max_drawdown']
+        max_drawdown=config['max_drawdown'],
+        max_symbol_exposure_pct=float(os.getenv('MAX_SYMBOL_EXPOSURE_PCT', config.get('max_symbol_exposure_pct', 0.5))),
+        var_threshold=float(os.getenv('VAR_THRESHOLD', config.get('var_threshold', 0.05))),
+        use_kelly=(str(os.getenv('USE_KELLY', str(config.get('use_kelly', False)))).lower() == 'true'),
+        kelly_cap=float(os.getenv('KELLY_CAP', config.get('kelly_cap', 0.03)))
     )
     
     # Initialize live trading engine

@@ -101,10 +101,15 @@ class LiveTradingConfig:
     max_positions: int = 1
     risk_per_trade: float = 0.02
     initial_capital: float = 10000.0
+    leverage: int = 2  # default leverage for futures
     
     # Risk management
     max_daily_loss: float = 0.05  # 5% max daily loss
     max_drawdown: float = 0.15    # 15% max drawdown
+    max_symbol_exposure_pct: float = 0.5  # cap per symbol exposure as % of equity
+    var_threshold: float = 0.05  # 5% VaR(95%) threshold
+    use_kelly: bool = False
+    kelly_cap: float = 0.03  # cap Kelly fraction (3%)
     
     # Order settings
     default_order_type: OrderType = OrderType.MARKET
@@ -260,42 +265,78 @@ class PositionManager:
         self.position_history: List[LivePosition] = []
         
     async def sync_positions(self):
-        """Synchronize positions with exchange"""
+        """Synchronize positions with exchange, but only track positions opened by the bot (in DB)."""
         try:
+            # Try to get managed symbols from DB (positions opened by the bot)
+            managed_symbols: Optional[set] = None
+            try:
+                from database.models import get_position_repository, PositionStatus
+                pos_repo = get_position_repository()
+                open_positions = pos_repo.get_positions(status=PositionStatus.OPEN, limit=1000)
+                managed_symbols = set(p.symbol for p in open_positions)
+            except Exception:
+                # If DB not available, default to empty set to avoid touching any positions
+                managed_symbols = set()
+            
             # Fetch positions from exchange
             exchange_positions = await self.exchange.fetch_positions()
             
             current_symbols = set()
             
             for pos in exchange_positions:
-                if pos['size'] != 0:  # Only active positions
-                    symbol = pos['symbol']
-                    current_symbols.add(symbol)
-                    
-                    if symbol in self.positions:
-                        # Update existing position
-                        self.positions[symbol].size = pos['size']
-                        self.positions[symbol].current_price = pos['markPrice']
-                        self.positions[symbol].unrealized_pnl = pos['unrealizedPnl']
-                        self.positions[symbol].updated_at = datetime.now()
-                    else:
-                        # Create new position
-                        self.positions[symbol] = LivePosition(
-                            symbol=symbol,
-                            side=pos['side'],
-                            size=pos['size'],
-                            entry_price=pos['entryPrice'],
-                            current_price=pos['markPrice'],
-                            unrealized_pnl=pos['unrealizedPnl']
-                        )
-                        logger.info(f"New position detected: {symbol} {pos['side']} {pos['size']}")
+                # Normalize and validate fields safely
+                if not isinstance(pos, dict):
+                    continue
+                symbol = pos.get('symbol')
+                # Determine size using multiple possible keys and consider non-zero only
+                size_value = None
+                for size_field in ['size', 'contracts', 'amount', 'baseSize', 'quoteSize']:
+                    if size_field in pos and pos.get(size_field) not in (None, 0):
+                        size_value = pos.get(size_field)
+                        break
+                if size_value in (None, 0) or not symbol:
+                    continue  # Skip inactive or malformed positions
+                
+                # Filter: only positions that the bot manages (present in DB)
+                if managed_symbols and symbol not in managed_symbols:
+                    # Ignore human/opened elsewhere positions
+                    continue
+                elif not managed_symbols:
+                    # When DB is unavailable or has no open positions, do not track any positions
+                    continue
+                
+                current_symbols.add(symbol)
+                
+                # Map common fields safely
+                side = pos.get('side') or ('buy' if (pos.get('positionSide') == 'Long') else 'sell')
+                entry_price = pos.get('entryPrice') or pos.get('avgEntryPrice') or pos.get('entry_price') or 0.0
+                mark_price = pos.get('markPrice') or pos.get('lastPrice') or pos.get('price') or entry_price
+                unrealized_pnl = pos.get('unrealizedPnl') or pos.get('unrealizedPnlUsd') or 0.0
+                
+                if symbol in self.positions:
+                    # Update existing position
+                    self.positions[symbol].size = float(size_value)
+                    self.positions[symbol].current_price = float(mark_price)
+                    self.positions[symbol].unrealized_pnl = float(unrealized_pnl)
+                    self.positions[symbol].updated_at = datetime.now()
+                else:
+                    # Create new position (managed by bot)
+                    self.positions[symbol] = LivePosition(
+                        symbol=symbol,
+                        side=side,
+                        size=float(size_value),
+                        entry_price=float(entry_price),
+                        current_price=float(mark_price),
+                        unrealized_pnl=float(unrealized_pnl)
+                    )
+                    logger.info(f"Managed position detected (DB): {symbol} {side} {size_value}")
             
             # Remove closed positions
             closed_symbols = set(self.positions.keys()) - current_symbols
             for symbol in closed_symbols:
                 closed_pos = self.positions.pop(symbol)
                 self.position_history.append(closed_pos)
-                logger.info(f"Position closed: {symbol}")
+                logger.info(f"Managed position closed: {symbol}")
                 
         except Exception as e:
             logger.error(f"Error syncing positions: {e}")
@@ -325,6 +366,9 @@ class LiveTradingEngine:
             'secret': config.api_secret,
             'testnet': config.testnet,
             'enableRateLimit': True,
+            'options': {
+                'defaultType': 'linear',
+            }
         })
         
         # Initialize components
@@ -367,6 +411,17 @@ class LiveTradingEngine:
             # Test exchange connection
             await self.exchange.load_markets()
             logger.info("Exchange connection established")
+            
+            # Try to set leverage for each symbol (futures mode)
+            for sym in self.config.symbols:
+                try:
+                    if hasattr(self.exchange, 'setLeverage'):
+                        await self.exchange.setLeverage(self.config.leverage, sym, params={'buyLeverage': self.config.leverage, 'sellLeverage': self.config.leverage})
+                    elif hasattr(self.exchange, 'set_leverage'):
+                        await self.exchange.set_leverage(self.config.leverage, sym)
+                    logger.info(f"Leverage set for {sym}: x{self.config.leverage}")
+                except Exception as le:
+                    logger.warning(f"Could not set leverage for {sym}: {le}")
             
             # Initialize data buffers
             await self._initialize_data_buffers()
@@ -534,10 +589,41 @@ class LiveTradingEngine:
     async def _open_long_position(self, symbol: str, price: float, confidence: float):
         """Open a long position"""
         try:
-            # Calculate position size
-            risk_amount = self.config.initial_capital * self.config.risk_per_trade
-            stop_distance = price * 0.02  # 2% stop loss
-            position_size = risk_amount / stop_distance
+            # Compute equity
+            equity = await self._get_account_balance()
+            # Stop distance (simple 2% of price; TODO: use ATR)
+            stop_distance = max(price * 0.02, 1e-8)
+            
+            # Optional Kelly-based sizing from DB history
+            base_risk = self.config.risk_per_trade
+            if self.config.use_kelly:
+                try:
+                    from database.models import get_position_repository, PositionStatus
+                    repo = get_position_repository()
+                    closed = repo.get_positions(status=PositionStatus.CLOSED, limit=200)
+                    wins = [float(p.pnl) for p in closed if p.pnl and float(p.pnl) > 0]
+                    losses = [float(p.pnl) for p in closed if p.pnl and float(p.pnl) < 0]
+                    if len(wins) >= 5 and len(losses) >= 5:
+                        win_rate = len(wins) / (len(wins) + len(losses))
+                        avg_win = float(np.mean(wins))
+                        avg_loss = float(-np.mean(losses))
+                        if avg_loss > 0 and 0 < win_rate < 1:
+                            R = avg_win / avg_loss
+                            kelly = win_rate - (1 - win_rate) / R
+                            if kelly is not None and kelly > 0:
+                                base_risk = min(base_risk, min(kelly, self.config.kelly_cap))
+                except Exception:
+                    pass
+            
+            # Exposure cap per symbol
+            max_exposure_value = equity * self.config.max_symbol_exposure_pct
+            desired_risk_amount = equity * base_risk
+            raw_size = desired_risk_amount / stop_distance
+            max_contracts = max_exposure_value / price
+            position_size = float(min(raw_size, max_contracts))
+            if position_size <= 0:
+                logger.info("Calculated position size is zero; skipping")
+                return
             
             # Round position size to exchange precision
             position_size = self._round_to_precision(position_size, symbol)
@@ -564,10 +650,38 @@ class LiveTradingEngine:
     async def _open_short_position(self, symbol: str, price: float, confidence: float):
         """Open a short position"""
         try:
-            # Calculate position size
-            risk_amount = self.config.initial_capital * self.config.risk_per_trade
-            stop_distance = price * 0.02  # 2% stop loss
-            position_size = risk_amount / stop_distance
+            # Compute equity
+            equity = await self._get_account_balance()
+            stop_distance = max(price * 0.02, 1e-8)
+            
+            base_risk = self.config.risk_per_trade
+            if self.config.use_kelly:
+                try:
+                    from database.models import get_position_repository, PositionStatus
+                    repo = get_position_repository()
+                    closed = repo.get_positions(status=PositionStatus.CLOSED, limit=200)
+                    wins = [float(p.pnl) for p in closed if p.pnl and float(p.pnl) > 0]
+                    losses = [float(p.pnl) for p in closed if p.pnl and float(p.pnl) < 0]
+                    if len(wins) >= 5 and len(losses) >= 5:
+                        win_rate = len(wins) / (len(wins) + len(losses))
+                        avg_win = float(np.mean(wins))
+                        avg_loss = float(-np.mean(losses))
+                        if avg_loss > 0 and 0 < win_rate < 1:
+                            R = avg_win / avg_loss
+                            kelly = win_rate - (1 - win_rate) / R
+                            if kelly is not None and kelly > 0:
+                                base_risk = min(base_risk, min(kelly, self.config.kelly_cap))
+                except Exception:
+                    pass
+            
+            max_exposure_value = equity * self.config.max_symbol_exposure_pct
+            desired_risk_amount = equity * base_risk
+            raw_size = desired_risk_amount / stop_distance
+            max_contracts = max_exposure_value / price
+            position_size = float(min(raw_size, max_contracts))
+            if position_size <= 0:
+                logger.info("Calculated position size is zero; skipping")
+                return
             
             # Round position size to exchange precision
             position_size = self._round_to_precision(position_size, symbol)
@@ -592,8 +706,21 @@ class LiveTradingEngine:
             logger.error(f"Error opening short position: {e}")
     
     async def _close_position(self, symbol: str, position: LivePosition):
-        """Close existing position"""
+        """Close existing position that is managed by the bot (exists in DB)."""
         try:
+            # Verify that this symbol has an OPEN position in DB managed by the bot
+            try:
+                from database.models import get_position_repository, PositionStatus
+                pos_repo = get_position_repository()
+                open_positions = pos_repo.get_positions(symbol=symbol, status=PositionStatus.OPEN, limit=1)
+                if not open_positions:
+                    logger.info(f"Skip closing non-managed position for {symbol}")
+                    return
+            except Exception:
+                # If DB not available, do not close to avoid touching human positions
+                logger.warning("DB unavailable while attempting to close position; skipping to avoid touching human positions")
+                return
+            
             # Create opposite side order
             opposite_side = "sell" if position.side == "buy" else "buy"
             
@@ -641,6 +768,32 @@ class LiveTradingEngine:
             if len(self.position_manager.positions) >= self.config.max_positions:
                 logger.warning("Maximum positions reached")
                 return False
+            
+            # Per-symbol exposure cap and VaR check
+            total_equity = current_balance
+            # Exposure cap across tracked positions
+            for sym, pos in self.position_manager.positions.items():
+                exposure = abs(pos.size * pos.current_price)
+                if exposure > total_equity * self.config.max_symbol_exposure_pct:
+                    logger.warning(f"Exposure cap exceeded for {sym}: {exposure/total_equity:.2%}")
+                    return False
+            
+            # Simple portfolio VaR(95%) based on recent returns
+            try:
+                returns = []
+                for sym, df in self.data_buffer.items():
+                    if isinstance(df, pd.DataFrame) and 'close' in df.columns and len(df) > 50:
+                        ret = df['close'].pct_change().dropna().tail(200)
+                        if not ret.empty:
+                            returns.append(ret.values)
+                if returns:
+                    all_rets = np.concatenate(returns)
+                    var95 = -np.percentile(all_rets, 5)
+                    if var95 > self.config.var_threshold:
+                        logger.warning(f"VaR(95) {var95:.2%} exceeds threshold {self.config.var_threshold:.2%}")
+                        return False
+            except Exception:
+                pass
             
             return True
             

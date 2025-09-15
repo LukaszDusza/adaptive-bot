@@ -138,6 +138,13 @@ class StreamlitGUI:
             'max_positions': max_positions,
             'max_daily_loss': max_daily_loss,
             'max_drawdown': max_drawdown,
+            # Futures-only mode and leverage settings
+            'futures_mode': True,
+            'leverage': 2,
+            'use_kelly': False,
+            'kelly_cap': 0.03,
+            'var_threshold': 0.05,
+            'max_symbol_exposure_pct': 0.5,
             'database_loaded': False  # Flag to indicate database config not yet loaded
         }
 
@@ -448,6 +455,54 @@ class StreamlitGUI:
                 step=5.0
             ) / 100
         
+        # Derivatives / Futures Settings
+        st.subheader("🧮 Derivatives & Risk Settings")
+        col1, col2 = st.columns(2)
+        with col1:
+            futures_mode = st.checkbox(
+                "Futures mode only (enforced)",
+                value=st.session_state.config.get('futures_mode', True),
+                help="Bot operates only on linear futures. Spot trading is disabled.",
+                disabled=True
+            )
+            use_kelly = st.checkbox(
+                "Use Kelly sizing (adaptive risk)",
+                value=st.session_state.config.get('use_kelly', False),
+                help="Use Kelly criterion based on past trade stats to adapt risk per trade (capped)."
+            )
+            kelly_cap = st.slider(
+                "Kelly cap (%)",
+                min_value=0.5,
+                max_value=10.0,
+                value=float(st.session_state.config.get('kelly_cap', 0.03) * 100),
+                step=0.5,
+                help="Maximum fraction of equity risked per trade when Kelly is enabled."
+            ) / 100
+        with col2:
+            leverage = st.number_input(
+                "Leverage",
+                min_value=1,
+                max_value=125,
+                value=int(st.session_state.config.get('leverage', 2)),
+                help="Set your default leverage for futures positions."
+            )
+            var_threshold = st.slider(
+                "VaR(95) threshold (%)",
+                min_value=1.0,
+                max_value=20.0,
+                value=float(st.session_state.config.get('var_threshold', 0.05) * 100),
+                step=1.0,
+                help="If estimated 95% Value-at-Risk exceeds this, new entries are blocked."
+            ) / 100
+            max_symbol_exposure_pct = st.slider(
+                "Max exposure per symbol (%)",
+                min_value=5.0,
+                max_value=100.0,
+                value=float(st.session_state.config.get('max_symbol_exposure_pct', 0.5) * 100),
+                step=5.0,
+                help="Cap exposure to a single symbol as % of equity."
+            ) / 100
+        
         # Save Configuration
         if st.button("💾 Save Configuration", key="save_config"):
             # Update session state
@@ -460,7 +515,13 @@ class StreamlitGUI:
                 'initial_capital': initial_capital,
                 'risk_per_trade': risk_per_trade,
                 'max_daily_loss': max_daily_loss,
-                'max_drawdown': max_drawdown
+                'max_drawdown': max_drawdown,
+                'futures_mode': True,
+                'leverage': int(leverage),
+                                'use_kelly': bool(use_kelly),
+                                'kelly_cap': float(kelly_cap),
+                                'var_threshold': float(var_threshold),
+                                'max_symbol_exposure_pct': float(max_symbol_exposure_pct)
             })
             
             # Save trading preferences to database
@@ -822,8 +883,8 @@ class StreamlitGUI:
         try:
             from backtesting.vectorbt_engine import VectorbtAdaptiveEngine, VectorbtBacktestConfig
             from data.bybit_provider import BybitDataProvider, BybitConfig
-            from core.trend_strategy import TrendStrategy
-            from core.consolidation_strategy import ConsolidationStrategy
+            from strategies.trend_strategy import TrendStrategy
+            from strategies.consolidation_strategy import ConsolidationStrategy
             from core.regime_detector import RegimeDetector
             
             # Get configuration
@@ -862,64 +923,63 @@ class StreamlitGUI:
                 st.error(f"❌ Failed to fetch market data for {symbol}. Please check your API connection.")
                 return None
             
-            # Initialize strategies
-            trend_strategy = TrendStrategy()
-            consolidation_strategy = ConsolidationStrategy()
-            regime_detector = RegimeDetector()
-            
-            # Get strategy parameters from session state
-            trend_params = getattr(st.session_state, 'trend_params', {})
-            cons_params = getattr(st.session_state, 'cons_params', {})
-            
-            # Apply parameters to strategies if available
-            if trend_params:
-                for param, value in trend_params.items():
-                    if hasattr(trend_strategy, param):
-                        setattr(trend_strategy, param, value)
-            
-            if cons_params:
-                for param, value in cons_params.items():
-                    if hasattr(consolidation_strategy, param):
-                        setattr(consolidation_strategy, param, value)
-            
             # Setup backtest configuration
             backtest_config = VectorbtBacktestConfig(
                 initial_capital=config.get('initial_capital', 10000),
-                commission=0.001,  # 0.1% commission
+                transaction_cost=0.001,  # 0.1% commission
                 slippage=0.001,    # 0.1% slippage
                 risk_per_trade=config.get('risk_per_trade', 0.02)
             )
             
-            # Initialize backtesting engine
-            engine = VectorbtAdaptiveEngine()
+            # Initialize backtesting engine with configuration
+            engine = VectorbtAdaptiveEngine(backtest_config)
             
             # Run backtest
             results = engine.run_backtest(
                 data=df,
-                trend_strategy=trend_strategy,
-                consolidation_strategy=consolidation_strategy,
-                regime_detector=regime_detector,
-                config=backtest_config
+                symbol=symbol
             )
             
             if results is None:
                 st.error("❌ Backtest failed to generate results.")
                 return None
             
+            # Extract metrics from VectorbtResults object
+            portfolio = results.portfolio
+            trades = results.trades
+            
+            # Calculate performance metrics
+            total_return = portfolio.total_return()
+            sharpe_ratio = portfolio.sharpe_ratio() if hasattr(portfolio, 'sharpe_ratio') else 0.0
+            max_drawdown = portfolio.max_drawdown()
+            total_trades = len(trades) if trades is not None and hasattr(trades, '__len__') else 0
+            
+            # Calculate win rate from trades
+            win_rate = 0.0
+            if trades is not None and hasattr(trades, '__len__') and len(trades) > 0:
+                try:
+                    if hasattr(trades, 'pnl'):
+                        winning_trades = (trades.pnl > 0).sum() if hasattr(trades.pnl, 'sum') else 0
+                        win_rate = winning_trades / len(trades) if len(trades) > 0 else 0.0
+                except:
+                    win_rate = 0.0
+            
             # Format results for display
             formatted_results = {
-                'total_return': results.get('total_return', 0.0),
-                'sharpe_ratio': results.get('sharpe_ratio', 0.0),
-                'max_drawdown': results.get('max_drawdown', 0.0),
-                'total_trades': results.get('total_trades', 0),
-                'win_rate': results.get('win_rate', 0.0),
+                'total_return': total_return,
+                'sharpe_ratio': sharpe_ratio,
+                'max_drawdown': max_drawdown,
+                'total_trades': total_trades,
+                'win_rate': win_rate,
                 'equity_curve': {
-                    'dates': results.get('dates', df.index),
-                    'values': results.get('portfolio_values', [config.get('initial_capital', 10000)] * len(df))
+                    'dates': results.equity_curve.index if results.equity_curve is not None else df.index,
+                    'values': results.equity_curve.values if results.equity_curve is not None else [config.get('initial_capital', 10000)] * len(df)
                 },
                 'symbol': symbol,
                 'timeframe': timeframe,
-                'periods': periods
+                'periods': periods,
+                'trades_data': trades,
+                'portfolio_object': portfolio
             }
             
             return formatted_results
@@ -1393,11 +1453,11 @@ class StreamlitGUI:
         self.render_logs_panel()
     
     def render_backtest_results(self):
-        """Render backtest results"""
+        """Render backtest results with detailed trade information"""
         results = st.session_state.backtest_results
         
         # Key Metrics
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
             st.metric("Total Return", f"{results['total_return']:.1%}", f"{results['total_return']:.1%}")
@@ -1410,6 +1470,9 @@ class StreamlitGUI:
         
         with col4:
             st.metric("Total Trades", f"{results['total_trades']}")
+            
+        with col5:
+            st.metric("Win Rate", f"{results.get('win_rate', 0):.1%}")
         
         # Equity Curve
         fig = go.Figure()
@@ -1429,6 +1492,238 @@ class StreamlitGUI:
         )
         
         st.plotly_chart(fig, use_container_width=True)
+        
+        # Detailed Trade Analysis
+        st.subheader("📋 Detailed Trade Analysis")
+        
+        # Check if we have trade data
+        trades_data = results.get('trades_data')
+        if trades_data is not None and hasattr(trades_data, '__len__') and len(trades_data) > 0:
+            try:
+                # Convert trades to DataFrame for display
+                if hasattr(trades_data, 'to_pandas'):
+                    trades_df = trades_data.to_pandas()
+                elif isinstance(trades_data, pd.DataFrame):
+                    trades_df = trades_data
+                else:
+                    # Try to convert to DataFrame if it's a records array or similar
+                    trades_df = pd.DataFrame(trades_data)
+                
+                if not trades_df.empty:
+                    st.write(f"**Bot wykonał {len(trades_df)} transakcji podczas backtestingu:**")
+                    
+                    # Show trades table with key columns
+                    display_df = trades_df.copy()
+                    
+                    # Try to show most relevant columns
+                    important_cols = []
+                    for col_group in [['Entry Time', 'entry_time', 'open_time'], 
+                                     ['Exit Time', 'exit_time', 'close_time'],
+                                     ['Side', 'side', 'direction'],
+                                     ['Entry Price', 'entry_price', 'open_price'],
+                                     ['Exit Price', 'exit_price', 'close_price'],
+                                     ['P&L', 'pnl', 'profit_loss'],
+                                     ['Duration', 'duration', 'holding_period']]:
+                        for col in col_group:
+                            if col in display_df.columns:
+                                important_cols.append(col)
+                                break
+                    
+                    if important_cols:
+                        st.dataframe(
+                            display_df[important_cols].head(20),
+                            use_container_width=True
+                        )
+                    else:
+                        st.dataframe(display_df.head(10), use_container_width=True)
+                    
+                    # Trade Statistics
+                    if len(trades_df) > 0:
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.markdown("#### 🎯 Statystyki Transakcji")
+                            pnl_col = None
+                            for col in ['pnl', 'profit_loss', 'return']:
+                                if col in trades_df.columns:
+                                    pnl_col = col
+                                    break
+                                    
+                            if pnl_col:
+                                winning_trades = (trades_df[pnl_col] > 0).sum()
+                                losing_trades = (trades_df[pnl_col] <= 0).sum()
+                                st.write(f"**Zyskowne:** {winning_trades}")
+                                st.write(f"**Stratne:** {losing_trades}")
+                                if winning_trades + losing_trades > 0:
+                                    win_rate = winning_trades / (winning_trades + losing_trades) * 100
+                                    st.write(f"**Win Rate:** {win_rate:.1f}%")
+                        
+                        with col2:
+                            st.markdown("#### 💰 P&L Analysis")
+                            if pnl_col:
+                                best_trade = trades_df[pnl_col].max()
+                                worst_trade = trades_df[pnl_col].min()
+                                total_pnl = trades_df[pnl_col].sum()
+                                st.write(f"**Najlepsza:** ${best_trade:.2f}")
+                                st.write(f"**Najgorsza:** ${worst_trade:.2f}")
+                                st.write(f"**Suma P&L:** ${total_pnl:.2f}")
+                        
+                        with col3:
+                            st.markdown("#### 📊 Trading Insights")
+                            st.write(f"**Łączne transakcje:** {len(trades_df)}")
+                            if 'duration' in trades_df.columns:
+                                avg_duration = trades_df['duration'].mean()
+                                st.write(f"**Średni czas:** {avg_duration}")
+                            
+                            # Show position entry/exit info
+                            if len(trades_df) > 0:
+                                st.write("**Ostatnie 5 transakcji:**")
+                                recent_trades = trades_df.tail(5)
+                                for idx, trade in recent_trades.iterrows():
+                                    side = trade.get('side', 'N/A')
+                                    pnl = trade.get(pnl_col, 0) if pnl_col else 0
+                                    pnl_emoji = "🟢" if pnl > 0 else "🔴" if pnl < 0 else "⚪"
+                                    st.write(f"{pnl_emoji} {side.upper()} → ${pnl:.2f}")
+                        
+                        st.success("✅ **Szczegółowa analiza dostępna!** Bot aktywnie otwierał i zamykał pozycje podczas testów.")
+                        
+            except Exception as e:
+                st.warning(f"Nie można wyświetlić szczegółów transakcji: {str(e)}")
+                st.info("Dane o transakcjach są dostępne ale w nierozpoznawalnym formacie.")
+        else:
+            st.info("📊 **Brak szczegółowych danych o transakcjach**")
+            st.write("To może oznaczać:")
+            st.write("• Bot nie wykonał żadnych transakcji w tym okresie")
+            st.write("• Parametry strategii były zbyt restrykcyjne")  
+            st.write("• Warunki rynkowe nie wywołały sygnałów")
+            st.write("• Spróbuj dostroić parametry lub wydłużyć okres testów")
+            
+        # Strategy Performance Summary
+        st.subheader("🧠 Wnioski ze strategii")
+        strategy_insights = []
+        
+        total_trades = results.get('total_trades', 0)
+        sharpe = results.get('sharpe_ratio', 0)
+        max_dd = abs(results.get('max_drawdown', 0))
+        
+        if total_trades == 0:
+            strategy_insights.append("⚠️ **Brak transakcji** - Rozważ złagodzenie parametrów strategii")
+        elif total_trades < 10:
+            strategy_insights.append("📈 **Niska częstotliwość** - Strategia jest bardzo selektywna")
+        elif total_trades > 100:
+            strategy_insights.append("⚡ **Wysoka aktywność** - Strategia generuje dużo sygnałów")
+        
+        if sharpe > 2:
+            strategy_insights.append("🎯 **Doskonałe wyniki** - Silna performance skorygowana o ryzyko")
+        elif sharpe > 1:
+            strategy_insights.append("✅ **Dobre wyniki** - Strategia pokazuje potencjał")
+        elif sharpe < 0:
+            strategy_insights.append("🔴 **Słabe wyniki** - Strategia wymaga optymalizacji")
+        
+        if max_dd > 0.2:
+            strategy_insights.append("⚠️ **Wysokie ryzyko** - Rozważ bardziej konserwatywne zarządzanie")
+        elif max_dd < 0.1:
+            strategy_insights.append("🛡️ **Niski drawdown** - Dobra kontrola ryzyka")
+        
+        if strategy_insights:
+            for insight in strategy_insights:
+                st.write(insight)
+        else:
+            st.write("📊 **Analiza wyników dostępna po przeprowadzeniu backtestu**")
+    
+    def _ensure_positions_cache(self):
+        """Initialize session state for background positions cache."""
+        ss = st.session_state
+        if 'bybit_positions_cache' not in ss:
+            ss.bybit_positions_cache = []
+        if 'bybit_positions_updated_at' not in ss:
+            ss.bybit_positions_updated_at = None
+        if 'bybit_positions_fetch_in_progress' not in ss:
+            ss.bybit_positions_fetch_in_progress = False
+        if 'bybit_positions_refresh_requested' not in ss:
+            ss.bybit_positions_refresh_requested = False
+    
+    def _positions_fetch_worker(self, api_key: str, api_secret: str, testnet: bool):
+        """Background worker to fetch positions and store in session cache (non-blocking UI)."""
+        try:
+            import ccxt
+            from datetime import datetime as _dt
+            
+            exchange = ccxt.bybit({
+                'apiKey': api_key,
+                'secret': api_secret,
+                'testnet': testnet,
+                'enableRateLimit': True,
+                'options': {'defaultType': 'linear'},
+            })
+            
+            # Filter to only positions managed by the bot (database open positions)
+            managed_symbols = set()
+            try:
+                from database.models import get_position_repository, PositionStatus
+                pos_repo = get_position_repository()
+                open_positions = pos_repo.get_positions(status=PositionStatus.OPEN, limit=1000)
+                managed_symbols = set(p.symbol for p in open_positions)
+            except Exception:
+                # If DB unavailable, do not touch any positions
+                managed_symbols = set()
+            
+            positions = exchange.fetch_positions()
+            real_positions = []
+            for pos in positions:
+                if not isinstance(pos, dict):
+                    continue
+                # Determine active size
+                size_value = None
+                for size_field in ['size', 'contracts', 'amount', 'baseSize', 'quoteSize']:
+                    if size_field in pos and pos.get(size_field) not in (None, 0):
+                        size_value = pos.get(size_field)
+                        break
+                if size_value in (None, 0):
+                    continue
+                sym = pos.get('symbol')
+                if not sym:
+                    continue
+                # Apply DB filter
+                if managed_symbols and sym not in managed_symbols:
+                    continue
+                elif not managed_symbols:
+                    # If no managed symbols, skip tracking
+                    continue
+                real_positions.append(pos)
+            
+            st.session_state.bybit_positions_cache = real_positions
+            st.session_state.bybit_positions_updated_at = _dt.now()
+        except Exception as e:
+            # Store error info in cache for UI to show
+            st.session_state.bybit_positions_cache = [{"error": str(e)}]
+            st.session_state.bybit_positions_updated_at = _dt.now()
+        finally:
+            st.session_state.bybit_positions_fetch_in_progress = False
+            st.session_state.bybit_positions_refresh_requested = False
+    
+    def start_positions_fetch(self, force: bool = False):
+        """Start a background thread to fetch positions if not already running."""
+        self._ensure_positions_cache()
+        ss = st.session_state
+        # Only start if credentials exist
+        api_key = ss.config.get('bybit_api_key', '')
+        api_secret = ss.config.get('bybit_api_secret', '')
+        if not api_key or not api_secret:
+            return
+        
+        # Decide if fetch is needed
+        need_fetch = force or (not ss.bybit_positions_cache) or (ss.bybit_positions_updated_at is None)
+        
+        # Start thread if needed and not already running
+        if need_fetch and not ss.bybit_positions_fetch_in_progress:
+            ss.bybit_positions_fetch_in_progress = True
+            thread = threading.Thread(
+                target=self._positions_fetch_worker,
+                args=(api_key, api_secret, ss.config.get('bybit_testnet', True)),
+                daemon=True
+            )
+            thread.start()
     
     def render_live_trading_page(self):
         """Render live trading page"""
@@ -1448,6 +1743,15 @@ class StreamlitGUI:
         st.warning("⚠️ **WARNING**: Live trading involves real money and risk. Always test thoroughly on testnet first!")
         
         # Trading Controls
+        with st.expander("🧭 Bot Intent Preview", expanded=True):
+            st.write("The bot operates in Futures mode only and will avoid interfering with manually opened positions.")
+            st.write("Planned behavior:")
+            st.markdown(f"• Market: Bybit Linear Futures (USDT-margined)")
+            st.markdown(f"• Symbols: {', '.join(st.session_state.config.get('symbols', []))}")
+            st.markdown(f"• Timeframe: {st.session_state.config.get('timeframe', '15m')}")
+            st.markdown(f"• Default leverage: x{int(st.session_state.config.get('leverage', 2))}")
+            st.markdown("• Entries: Based on regime detection and strategy signals; positions are recorded in the database and only those will be managed.")
+            st.caption("This preview summarizes the bot's intentions. Execution occurs only upon valid signals and risk checks.")
         col1, col2, col3 = st.columns(3)
         
         with col1:
@@ -1474,7 +1778,8 @@ class StreamlitGUI:
             st.subheader("📊 Current Positions")
         with col2:
             if st.button("🔄 Refresh", key="refresh_positions"):
-                st.rerun()
+                st.session_state.bybit_positions_refresh_requested = True
+                self.start_positions_fetch(force=True)
         
         # Check if API keys are configured
         api_key = st.session_state.config.get('bybit_api_key', '')
@@ -1489,179 +1794,47 @@ class StreamlitGUI:
             st.info("• Return here to view your actual positions")
             return
         
-        # Try to fetch real positions from Bybit
-        try:
-            from data.bybit_provider import BybitDataProvider, BybitConfig
-            import ccxt
-            
-            # Initialize Bybit connection
-            bybit_config = BybitConfig(
-                api_key=api_key,
-                secret=api_secret,
-                testnet=st.session_state.config.get('bybit_testnet', True)
-            )
-            
-            # Test connection first
-            data_provider = BybitDataProvider(bybit_config)
-            if not data_provider.test_connection():
-                st.error("❌ **API Connection Test Failed**")
-                st.warning("⚠️ **Note:** Cannot connect to Bybit with provided API keys.")
-                
-                # Show troubleshooting info
-                mode_text = "🧪 Testnet" if bybit_config.testnet else "🔴 Production"
-                st.info(f"**Current Mode:** {mode_text}")
-                st.info("**Troubleshooting:**")
-                st.info("• Verify your API key and secret are correct")
-                st.info(f"• Ensure API keys match your selected mode ({'testnet' if bybit_config.testnet else 'production'})")
-                st.info("• Check that API keys have required permissions (Account Read, Position Read)")
-                st.info("• Try testing connection in Configuration page first")
-                return
-            
-            # Create exchange instance for positions
-            exchange = ccxt.bybit({
-                'apiKey': bybit_config.api_key,
-                'secret': bybit_config.secret,
-                'testnet': bybit_config.testnet,
-                'enableRateLimit': True,
-                'options': {
-                    'defaultType': 'linear',  # Use linear derivatives
-                },
-            })
-            
-            # Fetch positions with error handling
-            try:
-                positions = exchange.fetch_positions()
-                
-                # Debug: Show raw positions data
-                with st.expander("🔍 Debug: Raw Position Data", expanded=False):
-                    st.write(f"**Total positions returned:** {len(positions) if positions else 0}")
-                    if positions:
-                        st.write("**Sample position structure:**")
-                        # Show first position structure
-                        if len(positions) > 0:
-                            sample_pos = positions[0]
-                            st.json(sample_pos)
-                        
-                        # Show all positions with their key fields
-                        st.write("**All positions summary:**")
-                        debug_data = []
-                        for i, pos in enumerate(positions):
-                            if pos and isinstance(pos, dict):
-                                debug_data.append({
-                                    'Index': i,
-                                    'Symbol': pos.get('symbol', 'N/A'),
-                                    'Size': pos.get('size', 'N/A'),
-                                    'Contracts': pos.get('contracts', 'N/A'),
-                                    'Amount': pos.get('amount', 'N/A'),
-                                    'Side': pos.get('side', 'N/A'),
-                                    'Type': pos.get('type', 'N/A'),
-                                    'Has_Size_Key': 'size' in pos,
-                                    'All_Keys': list(pos.keys())[:10]  # First 10 keys
-                                })
-                        if debug_data:
-                            st.dataframe(pd.DataFrame(debug_data))
-                
-                # Filter only active positions (check multiple possible size fields)
-                real_positions = []
-                for pos in positions:
-                    if pos and isinstance(pos, dict):
-                        # Check different possible size fields that Bybit might use
-                        size_value = None
-                        
-                        # Try different size field names
-                        for size_field in ['size', 'contracts', 'amount', 'baseSize', 'quoteSize']:
-                            if size_field in pos and pos.get(size_field) is not None:
-                                size_value = pos[size_field]
-                                break
-                        
-                        # Also check if there's a non-zero position value
-                        if size_value is None:
-                            for value_field in ['notional', 'value', 'positionValue']:
-                                if value_field in pos and pos.get(value_field) is not None:
-                                    val = pos[value_field]
-                                    if val != 0:
-                                        size_value = val
-                                        break
-                        
-                        # Consider position active if size_value exists and is not zero
-                        if size_value is not None and size_value != 0:
-                            real_positions.append(pos)
-                
-                if real_positions:
-                    positions_data = {
-                        'Symbol': [pos.get('symbol', 'N/A') for pos in real_positions],
-                        'Side': [pos.get('side', 'N/A').upper() if pos.get('side') else 'N/A' for pos in real_positions],
-                        'Size': [pos.get('size', 0) for pos in real_positions],
-                        'Entry Price': [f"${pos.get('entryPrice', 0):.2f}" if pos.get('entryPrice') else 'N/A' for pos in real_positions],
-                        'Current Price': [f"${pos.get('markPrice', 0):.2f}" if pos.get('markPrice') else 'N/A' for pos in real_positions],
-                        'P&L': [f"${pos.get('unrealizedPnl', 0):.2f}" if pos.get('unrealizedPnl') is not None else 'N/A' for pos in real_positions],
-                        'P&L %': [f"{pos.get('percentage', 0):.2f}%" if pos.get('percentage') is not None else 'N/A' for pos in real_positions]
-                    }
-                    
-                    st.dataframe(pd.DataFrame(positions_data), use_container_width=True)
-                    
-                    # Show account info with clear mode indication
-                    if bybit_config.testnet:
-                        st.success(f"🧪 **TESTNET MODE** - Virtual money trading")
-                        st.info(f"✅ Found {len(real_positions)} active position(s) on testnet")
-                    else:
-                        st.error(f"🔴 **PRODUCTION MODE** - Real money trading active!")
-                        st.warning(f"💰 Found {len(real_positions)} active position(s) with real money")
-                        
-                else:
-                    st.info("✅ **No open positions found in your Bybit account.**")
-                    # Show account mode clearly
-                    if bybit_config.testnet:
-                        st.success(f"🧪 **TESTNET MODE** - Connected to Bybit testnet")
-                    else:
-                        st.error(f"🔴 **PRODUCTION MODE** - Connected to Bybit live trading!")
-                        
-            except KeyError as key_error:
-                st.error(f"❌ **Data Format Error:** Expected field '{str(key_error)}' not found in position data.")
-                st.warning("⚠️ **Note:** This may indicate a change in Bybit API response format or connection issue.")
-                st.info("**Troubleshooting:**")
-                st.info("• Try refreshing the page")
-                st.info("• Check if your API keys have correct permissions")
-                st.info("• Verify network connection")
-                
-            except Exception as api_error:
-                error_msg = str(api_error)
-                st.error(f"❌ **Failed to fetch positions from Bybit:** {error_msg}")
-                
-                # Provide specific error guidance
-                if "10003" in error_msg or "API key is invalid" in error_msg:
-                    st.error("**API Key Error:** Your API key is invalid or expired")
-                    st.info("**Solution:** Update your API key in Configuration page")
-                elif "10004" in error_msg:
-                    st.error("**API Secret Error:** Your API secret is invalid")
-                    st.info("**Solution:** Update your API secret in Configuration page")
-                elif "10005" in error_msg:
-                    st.error("**Permission Error:** API key lacks required permissions")
-                    st.info("**Solution:** Enable Account Read and Position Read permissions")
-                elif "network" in error_msg.lower():
-                    st.error("**Network Error:** Connection to Bybit failed")
-                    st.info("**Solution:** Check your internet connection")
-                else:
-                    st.warning("⚠️ **Note:** This may indicate API key issues or network problems.")
-                
-                # Show current mode and troubleshooting info
-                mode_text = "🧪 Testnet" if bybit_config.testnet else "🔴 Production"
-                st.info(f"**Current Mode:** {mode_text}")
-                st.info("**General Troubleshooting:**")
-                st.info("• Verify your API key and secret are correct")
-                st.info(f"• Ensure API keys match your selected mode ({'testnet' if bybit_config.testnet else 'production'})")
-                st.info("• Check that API keys have required permissions (Account Read, Position Read)")
-                st.info("• Test connection in Configuration page first")
-                    
-        except ImportError as e:
-            st.error(f"❌ **Import error:** {e}")
-            st.warning("⚠️ **Missing Dependencies:** Some required packages are not available for live trading.")
-            st.info("💡 Try reinstalling the application or check your Python environment.")
-            st.code("pip install ccxt")
-        except Exception as e:
-            st.error(f"❌ **Error fetching positions:** {e}")
-            st.warning("⚠️ **Connection Issue:** Unable to connect to Bybit API.")
-            st.info("💡 Check your internet connection and API configuration.")
+        # Display positions using background cache (no blocking, no spinner)
+        self._ensure_positions_cache()
+        # If user requested refresh or cache empty, start background fetch
+        if st.session_state.bybit_positions_refresh_requested or not st.session_state.bybit_positions_cache:
+            self.start_positions_fetch(force=True)
+        else:
+            # Start periodic background fetch only if not already fetching
+            self.start_positions_fetch(force=False)
+        
+        # Show last updated info
+        last_updated = st.session_state.bybit_positions_updated_at
+        if last_updated:
+            st.caption(f"Last updated: {last_updated.strftime('%Y-%m-%d %H:%M:%S')}")
+        else:
+            st.caption("Positions are being fetched in the background…")
+        
+        cache = st.session_state.bybit_positions_cache or []
+        if cache and isinstance(cache, list) and isinstance(cache[0], dict) and 'error' in cache[0]:
+            st.error(f"❌ Failed to fetch positions: {cache[0]['error']}")
+        elif cache:
+            # Prepare display
+            positions_data = {
+                'Symbol': [pos.get('symbol', 'N/A') for pos in cache],
+                'Side': [pos.get('side', 'N/A').upper() if pos.get('side') else 'N/A' for pos in cache],
+                'Size': [pos.get('size', 0) for pos in cache],
+                'Entry Price': [f"${pos.get('entryPrice', 0):.2f}" if pos.get('entryPrice') else 'N/A' for pos in cache],
+                'Current Price': [f"${pos.get('markPrice', 0):.2f}" if pos.get('markPrice') else 'N/A' for pos in cache],
+                'P&L': [f"${pos.get('unrealizedPnl', 0):.2f}" if pos.get('unrealizedPnl') is not None else 'N/A' for pos in cache],
+                'P&L %': [f"{pos.get('percentage', 0):.2f}%" if pos.get('percentage') is not None else 'N/A' for pos in cache]
+            }
+            st.dataframe(pd.DataFrame(positions_data), use_container_width=True)
+            # Mode info
+            if st.session_state.config.get('bybit_testnet', True):
+                st.success("🧪 TESTNET MODE")
+            else:
+                st.error("🔴 PRODUCTION MODE")
+        else:
+            if st.session_state.bybit_positions_fetch_in_progress:
+                st.info("Fetching positions in the background… This will not block the UI.")
+            else:
+                st.info("No managed positions found.")
         
         # Add logs panel at the bottom
         st.markdown("---")
@@ -2128,12 +2301,17 @@ class StreamlitGUI:
     
     def test_connection(self):
         """Test API connection"""
-        # Reload configuration from database to get latest API keys
-        fresh_config = self.load_default_config()
+        # Ensure configuration is loaded from database first
+        try:
+            st.session_state.config['database_loaded'] = False
+            self.load_database_config()
+        except Exception:
+            pass
+        fresh_config = dict(st.session_state.config)
         
-        if not fresh_config['bybit_api_key']:
-            st.error("❌ Please configure API keys first!")
-            return
+        # Allow test to proceed but inform user if keys missing
+        if not fresh_config.get('bybit_api_key') or not fresh_config.get('bybit_api_secret'):
+            st.warning("⚠️ No API keys found in database or environment. Attempting limited connection test...")
         
         with st.spinner("Testing connection..."):
             try:
@@ -2147,8 +2325,6 @@ class StreamlitGUI:
                 if success:
                     st.success("✅ Connection successful! All components working.")
                     st.session_state.bot_status = 'testing'
-                    # Update session state with fresh config
-                    st.session_state.config = fresh_config
                 else:
                     st.error("❌ Connection test failed. Check your API keys and network connection.")
                     
@@ -2169,121 +2345,21 @@ INITIAL_CAPITAL={config['initial_capital']}
 RISK_PER_TRADE={config['risk_per_trade']}
 MAX_DAILY_LOSS={config['max_daily_loss']}
 MAX_DRAWDOWN={config['max_drawdown']}
+FUTURES_MODE={str(config.get('futures_mode', True)).lower()}
+LEVERAGE={config.get('leverage', 2)}
+USE_KELLY={str(config.get('use_kelly', False)).lower()}
+KELLY_CAP={config.get('kelly_cap', 0.03)}
+VAR_THRESHOLD={config.get('var_threshold', 0.05)}
+MAX_SYMBOL_EXPOSURE_PCT={config.get('max_symbol_exposure_pct', 0.5)}
 """
     
     
     def render_logs_panel(self):
-        """Render logs panel"""
-        # Logs panel header
+        """Render logs panel - disabled per requirements to remove GUI logs"""
         st.markdown("### 📋 Application Logs")
-        
-        # Log controls
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            level_options = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-            selected_levels = st.multiselect(
-                "Log Levels",
-                options=level_options,
-                default=st.session_state.log_level_filter,
-                key="log_level_select"
-            )
-            st.session_state.log_level_filter = selected_levels
-        
-        with col2:
-            module_filter = st.selectbox(
-                "Filter by Module",
-                options=['all', 'bybit', 'trading', 'api'],
-                index=['all', 'bybit', 'trading', 'api'].index(st.session_state.log_module_filter),
-                key="log_module_select"
-            )
-            st.session_state.log_module_filter = module_filter
-        
-        with col3:
-            log_limit = st.number_input(
-                "Show last N logs",
-                min_value=10,
-                max_value=500,
-                value=50,
-                step=10,
-                key="log_limit"
-            )
-        
-        with col4:
-            if st.button("🗑️ Clear Logs", key="clear_logs"):
-                if hasattr(st.session_state, 'log_handler'):
-                    st.session_state.log_handler.clear_logs()
-                st.rerun()
-        
-        # Auto-refresh toggle
-        auto_refresh = st.checkbox("🔄 Auto-refresh (5s)", value=True, key="auto_refresh_logs")
-        
-        # Get filtered logs
-        if hasattr(st.session_state, 'log_handler'):
-            module_filter_param = None if module_filter == 'all' else module_filter
-            logs = st.session_state.log_handler.get_logs(
-                level_filter=selected_levels if selected_levels else None,
-                module_filter=module_filter_param,
-                limit=log_limit
-            )
-            
-            if logs:
-                # Create logs container with styling
-                logs_container = st.container()
-                
-                with logs_container:
-                    # Add CSS styling for logs
-                    st.markdown("""
-                    <style>
-                    .log-entry {
-                        font-family: 'Courier New', monospace;
-                        font-size: 12px;
-                        padding: 2px 5px;
-                        margin: 1px 0;
-                        border-radius: 3px;
-                    }
-                    .log-debug { background-color: #f0f0f0; color: #666; }
-                    .log-info { background-color: #e8f4fd; color: #0066cc; }
-                    .log-warning { background-color: #fff3cd; color: #856404; }
-                    .log-error { background-color: #f8d7da; color: #721c24; }
-                    .log-critical { background-color: #d1ecf1; color: #0c5460; }
-                    </style>
-                    """, unsafe_allow_html=True)
-                    
-                    # Display logs in reverse chronological order (newest first)
-                    for log in reversed(logs):
-                        level_class = f"log-{log['level'].lower()}"
-                        timestamp_str = log['timestamp'].strftime("%H:%M:%S")
-                        
-                        # Highlight Bybit-related logs
-                        if 'bybit' in log['message'].lower() or 'bybit' in log['logger'].lower():
-                            icon = "🔗"
-                        elif any(keyword in log['message'].lower() for keyword in ['error', 'failed', 'exception']):
-                            icon = "❌"
-                        elif any(keyword in log['message'].lower() for keyword in ['success', 'connected', 'completed']):
-                            icon = "✅"
-                        elif any(keyword in log['message'].lower() for keyword in ['position', 'trade', 'entry', 'exit']):
-                            icon = "📈"
-                        else:
-                            icon = "ℹ️"
-                        
-                        log_html = f"""
-                        <div class="log-entry {level_class}">
-                            {icon} <strong>[{timestamp_str}]</strong> 
-                            <span style="color: #666;">{log['logger']}:</span> 
-                            {log['message']}
-                        </div>
-                        """
-                        st.markdown(log_html, unsafe_allow_html=True)
-            else:
-                st.info("📭 No logs match the current filters.")
-        else:
-            st.warning("⚠️ Log handler not initialized. Restart the application to enable logging.")
-        
-        # Auto-refresh functionality
-        if auto_refresh:
-            time.sleep(0.1)  # Small delay to prevent excessive refreshing
-            st.rerun()
+        st.info("GUI log display is disabled in this build to improve performance and avoid flickering.")
+        st.caption("Logs are still recorded internally where applicable. Use external monitoring or console logs if needed.")
+        return
     
     def render_api_key_management(self, api_repo):
         """Render API key management interface"""

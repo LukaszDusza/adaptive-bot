@@ -50,6 +50,7 @@ from strategies.consolidation_strategy import ConsolidationStrategy, SignalType 
 from strategies.trend_strategy import TrendStrategy, TrendSignalType
 from core.risk_manager import RiskManager, PositionSide, Position
 from indicators.technical import TechnicalIndicators
+from core.portfolio_sync import integrate_backtest_results
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -307,18 +308,42 @@ class VectorbtAdaptiveEngine:
         )
         
         # Create results object
+        # Note: vectorbt doesn't have underwater() method on drawdowns
+        # We can calculate underwater curve manually or use alternative approach
+        try:
+            # Calculate underwater curve manually from equity curve
+            equity_curve = portfolio.value()
+            running_max = equity_curve.expanding().max()
+            underwater_curve = (equity_curve - running_max) / running_max
+        except Exception:
+            # Fallback to empty series if calculation fails
+            underwater_curve = pd.Series(0.0, index=portfolio.value().index)
+        
         results = VectorbtResults(
             portfolio=portfolio,
             returns=portfolio.returns(),
-            equity_curve=portfolio.value(),
+            equity_curve=equity_curve,
             trades=portfolio.trades.records_readable,
             metrics={},
             regime_performance=regime_performance,
             drawdowns=portfolio.drawdowns.records_readable,
-            underwater_curve=portfolio.drawdowns.underwater()
+            underwater_curve=underwater_curve
         )
         
         logger.info(f"Backtest completed: {len(results.trades)} trades executed")
+        
+        # Integrate results with portfolio synchronization
+        try:
+            integrate_backtest_results(
+                results=results,
+                symbol=symbol,
+                strategy="adaptive_bot",  # Could be made configurable
+                timeframe="15m"  # Could be made configurable
+            )
+            logger.info(f"Backtest results integrated with portfolio synchronization for {symbol}")
+        except Exception as e:
+            logger.warning(f"Failed to integrate backtest results with portfolio sync: {e}")
+        
         return results
     
     def _calculate_regime_performance(

@@ -8,6 +8,12 @@ Includes Stochastic Oscillator for consolidation strategy and DMI system for tre
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
+try:
+    import talib
+    TALIB_AVAILABLE = True
+except ImportError:
+    TALIB_AVAILABLE = False
+    print("Warning: TA-Lib not available. Some indicators may not work.")
 from typing import Dict, Tuple, Optional
 from dataclasses import dataclass
 
@@ -442,6 +448,210 @@ class TechnicalIndicators:
         data = self.dmi_system(data)
         data = self.volume_confirmation(data)
         data = self.ema_filter(data)
+        
+        # Add TA-Lib enhanced indicators
+        data = self.talib_rsi(data)
+        data = self.talib_macd(data)
+        data = self.talib_bbands(data)
+        data = self.talib_adx(data)
+        
+        return data
+    
+    def talib_rsi(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+        """
+        Calculate RSI using TA-Lib for enhanced accuracy.
+        
+        Args:
+            df: DataFrame with OHLC data
+            period: RSI period
+            
+        Returns:
+            DataFrame with TA-Lib RSI
+        """
+        data = df.copy()
+        
+        if TALIB_AVAILABLE and len(data) >= period:
+            try:
+                data[f'talib_rsi_{period}'] = talib.RSI(data['close'].values, timeperiod=period)
+                # Add signal zones
+                data['rsi_oversold'] = data[f'talib_rsi_{period}'] < 30
+                data['rsi_overbought'] = data[f'talib_rsi_{period}'] > 70
+                data['rsi_divergence_bullish'] = (
+                    (data[f'talib_rsi_{period}'] > data[f'talib_rsi_{period}'].shift(1)) &
+                    (data['close'] < data['close'].shift(1))
+                )
+                data['rsi_divergence_bearish'] = (
+                    (data[f'talib_rsi_{period}'] < data[f'talib_rsi_{period}'].shift(1)) &
+                    (data['close'] > data['close'].shift(1))
+                )
+            except Exception as e:
+                print(f"TA-Lib RSI calculation failed: {e}")
+                data[f'talib_rsi_{period}'] = np.nan
+        else:
+            # Fallback to pandas-ta
+            data[f'talib_rsi_{period}'] = ta.rsi(data['close'], length=period)
+        
+        return data
+    
+    def talib_macd(self, df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
+        """
+        Calculate MACD using TA-Lib for enhanced accuracy.
+        
+        Args:
+            df: DataFrame with OHLC data
+            fast: Fast EMA period
+            slow: Slow EMA period  
+            signal: Signal line period
+            
+        Returns:
+            DataFrame with TA-Lib MACD
+        """
+        data = df.copy()
+        
+        if TALIB_AVAILABLE and len(data) >= slow:
+            try:
+                macd_line, macd_signal, macd_hist = talib.MACD(
+                    data['close'].values, 
+                    fastperiod=fast, 
+                    slowperiod=slow, 
+                    signalperiod=signal
+                )
+                data['talib_macd'] = macd_line
+                data['talib_macd_signal'] = macd_signal
+                data['talib_macd_histogram'] = macd_hist
+                
+                # Add crossover signals
+                data['macd_bullish_cross'] = (
+                    (data['talib_macd'] > data['talib_macd_signal']) &
+                    (data['talib_macd'].shift(1) <= data['talib_macd_signal'].shift(1))
+                )
+                data['macd_bearish_cross'] = (
+                    (data['talib_macd'] < data['talib_macd_signal']) &
+                    (data['talib_macd'].shift(1) >= data['talib_macd_signal'].shift(1))
+                )
+                data['macd_zero_cross_up'] = (
+                    (data['talib_macd'] > 0) & (data['talib_macd'].shift(1) <= 0)
+                )
+                data['macd_zero_cross_down'] = (
+                    (data['talib_macd'] < 0) & (data['talib_macd'].shift(1) >= 0)
+                )
+            except Exception as e:
+                print(f"TA-Lib MACD calculation failed: {e}")
+                data['talib_macd'] = np.nan
+                data['talib_macd_signal'] = np.nan
+                data['talib_macd_histogram'] = np.nan
+        else:
+            # Fallback to pandas-ta
+            macd_result = ta.macd(data['close'], fast=fast, slow=slow, signal=signal)
+            if macd_result is not None:
+                data['talib_macd'] = macd_result[f'MACD_{fast}_{slow}_{signal}']
+                data['talib_macd_signal'] = macd_result[f'MACDs_{fast}_{slow}_{signal}']
+                data['talib_macd_histogram'] = macd_result[f'MACDh_{fast}_{slow}_{signal}']
+        
+        return data
+    
+    def talib_bbands(self, df: pd.DataFrame, period: int = 20, std: float = 2.0) -> pd.DataFrame:
+        """
+        Calculate Bollinger Bands using TA-Lib for enhanced accuracy.
+        
+        Args:
+            df: DataFrame with OHLC data
+            period: Moving average period
+            std: Standard deviation multiplier
+            
+        Returns:
+            DataFrame with TA-Lib Bollinger Bands
+        """
+        data = df.copy()
+        
+        if TALIB_AVAILABLE and len(data) >= period:
+            try:
+                upper, middle, lower = talib.BBANDS(
+                    data['close'].values, 
+                    timeperiod=period, 
+                    nbdevup=std, 
+                    nbdevdn=std, 
+                    matype=0
+                )
+                data['talib_bb_upper'] = upper
+                data['talib_bb_middle'] = middle
+                data['talib_bb_lower'] = lower
+                
+                # Convert numpy arrays to pandas Series for proper shift operations
+                upper_series = pd.Series(upper, index=data.index)
+                middle_series = pd.Series(middle, index=data.index)
+                lower_series = pd.Series(lower, index=data.index)
+                
+                # Add BB signals
+                data['bb_squeeze'] = (upper_series - lower_series) / middle_series < 0.1  # Band squeeze
+                data['bb_expansion'] = (upper_series - lower_series) / middle_series > 0.15  # Band expansion
+                data['bb_upper_touch'] = data['close'] >= upper_series * 0.99
+                data['bb_lower_touch'] = data['close'] <= lower_series * 1.01
+                data['bb_middle_cross_up'] = (
+                    (data['close'] > middle_series) & (data['close'].shift(1) <= middle_series.shift(1))
+                )
+                data['bb_middle_cross_down'] = (
+                    (data['close'] < middle_series) & (data['close'].shift(1) >= middle_series.shift(1))
+                )
+                
+                # %B indicator
+                data['bb_percent_b'] = (data['close'] - lower_series) / (upper_series - lower_series)
+                
+            except Exception as e:
+                print(f"TA-Lib Bollinger Bands calculation failed: {e}")
+                data['talib_bb_upper'] = np.nan
+                data['talib_bb_middle'] = np.nan
+                data['talib_bb_lower'] = np.nan
+        else:
+            # Fallback to pandas-ta
+            bb_result = ta.bbands(data['close'], length=period, std=std)
+            if bb_result is not None:
+                data['talib_bb_upper'] = bb_result[f'BBU_{period}_{std}']
+                data['talib_bb_middle'] = bb_result[f'BBM_{period}_{std}']
+                data['talib_bb_lower'] = bb_result[f'BBL_{period}_{std}']
+        
+        return data
+    
+    def talib_adx(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+        """
+        Calculate ADX using TA-Lib for enhanced accuracy.
+        
+        Args:
+            df: DataFrame with OHLC data
+            period: ADX period
+            
+        Returns:
+            DataFrame with TA-Lib ADX
+        """
+        data = df.copy()
+        
+        if TALIB_AVAILABLE and len(data) >= period:
+            try:
+                adx = talib.ADX(data['high'].values, data['low'].values, data['close'].values, timeperiod=period)
+                plus_di = talib.PLUS_DI(data['high'].values, data['low'].values, data['close'].values, timeperiod=period)
+                minus_di = talib.MINUS_DI(data['high'].values, data['low'].values, data['close'].values, timeperiod=period)
+                
+                data[f'talib_adx_{period}'] = adx
+                data[f'talib_plus_di_{period}'] = plus_di
+                data[f'talib_minus_di_{period}'] = minus_di
+                
+                # Add trend strength classification
+                data['adx_trend_weak'] = adx < 25
+                data['adx_trend_strong'] = adx > 50
+                data['adx_trend_very_strong'] = adx > 75
+                
+            except Exception as e:
+                print(f"TA-Lib ADX calculation failed: {e}")
+                data[f'talib_adx_{period}'] = np.nan
+                data[f'talib_plus_di_{period}'] = np.nan
+                data[f'talib_minus_di_{period}'] = np.nan
+        else:
+            # Fallback to pandas-ta
+            adx_result = ta.adx(data['high'], data['low'], data['close'], length=period)
+            if adx_result is not None:
+                data[f'talib_adx_{period}'] = adx_result[f'ADX_{period}']
+                data[f'talib_plus_di_{period}'] = adx_result[f'DMP_{period}']
+                data[f'talib_minus_di_{period}'] = adx_result[f'DMN_{period}']
         
         return data
     
