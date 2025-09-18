@@ -15,10 +15,10 @@ The bot implements a four-state market regime classification with adaptive strat
 - Panic: Very high volatility (trading disabled)
 
 Usage:
-    python main.py --mode demo           # Demo with sample data (legacy)
-    python main.py --mode backtest       # Vectorbt backtesting with real data
-    python main.py --mode live           # Live trading on Bybit
-    python main.py --mode test           # Test connections and components
+    python trading_model.py --mode demo           # Demo with sample data (legacy)
+    python trading_model.py --mode backtest       # Vectorbt backtesting with real data
+    python trading_model.py --mode live           # Live trading on Bybit
+    python trading_model.py --mode test           # Test connections and components
 """
 
 # Apply comprehensive vectorbt fixes BEFORE any other imports
@@ -601,10 +601,10 @@ async def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python main.py --mode test          # Test all connections
-  python main.py --mode demo          # Legacy demo mode
-  python main.py --mode backtest      # High-performance backtesting
-  python main.py --mode live          # Live trading
+  python trading_model.py --mode test          # Test all connections
+  python trading_model.py --mode demo          # Legacy demo mode
+  python trading_model.py --mode backtest      # High-performance backtesting
+  python trading_model.py --mode live          # Live trading
 
 Environment Variables:
   BYBIT_API_KEY         - Bybit API key
