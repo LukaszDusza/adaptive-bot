@@ -167,9 +167,9 @@ def train_model(args):
 
     plot_feature_importance(model, feature_names, args.strategy)
 
-    model_filename = f'trading_model_{args.strategy}.joblib'
-    scaler_filename = f'scaler_{args.strategy}.joblib'
-    features_filename = f'feature_names_{args.strategy}.json'
+    model_filename = f'trading_model_{args.ticker}_{args.strategy}.joblib'
+    scaler_filename = f'scaler_{args.ticker}_{args.strategy}.joblib'
+    features_filename = f'feature_names_{args.ticker}_{args.strategy}.json'
     joblib.dump(model, model_filename)
     joblib.dump(scaler, scaler_filename)
     with open(features_filename, 'w') as f:
@@ -183,6 +183,7 @@ if __name__ == "__main__":
     parser.add_argument("--data-file", type=str, required=True)
     parser.add_argument("--start-date", type=str, required=True)
     parser.add_argument("--end-date", type=str, required=True)
+    parser.add_argument("--ticker", type=str, required=True)
 
     args = parser.parse_args()
     train_model(args)
