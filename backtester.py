@@ -6,28 +6,21 @@ import os
 import argparse
 import mplfinance as mpf
 from pathlib import Path
-# Krok 1: Importujemy nasz centralny procesor danych
 from data_processor import process_data_from_single_csv
 
-# Ignorowanie ostrzeżeń z biblioteki mplfinance
 warnings.filterwarnings('ignore', category=UserWarning)
 
 
 # --- Funkcja do tworzenia wykresów (bez zmian) ---
-def plot_trade(trade_info, ohlc_data, strategy, trade_number, chart_dir, ticker, tp_percent, sl_percent):
+def plot_trade(trade_info, ohlc_data, strategy, trade_number, chart_dir, ticker):
     entry_date = trade_info['entry_date']
     exit_date = trade_info['exit_date']
     entry_price = trade_info['entry_price']
     exit_price = trade_info['exit_price']
     pnl = trade_info['pnl_usd']
     exit_reason = trade_info['exit_reason']
-
-    if strategy == 'long':
-        tp_price = entry_price * (1 + tp_percent)
-        sl_price = entry_price * (1 - sl_percent)
-    else:  # short
-        tp_price = entry_price * (1 - tp_percent)
-        sl_price = entry_price * (1 + sl_percent)
+    tp_price = trade_info['tp_price']
+    sl_price = trade_info['sl_price']
 
     try:
         entry_idx = ohlc_data.index.get_loc(entry_date)
@@ -67,127 +60,182 @@ def plot_trade(trade_info, ohlc_data, strategy, trade_number, chart_dir, ticker,
              addplot=addplots, hlines=hlines, figscale=1.5, savefig=filename)
 
 
-# --- Główna funkcja backtestera ---
+# --- Główna funkcja backtestera (PRZEBUDOWANA LOGIKA) ---
 def run_backtest(args):
-    model_path = Path(args.model_file)
-    scaler_path = Path(args.scaler_file)
+    print(f"--- Uruchamianie Realistycznego Backtestera AI dla {args.ticker.upper()} ---")
 
-    # Automatyczne wykrywanie strategii ('long' lub 'short') na podstawie nazwy pliku modelu
-    if 'long' in model_path.stem.lower():
-        strategy = 'long'
-    elif 'short' in model_path.stem.lower():
-        strategy = 'short'
-    else:
-        strategy = 'unknown'
-
-    # Wyprowadzenie ścieżki do pliku z cechami, jeśli nie została podana
-    if args.features_file:
-        features_path = Path(args.features_file)
-    else:
-        base_name = model_path.stem
-        features_path = model_path.with_name(f"{base_name.replace('trading_model', 'feature_names')}.json")
-
-    print(f"--- Uruchamianie Uniwersalnego Backtestera AI ---")
-    print(f"Ticker: {args.ticker.upper()} | Strategia: {strategy.upper()}")
-
-    output_dir_name = f"backtest_results_{args.ticker}_{model_path.stem}"
+    output_dir_name = f"backtest_results_{args.ticker}"
     chart_dir = os.path.join(output_dir_name, 'charts')
     os.makedirs(chart_dir, exist_ok=True)
-    trades_log_filename = os.path.join(output_dir_name, f'trades_log.csv')
+    trades_log_filename = os.path.join(output_dir_name, 'trades_log.csv')
 
     try:
-        model = joblib.load(model_path)
-        scaler = joblib.load(scaler_path)
-        with open(features_path, 'r') as f:
+        model_long = joblib.load(args.model_long)
+        scaler_long = joblib.load(args.scaler_long)
+        model_short = joblib.load(args.model_short)
+        scaler_short = joblib.load(args.scaler_short)
+        with open(args.features_file, 'r') as f:
             expected_features = json.load(f)
     except FileNotFoundError as e:
         print(f"BŁĄD: Nie znaleziono wymaganego pliku: {e.filename}.")
         return
 
-    # Krok 2: Przygotowujemy dane do backtestu, używając tej samej funkcji co trener
     print("Wczytywanie i przygotowywanie danych do backtestu...")
     backtest_data = process_data_from_single_csv(args.data_file, args.start_date, args.end_date)
-
     if backtest_data is None or backtest_data.empty:
         print("Nie udało się przygotować danych do backtestu. Przerywanie.")
         return
 
-    # Upewnienie się, że mamy wszystkie potrzebne kolumny
-    if not all(feature in backtest_data.columns for feature in expected_features):
-        print("BŁĄD: W przygotowanych danych brakuje niektórych cech wymaganych przez model.")
-        return
-
+    print("Generowanie predykcji dla obu modeli...")
     X_test = backtest_data[expected_features]
-    X_test_scaled = scaler.transform(X_test)
-    predictions = model.predict(X_test_scaled)
-    y_map = {0: -1, 1: 0, 2: 1}  # 0->Hold/Sell, 1->Neutral, 2->Buy
-    backtest_data['signal'] = [y_map[p] for p in predictions]
 
-    # --- Pętla symulacji i wyniki (bez zmian) ---
-    print(f"Uruchamianie symulacji dla strategii {strategy.upper()}...")
+    # Predykcje dla LONG
+    pred_numeric_long = model_long.predict(scaler_long.transform(X_test))
+    pred_proba_long = model_long.predict_proba(scaler_long.transform(X_test))
+
+    # Predykcje dla SHORT
+    pred_numeric_short = model_short.predict(scaler_short.transform(X_test))
+    pred_proba_short = model_short.predict_proba(scaler_short.transform(X_test))
+
+    # Tłumaczenie predykcji na akcje i pewność
+    actions_long, confs_long = [], []
+    for i in range(len(pred_numeric_long)):
+        num = pred_numeric_long[i]
+        action = "DO_NOTHING"
+        if num == 2:
+            action = "ENTER_LONG"
+        elif num == 0:
+            action = "EXIT_LONG"
+        actions_long.append(action)
+        confs_long.append(pred_proba_long[i][num])
+
+    actions_short, confs_short = [], []
+    for i in range(len(pred_numeric_short)):
+        num = pred_numeric_short[i]
+        action = "DO_NOTHING"
+        if num == 2:
+            action = "ENTER_SHORT"
+        elif num == 0:
+            action = "EXIT_SHORT"
+        actions_short.append(action)
+        confs_short.append(pred_proba_short[i][num])
+
+    backtest_data['long_action'] = actions_long
+    backtest_data['long_confidence'] = confs_long
+    backtest_data['short_action'] = actions_short
+    backtest_data['short_confidence'] = confs_short
+
+    print("Uruchamianie symulacji...")
     detailed_trades_log = []
     current_capital = args.initial_capital
     trade_counter = 0
     i = 0
-    while i < len(backtest_data) - args.evaluation_window:
-        if backtest_data['signal'].iloc[i] == 1:
-            entry_price = backtest_data['close'].iloc[i]
-            entry_date = backtest_data.index[i]
-            risk_amount_usd = current_capital * args.risk_percent
-            position_size_usd = risk_amount_usd / args.sl_percent if args.sl_percent > 0 else float('inf')
-            trade_closed = False
-            for j in range(1, args.evaluation_window + 1):
-                future_high = backtest_data['high'].iloc[i + j]
-                future_low = backtest_data['low'].iloc[i + j]
-                exit_reason, pnl_usd, exit_price = None, 0, None
-                if strategy == 'long':
-                    sl_price = entry_price * (1 - args.sl_percent)
-                    tp_price = entry_price * (1 + args.tp_percent)
-                    if future_low <= sl_price:
-                        pnl_usd = position_size_usd * args.sl_percent * -1
-                        exit_reason, exit_price = 'Stop Loss', sl_price
-                    elif future_high >= tp_price:
-                        pnl_usd = position_size_usd * args.tp_percent
-                        exit_reason, exit_price = 'Take Profit', tp_price
-                else:
-                    sl_price = entry_price * (1 + args.sl_percent)
-                    tp_price = entry_price * (1 - args.tp_percent)
-                    if future_high >= sl_price:
-                        pnl_usd = position_size_usd * args.sl_percent * -1
-                        exit_reason, exit_price = 'Stop Loss', sl_price
-                    elif future_low <= tp_price:
-                        pnl_usd = position_size_usd * args.tp_percent
-                        exit_reason, exit_price = 'Take Profit', tp_price
-                if exit_reason:
-                    current_capital += pnl_usd
-                    trade_info = {'entry_date': entry_date, 'entry_price': entry_price,
-                                  'exit_date': backtest_data.index[i + j], 'exit_price': exit_price, 'pnl_usd': pnl_usd,
-                                  'exit_reason': exit_reason, 'capital_after_trade': current_capital}
-                    detailed_trades_log.append(trade_info)
-                    trade_counter += 1
-                    plot_trade(trade_info, backtest_data, strategy, trade_counter, chart_dir, args.ticker,
-                               args.tp_percent, args.sl_percent)
-                    trade_closed = True
-                    i += j + 1
-                    break
-            if not trade_closed:
-                exit_price = backtest_data['close'].iloc[i + args.evaluation_window]
-                pnl_percent = ((exit_price - entry_price) / entry_price) if strategy == 'long' else (
-                            (entry_price - exit_price) / entry_price)
+    while i < len(backtest_data):
+        # --- LOGIKA WEJŚCIA W POZYCJĘ (jak w trading_bot.py) ---
+        long_signal = (backtest_data['long_action'].iloc[i] == "ENTER_LONG" and
+                       backtest_data['long_confidence'].iloc[i] >= args.min_confidence)
+        short_signal = (backtest_data['short_action'].iloc[i] == "ENTER_SHORT" and
+                        backtest_data['short_confidence'].iloc[i] >= args.min_confidence)
+
+        enter_trade = False
+        strategy = None
+
+        if long_signal and short_signal:
+            if backtest_data['long_confidence'].iloc[i] > backtest_data['short_confidence'].iloc[i]:
+                enter_trade, strategy = True, 'long'
+            else:
+                enter_trade, strategy = True, 'short'
+        elif long_signal:
+            enter_trade, strategy = True, 'long'
+        elif short_signal:
+            enter_trade, strategy = True, 'short'
+
+        if not enter_trade:
+            i += 1
+            continue
+
+        # --- SYMULACJA OTWARTEJ TRANSAKCJI ---
+        entry_price = backtest_data['close'].iloc[i]
+        entry_date = backtest_data.index[i]
+
+        atr_value = backtest_data['ATRr_14_1h'].iloc[i]
+        tp_price, sl_price = 0, 0
+        if strategy == 'long':
+            tp_price = entry_price + (atr_value * args.atr_profit_multiplier)
+            sl_price = entry_price - (atr_value * args.atr_loss_multiplier)
+            exit_signal_action = "EXIT_LONG"
+        else:  # short
+            tp_price = entry_price - (atr_value * args.atr_profit_multiplier)
+            sl_price = entry_price + (atr_value * args.atr_loss_multiplier)
+            exit_signal_action = "EXIT_SHORT"
+
+        trade_closed = False
+        for j in range(1, args.evaluation_window + 1):
+            if i + j >= len(backtest_data): break
+
+            future_high = backtest_data['high'].iloc[i + j]
+            future_low = backtest_data['low'].iloc[i + j]
+            exit_date = backtest_data.index[i + j]
+            exit_reason, pnl_usd, exit_price = None, 0, None
+
+            # 1. Sprawdź TP/SL
+            if strategy == 'long':
+                if future_low <= sl_price:
+                    exit_reason, exit_price = 'Stop Loss', sl_price
+                elif future_high >= tp_price:
+                    exit_reason, exit_price = 'Take Profit', tp_price
+            else:  # short
+                if future_high >= sl_price:
+                    exit_reason, exit_price = 'Stop Loss', sl_price
+                elif future_low <= tp_price:
+                    exit_reason, exit_price = 'Take Profit', tp_price
+
+            # 2. Sprawdź sygnał wyjścia z modelu
+            if not exit_reason:
+                action_check = backtest_data[f'{strategy}_action'].iloc[i + j]
+                conf_check = backtest_data[f'{strategy}_confidence'].iloc[i + j]
+                if action_check == exit_signal_action and conf_check >= args.min_confidence:
+                    exit_reason = "Model Exit"
+                    exit_price = backtest_data['close'].iloc[i + j]
+
+            if exit_reason:
+                pnl_percent = (exit_price - entry_price) / entry_price if strategy == 'long' else (
+                                                                                                              entry_price - exit_price) / entry_price
+                position_size_usd = (current_capital * args.risk_percent) / (abs(entry_price - sl_price) / entry_price)
                 pnl_usd = position_size_usd * pnl_percent
+
                 current_capital += pnl_usd
-                trade_info = {'entry_date': entry_date, 'entry_price': entry_price,
-                              'exit_date': backtest_data.index[i + args.evaluation_window], 'exit_price': exit_price,
-                              'pnl_usd': pnl_usd, 'exit_reason': 'Time Exit', 'capital_after_trade': current_capital}
+                trade_info = {'entry_date': entry_date, 'entry_price': entry_price, 'exit_date': exit_date,
+                              'exit_price': exit_price, 'pnl_usd': pnl_usd, 'exit_reason': exit_reason,
+                              'capital_after_trade': current_capital, 'tp_price': tp_price, 'sl_price': sl_price}
                 detailed_trades_log.append(trade_info)
                 trade_counter += 1
-                plot_trade(trade_info, backtest_data, strategy, trade_counter, chart_dir, args.ticker, args.tp_percent,
-                           args.sl_percent)
-                i += args.evaluation_window + 1
-        else:
-            i += 1
+                plot_trade(trade_info, backtest_data, strategy, trade_counter, chart_dir, args.ticker)
 
-    print(f"\n--- WYNIKI SYMULACJI STRATEGII {strategy.upper()} DLA {args.ticker.upper()} ---")
+                trade_closed = True
+                i += (j + 1)
+                break
+
+        if not trade_closed:  # 3. Wyjście czasowe
+            exit_idx = min(i + args.evaluation_window, len(backtest_data) - 1)
+            exit_price = backtest_data['close'].iloc[exit_idx]
+            exit_date = backtest_data.index[exit_idx]
+            pnl_percent = (exit_price - entry_price) / entry_price if strategy == 'long' else (
+                                                                                                          entry_price - exit_price) / entry_price
+            position_size_usd = (current_capital * args.risk_percent) / (abs(entry_price - sl_price) / entry_price)
+            pnl_usd = position_size_usd * pnl_percent
+
+            current_capital += pnl_usd
+            trade_info = {'entry_date': entry_date, 'entry_price': entry_price, 'exit_date': exit_date,
+                          'exit_price': exit_price, 'pnl_usd': pnl_usd, 'exit_reason': 'Time Exit',
+                          'capital_after_trade': current_capital, 'tp_price': tp_price, 'sl_price': sl_price}
+            detailed_trades_log.append(trade_info)
+            trade_counter += 1
+            plot_trade(trade_info, backtest_data, strategy, trade_counter, chart_dir, args.ticker)
+            i += (args.evaluation_window + 1)
+
+    # --- Prezentacja wyników (bez zmian) ---
+    print(f"\n--- WYNIKI SYMULACJI DLA {args.ticker.upper()} ---")
     if not detailed_trades_log:
         print("W okresie testowym model nie wygenerował żadnej transakcji.")
         return
@@ -217,30 +265,28 @@ def run_backtest(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Uniwersalny backtester dla strategii tradingowych AI.")
+    parser = argparse.ArgumentParser(description="Realistyczny backtester dla strategii tradingowych AI.")
 
-    # Krok 3: Aktualizujemy listę argumentów
-    parser.add_argument("--data-file", type=str, required=True,
-                        help="Ścieżka do pliku CSV z surowymi danymi historycznymi.")
-    parser.add_argument("--start-date", type=str, required=True,
-                        help="Data początkowa dla danych do backtestu (format: RRRR-MM-DD).")
-    parser.add_argument("--end-date", type=str, required=True,
-                        help="Data końcowa dla danych do backtestu (format: RRRR-MM-DD).")
+    # Argumenty Danych i Modeli
+    parser.add_argument("--data-file", type=str, required=True, help="Ścieżka do pliku CSV z danymi historycznymi.")
+    parser.add_argument("--start-date", type=str, required=True, help="Data początkowa (RRRR-MM-DD).")
+    parser.add_argument("--end-date", type=str, required=True, help="Data końcowa (RRRR-MM-DD).")
+    parser.add_argument("--model-long", type=str, required=True, help="Ścieżka do modelu LONG .joblib.")
+    parser.add_argument("--scaler-long", type=str, required=True, help="Ścieżka do scalera LONG .joblib.")
+    parser.add_argument("--model-short", type=str, required=True, help="Ścieżka do modelu SHORT .joblib.")
+    parser.add_argument("--scaler-short", type=str, required=True, help="Ścieżka do scalera SHORT .joblib.")
+    parser.add_argument("--features-file", type=str, required=True, help="Ścieżka do pliku .json z listą cech.")
+    parser.add_argument("--ticker", type=str, default="ASSET", help="Nazwa tickera do celów opisowych.")
 
-    parser.add_argument("--model-file", type=str, required=True, help="Ścieżka do wytrenowanego modelu .joblib.")
-    parser.add_argument("--scaler-file", type=str, required=True, help="Ścieżka do dopasowanego scalera .joblib.")
-    parser.add_argument("--features-file", type=str, help="(Opcjonalnie) Ścieżka do pliku .json z listą cech.")
-    parser.add_argument("--ticker", type=str, default="ASSET", help="Nazwa tickera/aktywa do celów opisowych.")
-
-    # Parametry strategii
-    parser.add_argument("--initial-capital", type=float, default=10000.0, help="Kapitał początkowy symulacji.")
-    parser.add_argument("--risk-percent", type=float, default=0.02,
-                        help="Procent kapitału ryzykowany na jedną transakcję.")
-    parser.add_argument("--tp-percent", type=float, default=0.04,
-                        help="Poziom Take Profit jako procent od ceny wejścia.")
-    parser.add_argument("--sl-percent", type=float, default=0.02, help="Poziom Stop Loss jako procent od ceny wejścia.")
+    # Parametry Strategii
+    parser.add_argument("--initial-capital", type=float, default=10000.0)
+    parser.add_argument("--risk-percent", type=float, default=0.02)
+    parser.add_argument("--atr-profit-multiplier", type=float, default=2.0)
+    parser.add_argument("--atr-loss-multiplier", type=float, default=1.0)
+    parser.add_argument("--min-confidence", type=float, default=0.60,
+                        help="Minimalna pewność modelu do otwarcia pozycji.")
     parser.add_argument("--evaluation-window", type=int, default=24,
-                        help="Maksymalny czas utrzymywania pozycji w godzinach.")
+                        help="Maksymalny czas utrzymywania pozycji (w świecach 1h).")
 
     args = parser.parse_args()
     run_backtest(args)
