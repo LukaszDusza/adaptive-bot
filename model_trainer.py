@@ -18,7 +18,7 @@ def plot_feature_importance(model, feature_names, strategy):
     plt.title(f"Ważność Cech (Feature Importance) - Strategia: {strategy.upper()}")
     sns.barplot(x=importances[indices], y=[feature_names[i] for i in indices])
     plt.tight_layout()
-    filename = f'feature_importance_{strategy}.png'
+    filename = f'feature_{args.ticker}_importance_{strategy}.png'
     plt.savefig(filename)
     print(f"\nZapisano wykres ważności cech do pliku: {filename}")
     plt.close()
@@ -169,7 +169,7 @@ def train_model(args):
 
     model_filename = f'trading_model_{args.ticker}_{args.strategy}.joblib'
     scaler_filename = f'scaler_{args.ticker}_{args.strategy}.joblib'
-    features_filename = f'feature_names_{args.ticker}_{args.strategy}.json'
+    features_filename = f'feature_names_{args.strategy}.json'
     joblib.dump(model, model_filename)
     joblib.dump(scaler, scaler_filename)
     with open(features_filename, 'w') as f:
