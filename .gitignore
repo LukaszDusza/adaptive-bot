@@ -662,7 +662,7 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+factory_boost/.env
 .venv
 env/
 venv/

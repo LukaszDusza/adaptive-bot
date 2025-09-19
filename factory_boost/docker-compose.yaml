@@ -1,0 +1,22 @@
+services:
+  # Definicja pierwszego serwisu: serwer API z modelem
+  api_service:
+    build: .
+    command: python api_service.py
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+
+  # Definicja drugiego serwisu: bot tradingowy
+  trading_bot:
+    build: .
+    command: python trading_bot.py
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      - api_service

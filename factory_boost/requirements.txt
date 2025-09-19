@@ -1,11 +1,10 @@
 pandas
 scikit-learn
-xgboost
 joblib
-pandas-ta
-Flask
-mplfinance
-gunicorn
-pybit
 matplotlib
 seaborn
+Flask
+pybit
+schedule
+requests
+pandas-ta

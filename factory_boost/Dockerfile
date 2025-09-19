@@ -1,8 +1,14 @@
+# Używamy pełnego obrazu dla maksymalnej kompatybilności
 FROM python:3.12-slim
+
+# Ustaw folder roboczy wewnątrz kontenera
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
+
+# Skopiuj plik z zależnościami
+COPY requirements.txt requirements.txt
+
+# Zaktualizuj pip i zainstaluj wszystkie pakiety z pliku requirements.txt
+RUN pip install --upgrade pip && pip install --no-cache-dir -r requirements.txt
+
+# Skopiuj resztę kodu aplikacji
 COPY . .
-EXPOSE 5000
-CMD ["python", "-m", "gunicorn", "--bind", "0.0.0.0:5000", "api_service:app"]

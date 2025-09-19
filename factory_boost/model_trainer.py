@@ -5,93 +5,112 @@ import json
 import argparse
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import GridSearchCV  # <--- NOWY IMPORT
 from data_processor import process_data_from_single_csv
-import matplotlib.pyplot as plt  # <--- NOWY IMPORT
-import seaborn as sns  # <--- NOWY IMPORT
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
-# --- NOWA FUNKCJA DO RYSOWANIA WYKRESU ---
 def plot_feature_importance(model, feature_names, strategy):
-    """
-    Tworzy i zapisuje wykres ważności cech dla wytrenowanego modelu.
-    """
+    # ... (ta funkcja pozostaje bez zmian) ...
     importances = model.feature_importances_
     indices = np.argsort(importances)[::-1]
-
     plt.figure(figsize=(12, 16))
     plt.title(f"Ważność Cech (Feature Importance) - Strategia: {strategy.upper()}")
-    # Użyjemy seaborn dla ładniejszego wykresu
     sns.barplot(x=importances[indices], y=[feature_names[i] for i in indices])
     plt.tight_layout()
-
-    # Zapisz wykres do pliku
     filename = f'feature_importance_{strategy}.png'
     plt.savefig(filename)
     print(f"\nZapisano wykres ważności cech do pliku: {filename}")
     plt.close()
 
 
-# --- Definicje celów dla modelu (bez zmian) ---
-def define_long_target(df, in_x_bars=12, prof_tresh=0.02, loss_tresh=0.01):
+def define_long_target_dynamic(df, in_x_bars=12, atr_profit_multiplier=2.0, atr_loss_multiplier=1.0):
+    # ... (ta funkcja pozostaje bez zmian) ...
     df['y'] = 0
-    df.reset_index(inplace=True)
+    atr_col_name = 'ATRr_14_1h'
+    if atr_col_name not in df.columns:
+        print(f"BŁĄD: Brak kolumny ATR '{atr_col_name}' w danych.")
+        return df
+    high_prices = df['high'].values
+    low_prices = df['low'].values
+    close_prices = df['close'].values
+    atr_values = df[atr_col_name].values
+    y_values = df['y'].values.copy()
     for i in range(len(df) - in_x_bars):
+        entry_price = close_prices[i]
+        atr_value = atr_values[i]
+        if atr_value <= 0 or np.isnan(atr_value): continue
+        take_profit_price = entry_price + (atr_value * atr_profit_multiplier)
+        stop_loss_price = entry_price - (atr_value * atr_loss_multiplier)
         for j in range(1, in_x_bars + 1):
-            if df['high'].iloc[i + j] / df['close'].iloc[i] - 1 >= prof_tresh:
-                df.loc[i, 'y'] = 2
+            future_high, future_low = high_prices[i + j], low_prices[i + j]
+            if future_high >= take_profit_price:
+                y_values[i] = 2;
                 break
-            if df['low'].iloc[i + j] / df['close'].iloc[i] - 1 <= -loss_tresh:
-                df.loc[i, 'y'] = 0
+            if future_low <= stop_loss_price:
+                y_values[i] = 0;
                 break
-    df.set_index('timestamp', inplace=True)
+    df['y'] = y_values
     return df
 
 
-def define_short_target(df, in_x_bars=12, prof_tresh=0.02, loss_tresh=0.01):
+def define_short_target_dynamic(df, in_x_bars=12, atr_profit_multiplier=2.0, atr_loss_multiplier=1.0):
+    # ... (ta funkcja pozostaje bez zmian) ...
     df['y'] = 0
-    df.reset_index(inplace=True)
+    atr_col_name = 'ATRr_14_1h'
+    if atr_col_name not in df.columns:
+        print(f"BŁĄD: Brak kolumny ATR '{atr_col_name}' w danych.")
+        return df
+    high_prices = df['high'].values
+    low_prices = df['low'].values
+    close_prices = df['close'].values
+    atr_values = df[atr_col_name].values
+    y_values = df['y'].values.copy()
     for i in range(len(df) - in_x_bars):
+        entry_price = close_prices[i]
+        atr_value = atr_values[i]
+        if atr_value <= 0 or np.isnan(atr_value): continue
+        take_profit_price = entry_price - (atr_value * atr_profit_multiplier)
+        stop_loss_price = entry_price + (atr_value * atr_loss_multiplier)
         for j in range(1, in_x_bars + 1):
-            if df['low'].iloc[i + j] / df['close'].iloc[i] - 1 <= -prof_tresh:
-                df.loc[i, 'y'] = 2
+            future_high, future_low = high_prices[i + j], low_prices[i + j]
+            if future_low <= take_profit_price:
+                y_values[i] = 2;
                 break
-            if df['high'].iloc[i + j] / df['close'].iloc[i] - 1 >= loss_tresh:
-                df.loc[i, 'y'] = 0
+            if future_high >= stop_loss_price:
+                y_values[i] = 0;
                 break
-    df.set_index('timestamp', inplace=True)
+    df['y'] = y_values
     return df
 
 
-# --- Główna funkcja trenująca ---
 def train_model(args):
-    print(f"--- Rozpoczynanie trenowania modelu dla strategii: {args.strategy.upper()} ---")
-
+    print(f"--- Rozpoczynanie trenowania i OPTYMALIZACJI modelu dla strategii: {args.strategy.upper()} ---")
     data = process_data_from_single_csv(args.data_file, args.start_date, args.end_date)
 
     if data is None or data.empty:
-        print("Nie udało się przygotować danych. Przerywanie trenowania.")
+        print("Nie udało się przygotować danych.");
         return
 
-    print("Definiowanie zmiennej docelowej (y)...")
+    print("Definiowanie DYNAMICZNEJ zmiennej docelowej (y) w oparciu o ATR...")
     if args.strategy == 'long':
-        data = define_long_target(data)
+        data = define_long_target_dynamic(data)
     else:
-        data = define_short_target(data)
+        data = define_short_target_dynamic(data)
 
     data.dropna(inplace=True)
 
     cols_to_drop = list(data.filter(regex='^(id|timeframe|created_at|open|high|low|close|volume).*').columns)
     cols_to_drop.append('y')
-
     X = data.drop(columns=cols_to_drop)
     y = data['y']
-
     mask = np.isfinite(X).all(axis=1)
     X = X[mask]
     y = y[mask]
 
     if X.empty or y.value_counts().min() < 5:
-        print("BŁĄD: Niewystarczająca ilość danych lub klas do przeprowadzenia treningu po czyszczeniu.")
+        print("BŁĄD: Niewystarczająca ilość danych.");
         return
 
     feature_names = X.columns.tolist()
@@ -100,37 +119,60 @@ def train_model(args):
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    print("Trenowanie modelu RandomForestClassifier...")
-    model = RandomForestClassifier(n_estimators=100, random_state=42, class_weight='balanced')
-    model.fit(X_scaled, y)
-    print("Trenowanie zakończone.")
+    # --- POCZĄTEK NOWEJ LOGIKI: GridSearchCV ---
+    print("\n--- Rozpoczynanie poszukiwania najlepszych hiperparametrów (Grid Search) ---")
 
-    # --- WYWOŁANIE NOWEJ FUNKCJI PO TRENINGU ---
+    # Krok 1: Zdefiniuj siatkę parametrów do przetestowania
+    param_grid = {
+        'n_estimators': [100, 150],  # Liczba drzew w lesie
+        'max_depth': [10, 20, None],  # Maksymalna głębokość drzewa
+        'min_samples_leaf': [1, 2, 4],  # Minimalna liczba próbek w liściu
+        'class_weight': ['balanced']
+    }
+
+    # Krok 2: Zainicjuj GridSearchCV
+    # cv=3 -> 3-krotna walidacja krzyżowa
+    # scoring='f1_weighted' -> metryka oceny, dobra dla niezbalansowanych klas
+    # n_jobs=-1 -> użyj wszystkich dostępnych rdzeni CPU, aby przyspieszyć
+    # verbose=2 -> pokazuj szczegółowe logi z postępu
+    grid_search = GridSearchCV(
+        estimator=RandomForestClassifier(random_state=42),
+        param_grid=param_grid,
+        scoring='f1_weighted',
+        cv=3,
+        n_jobs=-1,
+        verbose=2
+    )
+
+    # Krok 3: Uruchom poszukiwanie
+    # To może potrwać znacznie dłużej niż poprzedni trening!
+    grid_search.fit(X_scaled, y)
+
+    # Krok 4: Wybierz najlepszy znaleziony model i jego parametry
+    print("\n--- Poszukiwanie zakończone ---")
+    print(f"Najlepsze znalezione parametry: {grid_search.best_params_}")
+
+    model = grid_search.best_estimator_
+    # --- KONIEC NOWEJ LOGIKI ---
+
     plot_feature_importance(model, feature_names, args.strategy)
 
-    # Zapisywanie artefaktów (bez zmian)
     model_filename = f'trading_model_{args.strategy}.joblib'
     scaler_filename = f'scaler_{args.strategy}.joblib'
     features_filename = f'feature_names_{args.strategy}.json'
-
     joblib.dump(model, model_filename)
     joblib.dump(scaler, scaler_filename)
     with open(features_filename, 'w') as f:
         json.dump(feature_names, f)
-
-    print(f"\n--- Zakończono! Zapisano pliki dla strategii '{args.strategy}'. ---")
+    print(f"\n--- Zakończono! Zapisano ZOPTYMALIZOWANE pliki dla strategii '{args.strategy}'. ---")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Trener modeli AI do strategii tradingowych.")
-    parser.add_argument("--strategy", type=str, required=True, choices=['long', 'short'],
-                        help="Strategia do trenowania ('long' lub 'short').")
-    parser.add_argument("--data-file", type=str, required=True,
-                        help="Ścieżka do JEDNEGO pliku CSV z surowymi danymi historycznymi.")
-    parser.add_argument("--start-date", type=str, required=True,
-                        help="Data początkowa dla danych treningowych (format: RRRR-MM-DD).")
-    parser.add_argument("--end-date", type=str, required=True,
-                        help="Data końcowa dla danych treningowych (format: RRRR-MM-DD).")
+    parser = argparse.ArgumentParser(description="Trener i optymalizator modeli AI.")
+    parser.add_argument("--strategy", type=str, required=True, choices=['long', 'short'])
+    parser.add_argument("--data-file", type=str, required=True)
+    parser.add_argument("--start-date", type=str, required=True)
+    parser.add_argument("--end-date", type=str, required=True)
 
     args = parser.parse_args()
     train_model(args)
