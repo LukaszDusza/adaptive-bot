@@ -124,7 +124,7 @@ def manage_open_position(position):
             return
     except requests.exceptions.RequestException as e:
         log("api_connection_error", {"error": str(e)})
-    entry_time = pd.to_datetime(int(position['createdTime']), unit='ms', utc=True)
+    entry_time = pd.to_datetime(int(position['updatedTime']), unit='ms', utc=True)
     position_age_hours = (pd.Timestamp.now(tz='UTC') - entry_time).total_seconds() / 3600
     if position_age_hours > POSITION_TIME_EXIT_HOURS:
         log("time_exit_triggered", {"position_age_hours": position_age_hours})
