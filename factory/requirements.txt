@@ -1,8 +1,0 @@
-pandas
-scikit-learn
-xgboost
-joblib
-pandas-ta
-Flask
-mplfinance
-gunicorn

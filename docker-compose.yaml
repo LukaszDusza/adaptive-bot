@@ -1,7 +1,7 @@
 services:
   # Definicja pierwszego serwisu: serwer API z modelem
   api_service:
-    build: .
+    build: factory_boost
     command: python api_service.py
     ports:
       - "8080:8080"
@@ -12,7 +12,7 @@ services:
 
   # Definicja drugiego serwisu: bot tradingowy
   trading_bot:
-    build: .
+    build: factory_boost
     command: python trading_bot.py
     env_file:
       - .env
