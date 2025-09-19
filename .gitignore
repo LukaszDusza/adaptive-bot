@@ -701,3 +701,10 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+/factory_boost/scaler_short.joblib
+/factory_boost/scaler_long.joblib
+/factory_boost/trading_model_long.joblib
+/factory_boost/trading_model_short.joblib
+/factory_boost/feature_names_short.json
+/factory_boost/feature_names_long.json
+/factory_boost/historical_data_icp.csv

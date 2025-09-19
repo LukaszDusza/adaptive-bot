@@ -6,6 +6,29 @@ import argparse
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
 from data_processor import process_data_from_single_csv
+import matplotlib.pyplot as plt  # <--- NOWY IMPORT
+import seaborn as sns  # <--- NOWY IMPORT
+
+
+# --- NOWA FUNKCJA DO RYSOWANIA WYKRESU ---
+def plot_feature_importance(model, feature_names, strategy):
+    """
+    Tworzy i zapisuje wykres ważności cech dla wytrenowanego modelu.
+    """
+    importances = model.feature_importances_
+    indices = np.argsort(importances)[::-1]
+
+    plt.figure(figsize=(12, 16))
+    plt.title(f"Ważność Cech (Feature Importance) - Strategia: {strategy.upper()}")
+    # Użyjemy seaborn dla ładniejszego wykresu
+    sns.barplot(x=importances[indices], y=[feature_names[i] for i in indices])
+    plt.tight_layout()
+
+    # Zapisz wykres do pliku
+    filename = f'feature_importance_{strategy}.png'
+    plt.savefig(filename)
+    print(f"\nZapisano wykres ważności cech do pliku: {filename}")
+    plt.close()
 
 
 # --- Definicje celów dla modelu (bez zmian) ---
@@ -63,12 +86,9 @@ def train_model(args):
     X = data.drop(columns=cols_to_drop)
     y = data['y']
 
-    # --- POCZĄTEK POPRAWKI ---
-    # Usuwamy starą linię z błędem i wykonujemy czyszczenie tylko na zbiorze cech X
     mask = np.isfinite(X).all(axis=1)
     X = X[mask]
     y = y[mask]
-    # --- KONIEC POPRAWKI ---
 
     if X.empty or y.value_counts().min() < 5:
         print("BŁĄD: Niewystarczająca ilość danych lub klas do przeprowadzenia treningu po czyszczeniu.")
@@ -85,6 +105,10 @@ def train_model(args):
     model.fit(X_scaled, y)
     print("Trenowanie zakończone.")
 
+    # --- WYWOŁANIE NOWEJ FUNKCJI PO TRENINGU ---
+    plot_feature_importance(model, feature_names, args.strategy)
+
+    # Zapisywanie artefaktów (bez zmian)
     model_filename = f'trading_model_{args.strategy}.joblib'
     scaler_filename = f'scaler_{args.strategy}.joblib'
     features_filename = f'feature_names_{args.strategy}.json'
