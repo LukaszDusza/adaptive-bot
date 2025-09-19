@@ -12,7 +12,6 @@ import seaborn as sns
 
 
 def plot_feature_importance(model, feature_names, strategy):
-    # ... (ta funkcja pozostaje bez zmian) ...
     importances = model.feature_importances_
     indices = np.argsort(importances)[::-1]
     plt.figure(figsize=(12, 16))
@@ -26,61 +25,72 @@ def plot_feature_importance(model, feature_names, strategy):
 
 
 def define_long_target_dynamic(df, in_x_bars=12, atr_profit_multiplier=2.0, atr_loss_multiplier=1.0):
-    # ... (ta funkcja pozostaje bez zmian) ...
-    df['y'] = 0
+    df['y'] = 1
     atr_col_name = 'ATRr_14_1h'
     if atr_col_name not in df.columns:
         print(f"BŁĄD: Brak kolumny ATR '{atr_col_name}' w danych.")
         return df
+
     high_prices = df['high'].values
     low_prices = df['low'].values
     close_prices = df['close'].values
     atr_values = df[atr_col_name].values
     y_values = df['y'].values.copy()
+
     for i in range(len(df) - in_x_bars):
         entry_price = close_prices[i]
         atr_value = atr_values[i]
         if atr_value <= 0 or np.isnan(atr_value): continue
+
         take_profit_price = entry_price + (atr_value * atr_profit_multiplier)
         stop_loss_price = entry_price - (atr_value * atr_loss_multiplier)
+
         for j in range(1, in_x_bars + 1):
             future_high, future_low = high_prices[i + j], low_prices[i + j]
+            # Jeśli trafiono TP, oznacz jako 2 (wygrana) i przerwij
             if future_high >= take_profit_price:
-                y_values[i] = 2;
+                y_values[i] = 2
                 break
+            # Jeśli trafiono SL, oznacz jako 0 (przegrana) i przerwij
             if future_low <= stop_loss_price:
-                y_values[i] = 0;
+                y_values[i] = 0
                 break
+
     df['y'] = y_values
     return df
 
-
 def define_short_target_dynamic(df, in_x_bars=12, atr_profit_multiplier=2.0, atr_loss_multiplier=1.0):
-    # ... (ta funkcja pozostaje bez zmian) ...
-    df['y'] = 0
+    df['y'] = 1
     atr_col_name = 'ATRr_14_1h'
     if atr_col_name not in df.columns:
         print(f"BŁĄD: Brak kolumny ATR '{atr_col_name}' w danych.")
         return df
+
     high_prices = df['high'].values
     low_prices = df['low'].values
     close_prices = df['close'].values
     atr_values = df[atr_col_name].values
     y_values = df['y'].values.copy()
+
     for i in range(len(df) - in_x_bars):
         entry_price = close_prices[i]
         atr_value = atr_values[i]
         if atr_value <= 0 or np.isnan(atr_value): continue
+
         take_profit_price = entry_price - (atr_value * atr_profit_multiplier)
         stop_loss_price = entry_price + (atr_value * atr_loss_multiplier)
+
         for j in range(1, in_x_bars + 1):
             future_high, future_low = high_prices[i + j], low_prices[i + j]
+            # Jeśli trafiono TP, oznacz jako 2 (wygrana) i przerwij
             if future_low <= take_profit_price:
-                y_values[i] = 2;
+                y_values[i] = 2
                 break
+            # Jeśli trafiono SL, oznacz jako 0 (przegrana) i przerwij
             if future_high >= stop_loss_price:
-                y_values[i] = 0;
+                y_values[i] = 0
                 break
+
     df['y'] = y_values
     return df
 
@@ -105,6 +115,9 @@ def train_model(args):
     cols_to_drop.append('y')
     X = data.drop(columns=cols_to_drop)
     y = data['y']
+    print("Rozkład klas w danych treningowych:")
+    print(y.value_counts())
+
     mask = np.isfinite(X).all(axis=1)
     X = X[mask]
     y = y[mask]
@@ -119,7 +132,6 @@ def train_model(args):
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X)
 
-    # --- POCZĄTEK NOWEJ LOGIKI: GridSearchCV ---
     print("\n--- Rozpoczynanie poszukiwania najlepszych hiperparametrów (Grid Search) ---")
 
     # Krok 1: Zdefiniuj siatkę parametrów do przetestowania
@@ -145,7 +157,6 @@ def train_model(args):
     )
 
     # Krok 3: Uruchom poszukiwanie
-    # To może potrwać znacznie dłużej niż poprzedni trening!
     grid_search.fit(X_scaled, y)
 
     # Krok 4: Wybierz najlepszy znaleziony model i jego parametry
@@ -153,7 +164,6 @@ def train_model(args):
     print(f"Najlepsze znalezione parametry: {grid_search.best_params_}")
 
     model = grid_search.best_estimator_
-    # --- KONIEC NOWEJ LOGIKI ---
 
     plot_feature_importance(model, feature_names, args.strategy)
 

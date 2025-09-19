@@ -4,14 +4,16 @@ import schedule
 import requests
 import pandas as pd
 import sys
+import json
 from pybit.unified_trading import HTTP
 
-# --- Konfiguracja Bota (bez zmian) ---
+# --- Konfiguracja Bota ---
 TICKER = "ICPUSDT"
 RISK_PER_TRADE = 0.02
 LEVERAGE = "10"
 API_URL = "http://api_service:8080/predict"
 POSITION_TIME_EXIT_HOURS = 12
+MIN_CONFIDENCE = 0.60  # Minimalna pewność (60%), aby rozważyć sygnał
 
 # --- Konfiguracja API Bybit (bez zmian) ---
 api_key = os.getenv("BYBIT_API_KEY")
@@ -21,7 +23,8 @@ if not api_key or not api_secret:
     api_key = "pvXUTTIFpBuHDndmpf"
     api_secret = "uZnjNGSE4OZ3uHNyNU53XFMr2q9X2dlEJk46"
 try:
-    session = HTTP(testnet=True, api_key=api_key, api_secret=api_secret)
+    # Zmieniono na testnet=False zgodnie z api_service.py
+    session = HTTP(testnet=False, api_key=api_key, api_secret=api_secret)
     print("Pomyślnie zainicjowano sesję Bybit dla bota.")
 except Exception as e:
     print(f"Błąd inicjalizacji sesji Bybit dla bota: {e}")
@@ -43,7 +46,6 @@ def get_wallet_balance():
         return None
 
 
-# ... (reszta funkcji pomocniczych: get_open_position, get_current_price, place_market_order, close_market_order - bez zmian) ...
 def get_open_position():
     try:
         response = session.get_positions(category="linear", symbol=TICKER)
@@ -69,19 +71,20 @@ def get_current_price():
 
 def place_market_order(side, qty, tp_price, sl_price):
     try:
+        # Upewniamy się, że parametry są stringami, zgodnie z wymaganiami Bybit API v5
         response = session.place_order(
             category="linear", symbol=TICKER, side=side, orderType="Market",
             qty=str(qty), takeProfit=str(tp_price), stopLoss=str(sl_price)
         )
-        print("Odpowiedź zlecenia od Bybit:");
+        print("Odpowiedź zlecenia od Bybit:")
         print(response)
         return response['retCode'] == 0
     except Exception as e:
-        print(f"Wyjątek podczas składania zlecenia: {e}");
+        print(f"Wyjątek podczas składania zlecenia: {e}")
         return False
 
 
-def close_market_order(position_info):
+def close_market_order(position_info, reason="UNKNOWN"):
     side = "Sell" if position_info['side'] == "Buy" else "Buy"
     qty = position_info['size']
     try:
@@ -89,85 +92,127 @@ def close_market_order(position_info):
             category="linear", symbol=TICKER, side=side,
             orderType="Market", qty=str(qty), reduceOnly=True
         )
-        print(f"Zamknięto pozycję z powodu Time Exit. Odpowiedź z Bybit:");
+        print(f"Zamknięto pozycję z powodu: {reason}. Odpowiedź z Bybit:")
         print(response)
         return response['retCode'] == 0
     except Exception as e:
-        print(f"Wyjątek podczas zamykania pozycji: {e}");
+        print(f"Wyjątek podczas zamykania pozycji: {e}")
         return False
 
 
-# --- Główna Logika Bota (bez zmian) ---
-def check_for_signal_and_trade():
-    # ... (cała ta funkcja pozostaje bez zmian) ...
-    print(f"\n--- {pd.Timestamp.now()} | Uruchamianie cyklu bota ---")
-    if not session: print("Sesja Bybit nieaktywna, pomijam cykl."); return
-    position = get_open_position()
-    if position:
-        entry_time = pd.to_datetime(int(position['createdTime']), unit='ms', utc=True)
-        position_age_hours = (pd.Timestamp.now(tz='UTC') - entry_time).total_seconds() / 3600
-        print(f"Pozycja otwarta od {position_age_hours:.2f} godzin.")
-        if position_age_hours > POSITION_TIME_EXIT_HOURS:
-            print(f"Pozycja przekroczyła maksymalny czas {POSITION_TIME_EXIT_HOURS}h. Zamykanie...")
-            close_market_order(position)
-        else:
-            print("Pozycja jest aktywna i w limicie czasowym. Czekam na TP/SL.")
-        return
-    print("Brak otwartych pozycji. Odpytywanie modeli o sygnał...")
+# --- Główna Logika Bota (DOSTOSOWANA DO NOWEGO API) ---
+def manage_open_position(position):
+    """Logika zarządzania już otwartą pozycją."""
+    position_side = position['side']  # 'Buy' for long, 'Sell' for short
+    strategy_to_check = 'long' if position_side == 'Buy' else 'short'
+    exit_action_needed = 'EXIT_LONG' if position_side == 'Buy' else 'EXIT_SHORT'
+
+    print(f"[TRADING_BOT] Zarządzanie otwartą pozycją {position_side}. Sprawdzanie sygnału wyjścia...")
+    try:
+        response = requests.post(API_URL, json={"symbol": TICKER, "strategy": strategy_to_check})
+        signal = response.json()
+        print(f"[TRADING_BOT] Otrzymano odpowiedź dla zarządzania pozycją: {json.dumps(signal, indent=2)}")
+
+        if signal.get("action") == exit_action_needed and signal.get("confidence", 0) >= MIN_CONFIDENCE:
+            print(
+                f"[TRADING_BOT] Otrzymano sygnał ZAMKNIĘCIA POZYCJI z pewnością {signal['confidence']:.2%}. Zamykanie...")
+            close_market_order(position, reason=f"Signal {exit_action_needed}")
+            return
+    except requests.exceptions.RequestException as e:
+        print(f"[TRADING_BOT] Błąd połączenia z API podczas zarządzania pozycją: {e}")
+
+    # Sprawdzenie wyjścia czasowego jako zabezpieczenie
+    entry_time = pd.to_datetime(int(position['createdTime']), unit='ms', utc=True)
+    position_age_hours = (pd.Timestamp.now(tz='UTC') - entry_time).total_seconds() / 3600
+    print(f"[TRADING_BOT] Pozycja otwarta od {position_age_hours:.2f} godzin.")
+    if position_age_hours > POSITION_TIME_EXIT_HOURS:
+        print(f"[TRADING_BOT] Pozycja przekroczyła maksymalny czas {POSITION_TIME_EXIT_HOURS}h. Zamykanie...")
+        close_market_order(position, reason="Time Exit")
+    else:
+        print("[TRADING_BOT] Brak sygnału wyjścia. Pozycja pozostaje otwarta.")
+
+
+def look_for_new_trade():
+    """Logika poszukiwania nowej transakcji, gdy nie ma otwartej pozycji."""
+    print("[TRADING_BOT] Brak otwartych pozycji. Odpytywanie modeli o sygnał wejścia...")
     try:
         response_long = requests.post(API_URL, json={"symbol": TICKER, "strategy": "long"})
         pred_long = response_long.json()
+        print(f"[TRADING_BOT] Odpowiedź dla LONG: {json.dumps(pred_long, indent=2)}")
+
         response_short = requests.post(API_URL, json={"symbol": TICKER, "strategy": "short"})
         pred_short = response_short.json()
-    except Exception as e:
-        print(f"Błąd połączenia z serwerem API predykcji: {e}");
+        print(f"[TRADING_BOT] Odpowiedź dla SHORT: {json.dumps(pred_short, indent=2)}")
+
+    except requests.exceptions.RequestException as e:
+        print(f"[TRADING_BOT] KRYTYCZNY BŁĄD połączenia z serwerem API: {e}")
         return
-    signal_side = None;
-    tp_price = None;
-    sl_price = None
-    if pred_long.get("prediction") == "BUY":
-        print(f"Otrzymano sygnał BUY dla LONG z pewnością {pred_long.get('confidence_buy') * 100:.2f}%")
-        signal_side = "Buy";
-        tp_price = pred_long.get('take_profit_price');
-        sl_price = pred_long.get('stop_loss_price')
-    elif pred_short.get("prediction") == "BUY":
-        print(f"Otrzymano sygnał BUY dla SHORT z pewnością {pred_short.get('confidence_buy') * 100:.2f}%")
-        signal_side = "Sell";
-        tp_price = pred_short.get('take_profit_price');
-        sl_price = pred_short.get('stop_loss_price')
+
+    long_signal = pred_long if pred_long.get("action") == "ENTER_LONG" and pred_long.get("confidence",
+                                                                                         0) >= MIN_CONFIDENCE else None
+    short_signal = pred_short if pred_short.get("action") == "ENTER_SHORT" and pred_short.get("confidence",
+                                                                                              0) >= MIN_CONFIDENCE else None
+
+    best_signal = None
+    trade_side = None
+
+    if long_signal and short_signal:
+        if long_signal['confidence'] > short_signal['confidence']:
+            best_signal, trade_side = long_signal, "Buy"
+        else:
+            best_signal, trade_side = short_signal, "Sell"
+    elif long_signal:
+        best_signal, trade_side = long_signal, "Buy"
+    elif short_signal:
+        best_signal, trade_side = short_signal, "Sell"
+
+    if best_signal:
+        print(f"[TRADING_BOT] Wybrano sygnał: {best_signal['action']} z pewnością {best_signal['confidence']:.2%}")
+        tp_price = best_signal.get('take_profit_price')
+        sl_price = best_signal.get('stop_loss_price')
+
+        if trade_side and tp_price and sl_price:
+            balance = get_wallet_balance()
+            price = get_current_price()
+            if balance and price:
+                position_value = balance * RISK_PER_TRADE * float(LEVERAGE)
+                qty = round(position_value / price, 3)
+
+                print(f"[TRADING_BOT] DECYZJA: Otwieranie pozycji {trade_side}.")
+                print(f"Kapitał: ${balance:.2f} | Cena: ${price:.4f} | Wielkość: {qty} {TICKER}")
+                print(f"TP={tp_price:.4f}, SL={sl_price:.4f}")
+
+                session.set_leverage(category="linear", symbol=TICKER, buyLeverage=str(LEVERAGE),
+                                     sellLeverage=str(LEVERAGE))
+                place_market_order(trade_side, qty, tp_price, sl_price)
     else:
-        print("Brak wyraźnego sygnału BUY od modeli. Czekam na kolejną godzinę.");
+        print(f"[TRADING_BOT] Brak sygnału wejścia o wystarczającej pewności (próg: {MIN_CONFIDENCE * 100}%).")
+
+
+def check_for_signal_and_trade():
+    print(f"\n--- {pd.Timestamp.now()} | Uruchamianie cyklu bota ---")
+    if not session:
+        print("[TRADING_BOT] Sesja Bybit nieaktywna, pomijam cykl.")
         return
-    if signal_side and tp_price and sl_price:
-        balance = get_wallet_balance();
-        price = get_current_price()
-        if balance and price:
-            position_value = balance * RISK_PER_TRADE * float(LEVERAGE)
-            qty = round(position_value / price, 3)
-            print(
-                f"Sygnał: {signal_side} | Kapitał: ${balance:.2f} | Cena: ${price:.4f} | Wielkość pozycji: {qty} {TICKER}")
-            print(f"Składanie zlecenia: TP={tp_price:.4f}, SL={sl_price:.4f}")
-            session.set_leverage(category="linear", symbol=TICKER, buyLeverage=LEVERAGE, sellLeverage=LEVERAGE)
-            place_market_order(signal_side, qty, tp_price, sl_price)
+
+    position = get_open_position()
+    if position:
+        manage_open_position(position)
+    else:
+        look_for_new_trade()
 
 
-# --- NOWA FUNKCJA: Testy Startowe ---
+# --- Testy Startowe (bez zmian) ---
 def run_startup_smoke_tests():
-    """Przeprowadza serię testów przy starcie, aby upewnić się, że system jest gotowy."""
     print("\n--- Przeprowadzanie testów startowych (smoke tests) ---")
-
-    # Test 1: Połączenie z Bybit i weryfikacja kluczy
     print("1. Testowanie połączenia z Bybit API...")
     balance = get_wallet_balance()
     if balance is not None:
         print(f"   ✅ Połączenie z Bybit OK. Saldo: {balance:.2f} USDT.")
     else:
         print("   ❌ KRYTYCZNY BŁĄD: Nie udało się połączyć z Bybit lub klucze API są nieprawidłowe.")
-        sys.exit(1)  # Zakończ działanie skryptu z kodem błędu
-
-    # Test 2: Połączenie z serwerem predykcyjnym (api_service)
+        sys.exit(1)
     print("2. Testowanie połączenia z serwerem predykcyjnym ML...")
-    # Dajemy serwerowi API kilka sekund na pełne uruchomienie się w środowisku Docker
     time.sleep(5)
     try:
         response = requests.post(API_URL, json={"symbol": TICKER, "strategy": "long"})
@@ -175,28 +220,19 @@ def run_startup_smoke_tests():
             print(f"   ✅ Połączenie z serwerem ML API OK (status: {response.status_code}).")
         else:
             print(f"   ❌ KRYTYCZNY BŁĄD: Serwer ML API odpowiedział ze statusem {response.status_code}.")
-            print(f"   Odpowiedź: {response.text}")
             sys.exit(1)
     except requests.exceptions.ConnectionError as e:
         print(f"   ❌ KRYTYCZNY BŁĄD: Nie można połączyć się z serwerem ML API pod adresem {API_URL}.")
-        print(f"   Upewnij się, że kontener 'api_service' jest uruchomiony. Szczegóły: {e}")
         sys.exit(1)
-
     print("--- Wszystkie testy startowe zakończone pomyślnie. Bot jest gotowy. ---\n")
 
 
-# --- Harmonogram ---
+# --- Harmonogram (bez zmian) ---
 if __name__ == "__main__":
-    # Krok 1: Uruchom testy startowe
     run_startup_smoke_tests()
-
-    # Krok 2: Jeśli testy przejdą, uruchom główną logikę bota
     print("Uruchamianie bota tradingowego...")
     check_for_signal_and_trade()
-
-    # Krok 3: Ustaw harmonogram na przyszłe cykle
     schedule.every().hour.at(":02").do(check_for_signal_and_trade)
-
     while True:
         schedule.run_pending()
         time.sleep(1)

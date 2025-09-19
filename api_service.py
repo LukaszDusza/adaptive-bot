@@ -6,7 +6,6 @@ import os
 from pybit.unified_trading import HTTP
 import numpy as np
 
-# Importujemy nasz centralny procesor danych
 from data_processor import process_data_from_dataframe
 
 # --- Konfiguracja i połączenie z API Bybit ---
@@ -23,16 +22,15 @@ if not api_key or not api_secret:
     api_secret = "uZnjNGSE4OZ3uHNyNU53XFMr2q9X2dlEJk46"
 
 try:
-    session = HTTP(testnet=True, api_key=api_key, api_secret=api_secret)
-    print("Pomyślnie zainicjowano sesję z Bybit Testnet.")
+    session = HTTP(testnet=False, api_key=api_key, api_secret=api_secret)
+    print("Pomyślnie zainicjowano sesję z Bybit.")
 except Exception as e:
     print(f"Błąd podczas inicjalizacji sesji Bybit: {e}")
     session = None
 
 
-# --- Funkcje pobierania danych (bez zmian) ---
+# --- Funkcje pobierania danych ---
 def fetch_ohlcv_from_exchange(symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
-    # ... (ta funkcja pozostaje bez zmian) ...
     if not session: return pd.DataFrame()
     bybit_interval_map = {'1h': '60', '4h': '240', '1D': 'D'}
     if timeframe not in bybit_interval_map: return pd.DataFrame()
@@ -54,7 +52,6 @@ def fetch_ohlcv_from_exchange(symbol: str, timeframe: str, limit: int) -> pd.Dat
 
 
 def get_historical_data(symbol: str) -> pd.DataFrame:
-    # ... (ta funkcja pozostaje bez zmian) ...
     timeframes_config = {'1h': 200, '4h': 200, '1D': 50}
     all_dfs = []
     for tf_text, limit in timeframes_config.items():
@@ -87,7 +84,7 @@ except FileNotFoundError as e:
 app = Flask(__name__)
 
 
-# --- Główny punkt końcowy API /predict ---
+# --- Główny punkt końcowy API /predict (Z DODANYM ZABEZPIECZENIEM) ---
 @app.route('/predict', methods=['POST'])
 def predict():
     if not all([MODEL_LONG, SCALER_LONG, FEATURE_NAMES]):
@@ -125,38 +122,51 @@ def predict():
     X_live_scaled = scaler.transform(X_live)
     prediction_numeric = model.predict(X_live_scaled)[0]
     prediction_proba = model.predict_proba(X_live_scaled)[0]
-    prediction_map = {0: "SELL/HOLD", 1: "NEUTRAL", 2: "BUY"}
-    prediction_text = prediction_map.get(prediction_numeric, "UNKNOWN")
 
-    # --- POCZĄTEK NOWEJ LOGIKI: Oblicz i zwróć poziomy TP/SL ---
+    action = "DO_NOTHING"
+    confidence = 0.0
     take_profit_price = None
     stop_loss_price = None
 
-    # Sprawdzamy, czy mamy sygnał wejścia ("BUY" oznacza "wejdź w pozycję" dla obu strategii)
-    if prediction_text == "BUY":
-        entry_price = float(last_row['close'].iloc[0])
-        atr_value = float(last_row['ATRr_14_1h'].iloc[0])
-
-        # Użyj tych samych mnożników, co w treningu
-        atr_profit_multiplier = 2.0
-        atr_loss_multiplier = 1.0
+    # <<< NOWE ZABEZPIECZENIE: Sprawdź, czy przewidziany indeks jest w granicach tablicy prawdopodobieństw >>>
+    if prediction_numeric < len(prediction_proba):
+        confidence = float(round(prediction_proba[prediction_numeric], 4))
 
         if strategy == 'long':
-            take_profit_price = round(entry_price + (atr_value * atr_profit_multiplier), 4)
-            stop_loss_price = round(entry_price - (atr_value * atr_loss_multiplier), 4)
+            if prediction_numeric == 2:
+                action = "ENTER_LONG"
+            elif prediction_numeric == 0:
+                action = "EXIT_LONG"
         elif strategy == 'short':
-            take_profit_price = round(entry_price - (atr_value * atr_profit_multiplier), 4)
-            stop_loss_price = round(entry_price + (atr_value * atr_loss_multiplier), 4)
+            if prediction_numeric == 2:
+                action = "ENTER_SHORT"
+            elif prediction_numeric == 0:
+                action = "EXIT_SHORT"
 
-    # --- KONIEC NOWEJ LOGIKI ---
+        if action in ["ENTER_LONG", "ENTER_SHORT"]:
+            entry_price = float(last_row['close'].iloc[0])
+            atr_value = float(last_row['ATRr_14_1h'].iloc[0])
+            atr_profit_multiplier = 2.0
+            atr_loss_multiplier = 1.0
+
+            if action == "ENTER_LONG":
+                take_profit_price = round(entry_price + (atr_value * atr_profit_multiplier), 4)
+                stop_loss_price = round(entry_price - (atr_value * atr_loss_multiplier), 4)
+            elif action == "ENTER_SHORT":
+                take_profit_price = round(entry_price - (atr_value * atr_profit_multiplier), 4)
+                stop_loss_price = round(entry_price + (atr_value * atr_loss_multiplier), 4)
+    else:
+        print(
+            f"OSTRZEŻENIE: Niespójność modelu! Przewidziano klasę {prediction_numeric}, ale dostępne są tylko prawdopodobieństwa dla {len(prediction_proba)} klas. Ignorowanie sygnału.")
+        # Pozostawiamy action="DO_NOTHING" i confidence=0.0
 
     result = {
-        "timestamp": last_row.index[0].isoformat(), "strategy": strategy,
-        "prediction": prediction_text,
-        "confidence_buy": float(round(prediction_proba[2], 4)) if len(prediction_proba) > 2 else 0.0,
-        "confidence_sell": float(round(prediction_proba[0], 4)) if len(prediction_proba) > 0 else 0.0,
-        "take_profit_price": take_profit_price,  # Dodajemy do odpowiedzi
-        "stop_loss_price": stop_loss_price  # Dodajemy do odpowiedzi
+        "timestamp": last_row.index[0].isoformat(),
+        "strategy": strategy,
+        "action": action,
+        "confidence": confidence,
+        "take_profit_price": take_profit_price,
+        "stop_loss_price": stop_loss_price
     }
 
     print(f"Zwrócono predykcję: {result}")
