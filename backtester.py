@@ -5,17 +5,18 @@ import warnings
 import os
 import argparse
 import mplfinance as mpf
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 from pathlib import Path
 from data_processor import process_data_from_single_csv
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
 
-# --- Funkcja do tworzenia wykresów (bez zmian) ---
+# --- Funkcja do tworzenia wykresów transakcji (bez zmian) ---
 def plot_trade(trade_info, ohlc_data, strategy, trade_number, chart_dir, ticker):
     entry_date = trade_info['entry_date']
     exit_date = trade_info['exit_date']
-    # Używamy rzeczywistej ceny wejścia po poślizgu
     entry_price = trade_info['actual_entry_price']
     exit_price = trade_info['exit_price']
     pnl = trade_info['pnl_usd']
@@ -38,10 +39,8 @@ def plot_trade(trade_info, ohlc_data, strategy, trade_number, chart_dir, ticker)
                      inplace=True)
     entry_marker = pd.Series(float('nan'), index=plot_data.index)
     exit_marker = pd.Series(float('nan'), index=plot_data.index)
-    if entry_date in plot_data.index:
-        entry_marker[entry_date] = entry_price * 0.99
-    if exit_date in plot_data.index:
-        exit_marker[exit_date] = exit_price
+    if entry_date in plot_data.index: entry_marker[entry_date] = entry_price * 0.99
+    if exit_date in plot_data.index: exit_marker[exit_date] = exit_price
     entry_marker_style = '^' if strategy == 'long' else 'v'
     addplots = [
         mpf.make_addplot(entry_marker, type='scatter', marker=entry_marker_style, color='lime', markersize=200),
@@ -53,6 +52,71 @@ def plot_trade(trade_info, ohlc_data, strategy, trade_number, chart_dir, ticker)
     filename = os.path.join(chart_dir, f"trade_{trade_number}_{strategy}_{exit_reason.replace(' ', '_')}.png")
     mpf.plot(plot_data, type='candle', style='yahoo', title=title, addplot=addplots, hlines=hlines, figscale=1.5,
              savefig=filename)
+
+
+# <<< NOWA FUNKCJA DO RAPORTOWANIA >>>
+def generate_report_and_plots(trades_df, initial_capital, ohlc_data, output_dir, ticker):
+    """Generuje końcowy raport, statystyki i wykresy."""
+
+    # --- Obliczanie Drawdownu ---
+    trades_df['capital_after_trade'] = trades_df['capital_after_trade'].ffill()
+    running_max = trades_df['capital_after_trade'].cummax()
+    drawdown = running_max - trades_df['capital_after_trade']
+    drawdown_percent = (drawdown / running_max) * 100
+    max_drawdown = drawdown_percent.max()
+    max_drawdown_date = drawdown_percent.idxmax()
+
+    # --- Wykres Krzywej Kapitału i Drawdownu ---
+    plt.style.use('seaborn-v0_8-darkgrid')
+    fig, ax = plt.subplots(figsize=(14, 8))
+    ax.plot(trades_df['exit_date'], trades_df['capital_after_trade'], marker='o', linestyle='-', markersize=3,
+            label='Kapitał (Equity)')
+    ax.plot(trades_df['exit_date'], running_max, color='gray', linestyle='--', linewidth=1.5,
+            label='Historyczny szczyt kapitału')
+    ax.fill_between(trades_df.index, trades_df['capital_after_trade'], running_max,
+                    where=(trades_df['capital_after_trade'] < running_max),
+                    color='red', alpha=0.2, label='Okresy obsunięcia (Drawdown)')
+
+    ax.set_title(f'Krzywa Kapitału i Drawdown dla {ticker}', fontsize=16)
+    ax.set_xlabel('Data', fontsize=12)
+    ax.set_ylabel('Kapitał (USD)', fontsize=12)
+    formatter = mticker.FuncFormatter(lambda y, _: '${:,.0f}'.format(y))
+    ax.yaxis.set_major_formatter(formatter)
+    fig.autofmt_xdate()
+    ax.legend()
+
+    chart_filename = os.path.join(output_dir, 'equity_curve.png')
+    plt.savefig(chart_filename)
+    print(f"\nWykres krzywej kapitału został zapisany do pliku: {chart_filename}")
+
+    # --- Obliczanie dodatkowych statystyk ---
+    num_trades = len(trades_df)
+    profitable_trades = trades_df[trades_df['pnl_usd'] > 0]
+    losing_trades = trades_df[trades_df['pnl_usd'] <= 0]
+    win_rate = (len(profitable_trades) / num_trades) * 100 if num_trades > 0 else 0
+    final_capital = trades_df['capital_after_trade'].iloc[-1]
+    total_pnl_percent = ((final_capital - initial_capital) / initial_capital) * 100
+    buy_hold_pnl = ((ohlc_data['close'].iloc[-1] - ohlc_data['open'].iloc[0]) / ohlc_data['open'].iloc[0]) * 100
+    avg_win = profitable_trades['pnl_usd'].mean() if not profitable_trades.empty else 0
+    avg_loss = losing_trades['pnl_usd'].mean() if not losing_trades.empty else 0
+    profit_factor = avg_win / abs(avg_loss) if abs(avg_loss) > 0 else float('inf')
+
+    # --- Drukowanie podsumowania ---
+    print(f"\n--- WYNIKI SYMULACJI DLA {ticker.upper()} ---")
+    print(f"\nOkres testowy: od {ohlc_data.index.min()} do {ohlc_data.index.max()}")
+    print(f"Kapitał początkowy: ${initial_capital:,.2f}")
+    print(f"Kapitał końcowy: ${final_capital:,.2f}")
+    print(f"Zysk/Strata (P/L): ${final_capital - initial_capital:,.2f} ({total_pnl_percent:.2f}%)")
+    print("-" * 40)
+    print(f"Liczba zrealizowanych transakcji: {num_trades}")
+    print(f"Procent transakcji zyskownych (Win Rate): {win_rate:.2f}%")
+    print(f"Maksymalny Drawdown (spadek od szczytu): {max_drawdown:.2f}%")
+    print(f"\nŚrednia zyskowna transakcja: ${avg_win:,.2f}")
+    print(f"Średnia stratna transakcja: ${avg_loss:,.2f}")
+    print(f"Współczynnik zyskowności (Profit Factor): {profit_factor:.2f}")
+    print(f"\nRozkład powodów zamknięcia pozycji:\n{trades_df['exit_reason'].value_counts(normalize=True).round(2)}")
+    print("-" * 40)
+    print(f"Dla porównania, zwrot z 'Kup i Trzymaj': {buy_hold_pnl:.2f}%")
 
 
 # --- Główna funkcja backtestera ---
@@ -70,15 +134,15 @@ def run_backtest(args):
         with open(args.features_file, 'r') as f:
             expected_features = json.load(f)
     except FileNotFoundError as e:
-        print(f"BŁĄD: Nie znaleziono wymaganego pliku: {e.filename}.");
-        return
+        print(f"BŁĄD: Nie znaleziono wymaganego pliku: {e.filename}."); return
+
     print("Wczytywanie i przygotowywanie danych do backtestu...")
     backtest_data = process_data_from_single_csv(args.data_file, args.start_date, args.end_date)
-    if backtest_data is None or backtest_data.empty:
-        print("Nie udało się przygotować danych do backtestu. Przerywanie.");
-        return
+    if backtest_data is None or backtest_data.empty: print(
+        "Nie udało się przygotować danych do backtestu. Przerywanie."); return
+
     print("Generowanie predykcji dla obu modeli...")
-    X_test = backtest_data[expected_features]
+    X_test = backtest_data.reindex(columns=expected_features, fill_value=0)  # Zapewnienie tej samej kolejności kolumn
     pred_numeric_long, pred_proba_long = model_long.predict(scaler_long.transform(X_test)), model_long.predict_proba(
         scaler_long.transform(X_test))
     pred_numeric_short, pred_proba_short = model_short.predict(
@@ -102,6 +166,7 @@ def run_backtest(args):
         confs_short.append(pred_proba_short[i][num])
     backtest_data['long_action'], backtest_data['long_confidence'] = actions_long, confs_long
     backtest_data['short_action'], backtest_data['short_confidence'] = actions_short, confs_short
+
     print("Uruchamianie symulacji...")
     detailed_trades_log, current_capital, trade_counter, i = [], args.initial_capital, 0, 0
     while i < len(backtest_data):
@@ -121,22 +186,13 @@ def run_backtest(args):
         elif short_signal:
             enter_trade, strategy = True, 'short'
         if not enter_trade: i += 1; continue
-
         ideal_entry_price, entry_date = backtest_data['close'].iloc[i], backtest_data.index[i]
-
-        # --- POCZĄTEK NOWEJ LOGIKI ---
         sl_dist_percent = abs(ideal_entry_price - (ideal_entry_price - backtest_data['ATRr_14_1h'].iloc[
-            i] * args.atr_loss_multiplier)) / ideal_entry_price
+            i] * args.atr_loss_multiplier)) / ideal_entry_price if ideal_entry_price > 0 else 0
         position_size_usd = (current_capital * args.risk_percent) / sl_dist_percent if sl_dist_percent > 0 else 0
-
-        # Obliczanie poślizgu
         slippage_penalty = (position_size_usd / args.slippage_base_usd) * args.slippage_factor
-
-        # Zastosowanie poślizgu do ceny wejścia
         actual_entry_price = ideal_entry_price * (1 + slippage_penalty) if strategy == 'long' else ideal_entry_price * (
                     1 - slippage_penalty)
-        # --- KONIEC NOWEJ LOGIKI ---
-
         atr_value = backtest_data['ATRr_14_1h'].iloc[i]
         tp_price, sl_price, exit_signal_action = 0, 0, ""
         if strategy == 'long':
@@ -146,7 +202,7 @@ def run_backtest(args):
         else:
             tp_price, sl_price = actual_entry_price - (atr_value * args.atr_profit_multiplier), actual_entry_price + (
                         atr_value * args.atr_loss_multiplier)
-
+            exit_signal_action = "EXIT_SHORT"
         trade_closed = False
         for j in range(1, args.evaluation_window + 1):
             if i + j >= len(backtest_data): break
@@ -182,7 +238,6 @@ def run_backtest(args):
                 trade_closed = True;
                 i += (j + 1);
                 break
-
         if not trade_closed:
             exit_idx = min(i + args.evaluation_window, len(backtest_data) - 1)
             exit_price, exit_date = backtest_data['close'].iloc[exit_idx], backtest_data.index[exit_idx]
@@ -199,29 +254,17 @@ def run_backtest(args):
             plot_trade(trade_info, backtest_data, strategy, trade_counter, chart_dir, args.ticker)
             i += (args.evaluation_window + 1)
 
-    # --- Prezentacja wyników (bez zmian) ---
-    print(f"\n--- WYNIKI SYMULACJI DLA {args.ticker.upper()} ---")
-    if not detailed_trades_log: print("W okresie testowym model nie wygenerował żadnej transakcji."); return
-    trades_df = pd.DataFrame(detailed_trades_log);
+    if not detailed_trades_log:
+        print("W okresie testowym model nie wygenerował żadnej transakcji.");
+        return
+    trades_df = pd.DataFrame(detailed_trades_log)
+    trades_df['entry_date'] = pd.to_datetime(trades_df['entry_date'])
+    trades_df.set_index('entry_date', inplace=True, drop=False)
+    trades_log_filename = os.path.join(output_dir_name, 'trades_log.csv')
     trades_df.to_csv(trades_log_filename)
     print(f"Szczegółowy log transakcji został zapisany do pliku: {trades_log_filename}")
-    num_trades, win_rate = len(trades_df), (len(trades_df[trades_df['pnl_usd'] > 0]) / len(trades_df)) * 100 if len(
-        trades_df) > 0 else 0
-    final_capital = trades_df['capital_after_trade'].iloc[-1] if not trades_df.empty else args.initial_capital
-    total_pnl_percent = ((final_capital - args.initial_capital) / args.initial_capital) * 100
-    buy_hold_pnl = ((backtest_data['close'].iloc[-1] - backtest_data['open'].iloc[0]) / backtest_data['open'].iloc[
-        0]) * 100
-    print(f"\nOkres testowy: od {backtest_data.index.min()} do {backtest_data.index.max()}")
-    print(f"Kapitał początkowy: ${args.initial_capital:,.2f}");
-    print(f"Kapitał końcowy: ${final_capital:,.2f}")
-    print(f"Zysk/Strata (P/L): ${final_capital - args.initial_capital:,.2f} ({total_pnl_percent:.2f}%)");
-    print("-" * 30)
-    print(f"Liczba zrealizowanych transakcji: {num_trades}");
-    print(f"Procent transakcji zyskownych (Win Rate): {win_rate:.2f}%")
-    print(f"Średni zysk na transakcję: ${trades_df['pnl_usd'].mean():.2f}")
-    print(f"\nRozkład powodów zamknięcia pozycji:\n{trades_df['exit_reason'].value_counts(normalize=True).round(2)}");
-    print("-" * 30)
-    print(f"Dla porównania, zwrot z 'Kup i Trzymaj' w tym okresie: {buy_hold_pnl:.2f}%")
+
+    generate_report_and_plots(trades_df, args.initial_capital, backtest_data, output_dir_name, args.ticker)
 
 
 if __name__ == "__main__":
@@ -243,12 +286,9 @@ if __name__ == "__main__":
                         help="Minimalna pewność modelu do otwarcia pozycji.")
     parser.add_argument("--evaluation-window", type=int, default=24,
                         help="Maksymalny czas utrzymywania pozycji (w świecach 1h).")
-
-    # --- NOWE ARGUMENTY DO SYMULACJI POŚLIZGU ---
     parser.add_argument("--slippage-base-usd", type=float, default=20000.0,
                         help="Wartość pozycji w USD, powyżej której zaczyna się poślizg.")
     parser.add_argument("--slippage-factor", type=float, default=0.0005,
                         help="Kara do ceny za każdy 'slippage_base_usd' wielkości pozycji (0.0005 = 0.05%%).")
-
     args = parser.parse_args()
     run_backtest(args)

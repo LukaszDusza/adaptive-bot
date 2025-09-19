@@ -716,3 +716,4 @@ cython_debug/
 /feature_names_short.json
 /feature_names_long.json
 /.env
+/backtest_results_ICP/
