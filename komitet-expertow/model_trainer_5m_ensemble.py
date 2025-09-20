@@ -14,7 +14,6 @@ from sklearn.neural_network import MLPClassifier
 
 # ... (funkcja process_data_from_single_csv bez zmian) ...
 def process_data_from_single_csv(csv_path: str):
-    # Ta funkcja pozostaje bez zmian
     print("--- Uruchamianie procesora danych z jednego pliku CSV ---")
     try:
         df_raw = pd.read_csv(csv_path, parse_dates=['timestamp'])
@@ -69,7 +68,8 @@ def main(args):
     momentum_model = XGBClassifier(n_estimators=100, max_depth=5, learning_rate=0.1, random_state=42, n_jobs=-1)
     momentum_model.fit(X_train_m, y_train_m)
     joblib.dump(momentum_model, f'expert_momentum_{args.ticker}_5m.joblib')
-    with open(f'features_momentum_{args.ticker}_5m.json', 'w') as f: json.dump(momentum_features, f)
+    with open(f'features_momentum_{args.ticker}_5m.json', 'w') as f:
+        json.dump(momentum_features, f)
 
     print("\n[KROK 3/4] Trening Eksperta #2: Model Powrotu do Średniej (Mean Reversion)...")
     reversion_features = [col for col in final_df.columns if 'BB' in col or 'STOCH' in col]
@@ -81,41 +81,42 @@ def main(args):
     reversion_model = LGBMClassifier(n_estimators=100, max_depth=5, learning_rate=0.1, random_state=42, n_jobs=-1)
     reversion_model.fit(X_train_r, y_train_r)
     joblib.dump(reversion_model, f'expert_reversion_{args.ticker}_5m.joblib')
-    with open(f'features_reversion_{args.ticker}_5m.json', 'w') as f: json.dump(reversion_features, f)
+    with open(f'features_reversion_{args.ticker}_5m.json', 'w') as f:
+        json.dump(reversion_features, f)
 
-    # --- TRENING EKSPERTA #3: PRICE ACTION (Z "CECHAMI GEOMETRYCZNYMI") ---
+    # --- TRENING EKSPERTA #3: PRICE ACTION (Z POPRAWKĄ) ---
     print("\n[KROK 4/4] Trening Eksperta #3: Model Wzorców Świecowych (Price Action)...")
 
-    print("Tworzenie 'CECH GEOMETRYCZNYCH' dla modelu Price Action...")
-    pa_df = final_df[['close', 'high', 'low']].copy()
+    print("Tworzenie 'CECH NARRACYJNYCH' dla modelu Price Action...")
 
-    N = 10  # Analizujemy geometrię ostatnich 10 świec
+    # --- KLUCZOWA POPRAWKA: Dodajemy ATRr_14_5m do kopiowanych danych ---
+    pa_df = final_df[['open', 'high', 'low', 'close', 'volume', 'ATRr_14_5m']].copy()
 
-    # Nachylenie mikro-trendu (regresja liniowa)
-    # Zastępujemy NaN zerami, aby regresja działała
-    pa_df['slope'] = pa_df['close'].rolling(window=N).apply(
-        lambda x: np.polyfit(np.arange(N), x.fillna(0), 1)[0], raw=False
-    )
+    # Siła impulsu ostatniej świecy
+    pa_df['impulse_strength'] = (pa_df['close'] - pa_df['open']) / (pa_df['high'] - pa_df['low']).replace(0, 1)
+    # Kontekst zmienności
+    pa_df['volatility_burst'] = (pa_df['high'] - pa_df['low']) / pa_df['ATRr_14_5m'].replace(0, 1)
+    # Psychologia świecy
+    pa_df['closing_position'] = (pa_df['close'] - pa_df['low']) / (pa_df['high'] - pa_df['low']).replace(0, 1)
+    # Dynamika wolumenu
+    pa_df['volume_spike'] = pa_df['volume'] / pa_df['volume'].rolling(window=20).mean().replace(0, 1)
 
-    # "Chaotyczność" rynku
-    pa_df['price_chaos'] = pa_df['high'].rolling(window=N).std() / pa_df['low'].rolling(window=N).std()
+    for col in ['impulse_strength', 'volatility_burst', 'closing_position', 'volume_spike']:
+        for n in [1, 2, 3]:
+            pa_df[f'{col}_lag_{n}'] = pa_df[col].shift(n)
 
-    # Uproszczony wskaźnik fraktalny (Higuchi) - mierzy "chropowatość" wykresu
-    # Wartości bliskie 1 = gładki trend, bliskie 2 = chaos
-    # Ta implementacja jest uproszczona dla wydajności
-    price_diff = pa_df['close'].diff(N).abs()
-    body_sum = (pa_df['high'] - pa_df['low']).rolling(window=N).sum()
-    pa_df['fractal_dimension'] = np.log(price_diff) / np.log(body_sum + 1e-9)  # 1e-9 aby uniknąć dzielenia przez zero
-
-    price_action_features = ['slope', 'price_chaos', 'fractal_dimension']
+    # Usuwamy kolumny robocze, zostawiając tylko finalne cechy
+    price_action_features = [col for col in pa_df.columns if
+                             col not in ['open', 'high', 'low', 'close', 'volume', 'ATRr_14_5m']]
     final_df = pd.concat([final_df, pa_df[price_action_features]], axis=1)
+    print(f"Wybrano {len(price_action_features)} 'CECH NARRACYJNYCH'.")
 
     final_df['target_pa'] = (final_df['close'].shift(-LOOKAHEAD_BARS) > final_df['close']).astype(int)
     model_data_pa = final_df.dropna(subset=['target_pa'] + price_action_features)
     X_pa = model_data_pa[price_action_features]
     y_pa = model_data_pa['target_pa']
 
-    X_pa.replace([np.inf, -np.inf], 0, inplace=True);
+    X_pa.replace([np.inf, -np.inf], np.nan, inplace=True);
     X_pa.fillna(0, inplace=True)
     scaler = StandardScaler()
     X_pa_scaled = scaler.fit_transform(X_pa)
@@ -133,7 +134,8 @@ def main(args):
 
     joblib.dump(pa_model, f'expert_pa_{args.ticker}_5m.joblib')
     joblib.dump(scaler, f'scaler_pa_{args.ticker}_5m.joblib')
-    with open(f'features_pa_{args.ticker}_5m.json', 'w') as f: json.dump(price_action_features, f)
+    with open(f'features_pa_{args.ticker}_5m.json', 'w') as f:
+        json.dump(price_action_features, f)
     print(f"Zapisano OSTATECZNY model, skaler oraz listę cech dla Eksperta #3.")
 
     print("\n--- WSZYSCY EKSPERCI ZOSTALI WYTRENOWANI. PROCES ZAKOŃCZONY POMYŚLNIE! ---")
