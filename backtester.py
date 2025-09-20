@@ -278,8 +278,8 @@ if __name__ == "__main__":
     parser.add_argument("--scaler-short", type=str, required=True, help="Ścieżka do scalera SHORT .joblib.")
     parser.add_argument("--features-file", type=str, required=True, help="Ścieżka do pliku .json z listą cech.")
     parser.add_argument("--ticker", type=str, default="ASSET", help="Nazwa tickera do celów opisowych.")
-    parser.add_argument("--initial-capital", type=float, default=2000.0)
-    parser.add_argument("--risk-percent", type=float, default=0.02)
+    parser.add_argument("--initial-capital", type=float, default=1000.0)
+    parser.add_argument("--risk-percent", type=float, default=0.01)
     parser.add_argument("--atr-profit-multiplier", type=float, default=2.0)
     parser.add_argument("--atr-loss-multiplier", type=float, default=1.0)
     parser.add_argument("--min-confidence", type=float, default=0.60,

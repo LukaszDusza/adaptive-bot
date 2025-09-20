@@ -11,11 +11,11 @@ from pybit.exceptions import InvalidRequestError
 
 # --- Konfiguracja Bota ---
 TICKER = "ICPUSDT"
-RISK_PER_TRADE = 0.02
+RISK_PER_TRADE = 0.01
 LEVERAGE = "10"
 API_URL = "http://api_service:8080/predict"
 POSITION_TIME_EXIT_HOURS = 12
-MIN_CONFIDENCE = 0.40
+MIN_CONFIDENCE = 0.58
 QTY_PRECISION = 1
 
 # --- Konfiguracja Testów i Logowania ---
@@ -255,7 +255,7 @@ if __name__ == "__main__":
     run_startup_smoke_tests()
     log("bot_startup_successful", {})
     check_for_signal_and_trade()
-    schedule.every().hour.at(":02").do(check_for_signal_and_trade)
+    schedule.every().hour.at(":03").do(check_for_signal_and_trade)
     while True:
         schedule.run_pending()
         time.sleep(1)
