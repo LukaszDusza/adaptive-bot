@@ -11,7 +11,7 @@ from pybit.exceptions import InvalidRequestError
 
 # --- Konfiguracja Bota ---
 TICKER = "ICPUSDT"
-RISK_PER_TRADE = 0.01
+RISK_PER_TRADE = 0.02
 LEVERAGE = "10"
 API_URL = "http://api_service:8080/predict"
 POSITION_TIME_EXIT_HOURS = 12
