@@ -9,3 +9,4 @@ pybit
 schedule
 requests
 pandas-ta
+lightgbm
