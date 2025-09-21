@@ -3,7 +3,7 @@ from tqdm import tqdm
 import config
 import asyncio
 
-from utils.async_data_fetcher import fetch_data_for_trainer_async
+from async_data_fetcher import fetch_data_for_trainer_async
 from services.analysis_service import AnalysisService
 from logic.position_manager import PositionManager
 from utils.data_preparer import prepare_full_feature_set

@@ -7,26 +7,27 @@ TICKER_NAME_FOR_MODELS = "ETH"
 MODE = "backtest"  # 'backtest' lub 'live'
 
 # --- Konfiguracja Backtestu ---
-START_DATE = "2025-09-01"
-END_DATE = datetime.now().strftime('%Y-%m-%d')
-INITIAL_CAPITAL = 3700.0
+START_DATE = "2025-08-01"
+END_DATE = "2025-08-31"
+INITIAL_CAPITAL = 1000.0
 DEBUG_MODE = True
+# END_DATE = datetime.now().strftime('%Y-%m-%d')
 
 # --- Zarządzanie Ryzykiem ---
-RISK_PERCENT = 0.03
+RISK_PERCENT = 0.33
 LEVERAGE = 10.0
-ATR_MULTIPLIER = 1.5
+ATR_MULTIPLIER = 2.0
 RRR = 2.5
 TRADE_COST_USD = 1.0
 
 # --- Logika Wejścia/Wyjścia ---
-ENTRY_VOTES = 2
+ENTRY_VOTES = 1
 EXIT_SIGNAL_PERSISTENCE = 2
-MIN_CONF_MOMENTUM = 0.69
-MIN_CONF_REVERSION = 0.72
-MIN_CONF_PA = 0.53
+MIN_CONF_MOMENTUM = 0.89
+MIN_CONF_REVERSION = 0.89
+MIN_CONF_PA = 0.70
 
 # --- Mechaniki Prowadzenia Pozycji ---
-BREAKEVEN_TRIGGER_PERCENT = 0.6
+BREAKEVEN_TRIGGER_PERCENT = 0.5
 TRAILING_SL_TRIGGER_R = 1.5
 TRAILING_SL_DISTANCE_ATR = 1.5
