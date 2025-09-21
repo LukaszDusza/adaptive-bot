@@ -24,7 +24,7 @@ MIN_TEST_QTY = "5.1"
 
 # Ustawienie ustrukturyzowanego loggera
 logging.basicConfig(level=logging.INFO,
-                    format='{"timestamp": "%(asctime)s", "level": "%(levelname)s", "service": "trading_bot", "message": %(message)s}',
+                    format='{"timestamp": "%(asctime)s", "level": "%(levelname)s", "services": "trading_bot", "message": %(message)s}',
                     datefmt='%Y-%m-%dT%H:%M:%S%z')
 
 
