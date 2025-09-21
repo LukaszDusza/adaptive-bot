@@ -419,7 +419,7 @@ if __name__ == "__main__":
     if args.ticker is None: args.ticker = "ETHUSDT"
     if args.start_date is None: args.start_date = "2025-09-01"
     if args.initial_capital is None: args.initial_capital = 3700.0
-    if args.risk_percent is None: args.risk_percent = 0.02
+    if args.risk_percent is None: args.risk_percent = 0.03
     if args.leverage is None: args.leverage = "10"
     if args.atr_multiplier is None: args.atr_multiplier = 1.5
     if args.rrr is None: args.rrr = 2.6
