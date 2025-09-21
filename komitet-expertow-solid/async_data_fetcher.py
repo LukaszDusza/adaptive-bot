@@ -18,15 +18,15 @@ def _convert_dataframe_numeric(df: pd.DataFrame) -> pd.DataFrame:
     if isinstance(df.index, pd.DatetimeIndex):
         df = df.reset_index()
 
+
+    df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
+
     ohlcv_cols = ['open', 'high', 'low', 'close', 'volume', 'turnover']
     for col in ohlcv_cols:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    df.dropna(subset=ohlcv_cols, inplace=True)
-
-    # Ustawiamy timestamp z powrotem jako indeks
-    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df.dropna(subset=ohlcv_cols + ['timestamp'], inplace=True)
     df.set_index('timestamp', inplace=True)
     return df
 
