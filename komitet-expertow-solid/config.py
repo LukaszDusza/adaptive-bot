@@ -1,0 +1,32 @@
+# config.py
+from datetime import datetime
+
+# --- Konfiguracja Środowiska ---
+TICKER = "ETHUSDT"
+TICKER_NAME_FOR_MODELS = "ETH"
+MODE = "backtest"  # 'backtest' lub 'live'
+
+# --- Konfiguracja Backtestu ---
+START_DATE = "2025-09-01"
+END_DATE = datetime.now().strftime('%Y-%m-%d')
+INITIAL_CAPITAL = 3700.0
+DEBUG_MODE = True
+
+# --- Zarządzanie Ryzykiem ---
+RISK_PERCENT = 0.03
+LEVERAGE = 10.0
+ATR_MULTIPLIER = 1.5
+RRR = 2.6
+TRADE_COST_USD = 1.0
+
+# --- Logika Wejścia/Wyjścia ---
+ENTRY_VOTES = 2
+EXIT_SIGNAL_PERSISTENCE = 1
+MIN_CONF_MOMENTUM = 0.69
+MIN_CONF_REVERSION = 0.72
+MIN_CONF_PA = 0.53
+
+# --- Mechaniki Prowadzenia Pozycji ---
+BREAKEVEN_TRIGGER_PERCENT = 0.5
+TRAILING_SL_TRIGGER_R = 1.5
+TRAILING_SL_DISTANCE_ATR = 1.5

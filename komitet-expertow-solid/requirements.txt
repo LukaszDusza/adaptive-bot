@@ -1,0 +1,13 @@
+aiohttp
+pandas
+scikit-learn
+joblib
+matplotlib
+seaborn
+Flask
+pybit
+schedule
+requests
+pandas-ta
+lightgbm
+xgboost
