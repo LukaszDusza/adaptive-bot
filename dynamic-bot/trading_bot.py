@@ -15,7 +15,7 @@ RISK_PER_TRADE = 0.02
 LEVERAGE = "10"
 API_URL = "http://api_service:8080/predict"
 POSITION_TIME_EXIT_HOURS = 12
-MIN_CONFIDENCE = 0.58
+MIN_CONFIDENCE = 0.55
 QTY_PRECISION = 1
 
 # --- Konfiguracja Testów i Logowania ---
