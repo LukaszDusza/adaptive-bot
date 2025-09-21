@@ -12,7 +12,7 @@ class PositionManager:
         self.events.append({"timestamp": timestamp, "event": event_type, "details": details})
 
     def process_candle(self, current_candle, analysis, capital):
-        # --- APPLY PENDING BE NA POCZĄTKU ŚWIECY (apply-on-next-bar) ---
+        # --- APPLY PENDING BE (apply-on-next-bar) ---
         if self.active_position and getattr(self.active_position, "_pending_be", False):
             pos = self.active_position
             # BE = SL na poziom breakeven_sl_price (u Ciebie to entry_price)
@@ -20,11 +20,23 @@ class PositionManager:
                 if pos.breakeven_sl_price > pos.current_sl_price:
                     pos.current_sl_price = pos.breakeven_sl_price
             else:
-                # jeśli kiedyś dodasz shorty – analogicznie w dół:
                 if pos.breakeven_sl_price < pos.current_sl_price:
                     pos.current_sl_price = pos.breakeven_sl_price
             pos.is_be = True
             pos._pending_be = False  # wyczyść flagę
+
+        # --- APPLY PENDING TSL (apply-on-next-bar) ---
+        if self.active_position and hasattr(self.active_position, "_pending_tsl_sl"):
+            pos = self.active_position
+            cand = pos._pending_tsl_sl
+            if cand is not None:
+                if pos.strategy == 'long':
+                    if cand > pos.current_sl_price:
+                        pos.current_sl_price = cand
+                else:
+                    if cand < pos.current_sl_price:
+                        pos.current_sl_price = cand
+                pos._pending_tsl_sl = None  # skonsumowane
 
         # Krok 1: Sprawdź, czy zamknąć istniejącą pozycję
         if self.active_position:
@@ -45,7 +57,7 @@ class PositionManager:
         pos = self.active_position
         exit_reason = None
 
-        # Aktualizacja mechanik BE i TSL (tu już NIE podnosimy SL na BE w tej samej świecy)
+        # Aktualizacja mechanik BE i TSL (TSL i BE jedynie TRIGGER/KANDYDAT na tę świecę)
         self._update_mechanics(current_candle)
 
         # Logika wyjścia sygnałem z modelu
@@ -130,22 +142,24 @@ class PositionManager:
     def _update_mechanics(self, current_candle):
         pos = self.active_position
         if pos.strategy == 'long':
-            # Trailing ma pierwszeństwo
+            # 1) TRAILING – aktywacja po R-multiple (stan), ale bez natychmiastowego podnoszenia SL
             if self.config.TRAILING_SL_TRIGGER_R > 0 and not pos.is_trailing and current_candle['high'] >= pos.trailing_trigger_price:
                 pos.is_trailing = True
                 self._log_event(current_candle.name, 'trailing_sl_activated', {'trade_entry_date': pos.entry_date})
 
-            # Break-Even: tylko TRIGGER w tej świecy → zastosujemy na początku następnej
+            # 2) BE – tylko TRIGGER na tej świecy; zastosujemy na początku następnej
             elif self.config.BREAKEVEN_TRIGGER_PERCENT > 0 and not pos.is_be and current_candle['high'] >= pos.breakeven_trigger_price:
-                # Zamiast natychmiast podnosić SL, ustawiamy flagę pending
-                pos._pending_be = True
+                pos._pending_be = True  # ← odkładamy BE
                 self._log_event(current_candle.name, 'breakeven_activated', {'trade_entry_date': pos.entry_date})
 
-            # Trailing SL update (jeśli aktywny)
+            # 3) TRAILING – zamiast od razu podnosić SL, zapisujemy „kandydata” do zastosowania na N+1
             if pos.is_trailing:
-                new_sl = current_candle['close'] - (current_candle['ATRr_14_5m'] * self.config.TRAILING_SL_DISTANCE_ATR)
-                if new_sl > pos.current_sl_price:
-                    pos.current_sl_price = new_sl
+                atr_here = current_candle['ATRr_14_5m']
+                new_sl_candidate = current_candle['close'] - (atr_here * self.config.TRAILING_SL_DISTANCE_ATR)
+                # trzymaj tylko najlepszy kandydat w tej świecy
+                best = getattr(pos, "_pending_tsl_sl", None)
+                if (best is None) or (new_sl_candidate > best):
+                    pos._pending_tsl_sl = new_sl_candidate
 
     def _count_votes(self, analysis, prediction_target):
         votes = 0

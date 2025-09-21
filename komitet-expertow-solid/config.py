@@ -7,8 +7,8 @@ TICKER_NAME_FOR_MODELS = "ETH"
 MODE = "backtest"  # 'backtest' lub 'live'
 
 # --- Konfiguracja Backtestu ---
-START_DATE = "2025-08-01"
-END_DATE = "2025-08-31"
+START_DATE = "2025-09-01"
+END_DATE = "2025-09-15"
 INITIAL_CAPITAL = 1000.0
 DEBUG_MODE = True
 # END_DATE = datetime.now().strftime('%Y-%m-%d')
