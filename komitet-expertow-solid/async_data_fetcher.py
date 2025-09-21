@@ -14,20 +14,15 @@ CACHE_DIR = "utils/data_cache"
 
 
 def _convert_dataframe_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    """Konwertuje kolumny OHLCV na typ numeryczny i usuwa wiersze z błędami."""
-    if isinstance(df.index, pd.DatetimeIndex):
-        df = df.reset_index()
 
+    if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+        print("Wykryto numeryczny timestamp. Konwertowanie...")
+        df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
 
-    df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
-
-    ohlcv_cols = ['open', 'high', 'low', 'close', 'volume', 'turnover']
-    for col in ohlcv_cols:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-
-    df.dropna(subset=ohlcv_cols + ['timestamp'], inplace=True)
     df.set_index('timestamp', inplace=True)
+    numeric_cols = ['open', 'high', 'low', 'close', 'volume']
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors='coerce')
     return df
 
 
