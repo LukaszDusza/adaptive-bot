@@ -10,7 +10,7 @@ from pybit.unified_trading import HTTP
 # --- Konfiguracja ---
 MAX_CONCURRENT_REQUESTS = 10
 API_SLEEP_SECONDS = 0.1
-CACHE_DIR = "data_cache"
+CACHE_DIR = "utils/data_cache"
 
 
 def _convert_dataframe_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -69,20 +69,20 @@ async def _fetch_chunk(session, semaphore, ticker, start_ts, end_ts):
 
 async def fetch_data_for_trainer_async(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     os.makedirs(CACHE_DIR, exist_ok=True)
-    cache_filename = f"{CACHE_DIR}/{ticker}_{start_date}_to_{end_date}.csv"
+    cache_filename = f"{CACHE_DIR}/{ticker}_{start_date.strip()}_{end_date.strip()}.csv"
 
     if os.path.exists(cache_filename):
         print(f"Znaleziono dane w cache. Wczytywanie z pliku: {cache_filename}")
         df = pd.read_csv(cache_filename, parse_dates=['timestamp'])
 
-        # <<< POPRAWKA: Używamy funkcji pomocniczej dla danych z cache >>>
         df = _convert_dataframe_numeric(df)
         return df
 
     print("Brak danych w cache. Rozpoczynanie pobierania z API...")
     session = get_bybit_session()
-    start_dt = datetime.strptime(start_date, "%Y-m-d").replace(tzinfo=timezone.utc)
-    end_dt = datetime.strptime(end_date, "%Y-m-d").replace(tzinfo=timezone.utc)
+
+    start_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    end_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
     date_chunks = []
     current_start = start_dt

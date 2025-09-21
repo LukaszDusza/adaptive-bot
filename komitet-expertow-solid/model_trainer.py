@@ -14,7 +14,7 @@ from sklearn.neural_network import MLPClassifier
 import config_trainer
 # Przywracamy import do naszego asynchronicznego fetchera
 from async_data_fetcher import fetch_data_for_trainer_async
-from data_preparer import prepare_full_feature_set
+from utils.data_preparer import prepare_full_feature_set
 
 
 async def main():  # <-- Funkcja znowu jest asynchroniczna
