@@ -9,6 +9,13 @@ from logic.position_manager import PositionManager
 from utils.data_preparer import prepare_full_feature_set
 from utils.reporting import generate_full_report, save_events_log
 
+# --- Fees (tak jak na giełdzie, w bps od nominału) ---
+FEE_BPS_OPEN  = getattr(config, "FEE_BPS_OPEN", 3.0)   # np. 0.03%
+FEE_BPS_CLOSE = getattr(config, "FEE_BPS_CLOSE", 3.0)   # np. 0.03%
+
+def fee_usd(notional, bps):
+    return float(notional) * float(bps) / 10_000.0
+
 # --- Fees (round-trip) tylko dla backtestu ---
 from config import TRADE_COST_USD as ROUND_TRIP_COST
 OPEN_COST  = ROUND_TRIP_COST * 0.5
@@ -39,21 +46,25 @@ async def run():
         decision, details = manager.process_candle(current_candle, analysis, capital)
 
         if decision == 'OPEN':
-            # koszt wejścia (połowa round-trip)
-            capital -= OPEN_COST
+            # details to obiekt Position; pobieramy nominał wejścia
+            entry_price = details.entry_price if hasattr(details, "entry_price") else details["entry_price"]
+            size = details.size if hasattr(details, "size") else details["size"]
+            open_fee = fee_usd(entry_price * size, FEE_BPS_OPEN)
+            capital -= open_fee
 
         elif decision == 'CLOSE':
-            # opłaty za cały trade (wejście + wyjście)
-            fees = OPEN_COST + CLOSE_COST
-            pnl_net = details['pnl_usd'] - fees
+            exit_price = details['exit_price']
+            size = details['size']
 
-            # rozliczenie kapitału: dodaj PnL brutto i odejmij koszt wyjścia
-            capital += details['pnl_usd']
-            capital -= CLOSE_COST
+            close_fee = fee_usd(exit_price * size, FEE_BPS_CLOSE)
+            capital += details['pnl_usd']  # brutto PnL
+            capital -= close_fee  # koszt zamknięcia
 
-            # wzbogacamy rekord transakcji do raportu
-            details['fees_usd'] = fees
-            details['pnl_net_usd'] = pnl_net
+            # policz łączne fee (open przeliczamy deterministycznie z danych wejścia)
+            open_fee = fee_usd(details['entry_price'] * size, FEE_BPS_OPEN)
+            total_fee = open_fee + close_fee
+            details['fees_usd'] = total_fee
+            details['pnl_net_usd'] = details['pnl_usd'] - total_fee
 
             trades.append(details)
 

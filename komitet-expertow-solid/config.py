@@ -7,14 +7,14 @@ TICKER_NAME_FOR_MODELS = "ETH"
 MODE = "backtest"  # 'backtest' lub 'live'
 
 # --- Konfiguracja Backtestu ---
-START_DATE = "2025-09-01"
-END_DATE = "2025-09-15"
+START_DATE = "2025-08-20"
+END_DATE = "2025-09-13"
 INITIAL_CAPITAL = 1000.0
 DEBUG_MODE = True
 # END_DATE = datetime.now().strftime('%Y-%m-%d')
 
 # --- Zarządzanie Ryzykiem ---
-RISK_PERCENT = 0.33
+RISK_PERCENT = 0.02
 LEVERAGE = 10.0
 ATR_MULTIPLIER = 2.0
 RRR = 2.5
