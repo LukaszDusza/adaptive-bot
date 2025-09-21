@@ -422,13 +422,13 @@ if __name__ == "__main__":
     if args.risk_percent is None: args.risk_percent = 0.02
     if args.leverage is None: args.leverage = "10"
     if args.atr_multiplier is None: args.atr_multiplier = 1.5
-    if args.rrr is None: args.rrr = 2.5
+    if args.rrr is None: args.rrr = 2.6
     if args.trade_cost is None: args.trade_cost = 1.0
     if args.entry_votes is None: args.entry_votes = 2
-    if args.exit_signal_persistence is None: args.exit_signal_persistence = 2
-    if args.min_conf_momentum is None: args.min_conf_momentum = 0.70
-    if args.min_conf_reversion is None: args.min_conf_reversion = 0.73
-    if args.min_conf_pa is None: args.min_conf_pa = 0.54
+    if args.exit_signal_persistence is None: args.exit_signal_persistence = 1
+    if args.min_conf_momentum is None: args.min_conf_momentum = 0.69
+    if args.min_conf_reversion is None: args.min_conf_reversion = 0.72
+    if args.min_conf_pa is None: args.min_conf_pa = 0.53
 
     bot = TradingBot(args)
     if args.mode == 'backtest':
