@@ -12,6 +12,20 @@ class PositionManager:
         self.events.append({"timestamp": timestamp, "event": event_type, "details": details})
 
     def process_candle(self, current_candle, analysis, capital):
+        # --- APPLY PENDING BE NA POCZĄTKU ŚWIECY (apply-on-next-bar) ---
+        if self.active_position and getattr(self.active_position, "_pending_be", False):
+            pos = self.active_position
+            # BE = SL na poziom breakeven_sl_price (u Ciebie to entry_price)
+            if pos.strategy == 'long':
+                if pos.breakeven_sl_price > pos.current_sl_price:
+                    pos.current_sl_price = pos.breakeven_sl_price
+            else:
+                # jeśli kiedyś dodasz shorty – analogicznie w dół:
+                if pos.breakeven_sl_price < pos.current_sl_price:
+                    pos.current_sl_price = pos.breakeven_sl_price
+            pos.is_be = True
+            pos._pending_be = False  # wyczyść flagę
+
         # Krok 1: Sprawdź, czy zamknąć istniejącą pozycję
         if self.active_position:
             closed_trade = self._manage_active_position(current_candle, analysis)
@@ -31,7 +45,7 @@ class PositionManager:
         pos = self.active_position
         exit_reason = None
 
-        # Aktualizacja mechanik BE i TSL
+        # Aktualizacja mechanik BE i TSL (tu już NIE podnosimy SL na BE w tej samej świecy)
         self._update_mechanics(current_candle)
 
         # Logika wyjścia sygnałem z modelu
@@ -49,15 +63,19 @@ class PositionManager:
             if pos.strategy == 'long':
                 if current_candle['low'] <= pos.current_sl_price:
                     exit_reason = "Break-Even" if pos.is_be else ("Trailing Stop" if pos.is_trailing else "Stop Loss")
-                elif not pos.is_trailing and current_candle['high'] >= pos.tp_price:
+                elif current_candle['high'] >= pos.tp_price:  # TP działa także przy aktywnym TSL
                     exit_reason = "Take Profit"
 
         if exit_reason:
-            sl_tp_price_map = {"Stop Loss": pos.current_sl_price, "Trailing Stop": pos.current_sl_price,
-                               "Break-Even": pos.current_sl_price, "Take Profit": pos.tp_price}
-            exit_price = current_candle['close'] if "Model Exit" in exit_reason else sl_tp_price_map.get(exit_reason,
-                                                                                                         current_candle[
-                                                                                                             'close'])
+            sl_tp_price_map = {
+                "Stop Loss": pos.current_sl_price,
+                "Trailing Stop": pos.current_sl_price,
+                "Break-Even": pos.current_sl_price,
+                "Take Profit": pos.tp_price
+            }
+            exit_price = current_candle['close'] if "Model Exit" in exit_reason else sl_tp_price_map.get(
+                exit_reason, current_candle['close']
+            )
             pnl = (exit_price - pos.entry_price) * pos.size
 
             return {
@@ -67,10 +85,14 @@ class PositionManager:
                 'strategy': pos.strategy, 'conf_momentum': pos.conf_momentum,
                 'conf_reversion': pos.conf_reversion, 'conf_pa': pos.conf_pa
             }
+
         return None
 
     def _check_for_new_entry(self, current_candle, analysis, capital):
-        if self.active_position: return None
+        if not analysis:
+            return None
+        if self.active_position:
+            return None
 
         votes_long = self._count_votes(analysis, prediction_target=1)
         strategy_to_open = 'long' if votes_long >= self.config.ENTRY_VOTES else None
@@ -85,10 +107,10 @@ class PositionManager:
             position_size = position_value / entry_price if entry_price > 0 else 0
 
             tp_distance = abs(tp_price - entry_price)
+
             be_trigger = self.config.BREAKEVEN_TRIGGER_PERCENT
             be_trigger_price = entry_price + (tp_distance * be_trigger) if be_trigger > 0 else 0
-            be_sl_price = entry_price + (
-                        self.config.TRADE_COST_USD / position_size) if position_size > 0 else entry_price
+            be_sl_price = entry_price  # BE = entry (realne 0)
 
             tsl_trigger = self.config.TRAILING_SL_TRIGGER_R
             tsl_trigger_price = entry_price + (stop_loss_distance * tsl_trigger) if tsl_trigger > 0 else 0
@@ -108,23 +130,30 @@ class PositionManager:
     def _update_mechanics(self, current_candle):
         pos = self.active_position
         if pos.strategy == 'long':
-            if self.config.TRAILING_SL_TRIGGER_R > 0 and not pos.is_trailing and current_candle[
-                'high'] >= pos.trailing_trigger_price:
+            # Trailing ma pierwszeństwo
+            if self.config.TRAILING_SL_TRIGGER_R > 0 and not pos.is_trailing and current_candle['high'] >= pos.trailing_trigger_price:
                 pos.is_trailing = True
                 self._log_event(current_candle.name, 'trailing_sl_activated', {'trade_entry_date': pos.entry_date})
-            elif self.config.BREAKEVEN_TRIGGER_PERCENT > 0 and not pos.is_be and current_candle[
-                'high'] >= pos.breakeven_trigger_price:
-                pos.current_sl_price = pos.breakeven_sl_price;
-                pos.is_be = True
+
+            # Break-Even: tylko TRIGGER w tej świecy → zastosujemy na początku następnej
+            elif self.config.BREAKEVEN_TRIGGER_PERCENT > 0 and not pos.is_be and current_candle['high'] >= pos.breakeven_trigger_price:
+                # Zamiast natychmiast podnosić SL, ustawiamy flagę pending
+                pos._pending_be = True
                 self._log_event(current_candle.name, 'breakeven_activated', {'trade_entry_date': pos.entry_date})
+
+            # Trailing SL update (jeśli aktywny)
             if pos.is_trailing:
                 new_sl = current_candle['close'] - (current_candle['ATRr_14_5m'] * self.config.TRAILING_SL_DISTANCE_ATR)
-                if new_sl > pos.current_sl_price: pos.current_sl_price = new_sl
+                if new_sl > pos.current_sl_price:
+                    pos.current_sl_price = new_sl
 
     def _count_votes(self, analysis, prediction_target):
         votes = 0
-        min_conf_map = {'momentum': self.config.MIN_CONF_MOMENTUM, 'reversion': self.config.MIN_CONF_REVERSION,
-                        'pa': self.config.MIN_CONF_PA}
+        min_conf_map = {
+            'momentum': self.config.MIN_CONF_MOMENTUM,
+            'reversion': self.config.MIN_CONF_REVERSION,
+            'pa': self.config.MIN_CONF_PA
+        }
         for expert, opinion in analysis['expert_opinions'].items():
             if opinion['confidence'] >= min_conf_map[expert] and opinion['prediction'] == prediction_target:
                 votes += 1

@@ -9,6 +9,11 @@ from logic.position_manager import PositionManager
 from utils.data_preparer import prepare_full_feature_set
 from utils.reporting import generate_full_report, save_events_log
 
+# --- Fees (round-trip) tylko dla backtestu ---
+from config import TRADE_COST_USD as ROUND_TRIP_COST
+OPEN_COST  = ROUND_TRIP_COST * 0.5
+CLOSE_COST = ROUND_TRIP_COST * 0.5
+
 async def run():
     analyzer = AnalysisService(config.TICKER_NAME_FOR_MODELS)
     manager = PositionManager(config)
@@ -32,12 +37,28 @@ async def run():
     for timestamp, current_candle in pbar:
         analysis = analyzer.get_analysis_from_row(current_candle)
         decision, details = manager.process_candle(current_candle, analysis, capital)
+
         if decision == 'OPEN':
-            capital -= config.TRADE_COST_USD
+            # koszt wejścia (połowa round-trip)
+            capital -= OPEN_COST
+
         elif decision == 'CLOSE':
+            # opłaty za cały trade (wejście + wyjście)
+            fees = OPEN_COST + CLOSE_COST
+            pnl_net = details['pnl_usd'] - fees
+
+            # rozliczenie kapitału: dodaj PnL brutto i odejmij koszt wyjścia
             capital += details['pnl_usd']
+            capital -= CLOSE_COST
+
+            # wzbogacamy rekord transakcji do raportu
+            details['fees_usd'] = fees
+            details['pnl_net_usd'] = pnl_net
+
             trades.append(details)
+
         equity_curve[timestamp] = capital
+
         if config.DEBUG_MODE and analysis:
             confs = {e: f"{o['confidence']:.2f}" for e, o in analysis['expert_opinions'].items()}
             pbar.set_description(
