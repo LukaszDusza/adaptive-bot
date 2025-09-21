@@ -5,10 +5,11 @@ import time
 from datetime import datetime
 import pandas as pd
 from pybit.unified_trading import HTTP
+from dotenv import load_dotenv
 
 class BybitService:
     def __init__(self, mode='live'):
-        # ... (bez zmian) ...
+        load_dotenv()
         self.session = HTTP(testnet=False) # Uproszczone dla przykładu
         print("Bybit Service zainicjalizowany.")
 

@@ -6,8 +6,10 @@ from datetime import datetime, timezone, timedelta
 import pandas as pd
 from pybit.unified_trading import HTTP
 from tqdm.asyncio import tqdm as asyncio_tqdm
+from dotenv import load_dotenv
 
 # --- Konfiguracja ---
+load_dotenv()
 API_KEY = os.getenv("BYBIT_API_KEY")
 API_SECRET = os.getenv("BYBIT_API_SECRET")
 MAX_CONCURRENT_REQUESTS = 10  # Ile zapytań do API wysyłać jednocześnie

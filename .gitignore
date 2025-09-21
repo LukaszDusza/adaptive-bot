@@ -718,3 +718,4 @@ cython_debug/
 /dynamic-bot/.env
 /backtest_results_ICP/
 /komitet-expertow/.env
+/komitet-expertow-solid/.env
