@@ -11,6 +11,50 @@ class PositionManager:
     def _log_event(self, timestamp, event_type, details):
         self.events.append({"timestamp": timestamp, "event": event_type, "details": details})
 
+    # ====== Slippage helper ======
+    def _slip_bps(self, kind: str) -> float:
+        """
+        Zwraca bps (1/10000) poślizgu dla danego typu wyjścia.
+        kind: 'stop' albo 'tp'
+        """
+        if kind == 'stop':
+            return float(getattr(self.config, "SLIPPAGE_BPS_STOP", 5.0)) / 10_000.0  # domyślnie 5 bps
+        else:
+            return float(getattr(self.config, "SLIPPAGE_BPS_TP", 2.0)) / 10_000.0    # domyślnie 2 bps
+
+    def _apply_slippage(self, reason: str, pos: Position, raw_price: float, candle) -> float:
+        """
+        Zwraca cenę wyjścia po poślizgu (z ograniczeniem do high/low świecy).
+        Poślizg zawsze niekorzystny.
+        """
+        high = float(candle['high'])
+        low = float(candle['low'])
+
+        if reason in ("Stop Loss", "Trailing Stop", "Break-Even"):
+            s = self._slip_bps('stop')
+            if pos.strategy == 'long':
+                # gorzej = trochę niżej niż SL, ale nie poniżej low
+                slipped = raw_price * (1.0 - s)
+                return max(low, slipped)
+            else:  # short
+                # gorzej = trochę wyżej niż SL, ale nie powyżej high
+                slipped = raw_price * (1.0 + s)
+                return min(high, slipped)
+
+        elif reason == "Take Profit":
+            s = self._slip_bps('tp')
+            if pos.strategy == 'long':
+                # gorzej = trochę niżej niż TP, clamp do [low, high]
+                slipped = raw_price * (1.0 - s)
+                return max(low, min(high, slipped))
+            else:
+                # short: gorzej = trochę wyżej niż TP, clamp do [low, high]
+                slipped = raw_price * (1.0 + s)
+                return max(low, min(high, slipped))
+
+        # fallback (np. Model Exit) – bez poślizgu
+        return raw_price
+
     def process_candle(self, current_candle, analysis, capital):
         # --- APPLY PENDING BE (apply-on-next-bar) ---
         if self.active_position and getattr(self.active_position, "_pending_be", False):
@@ -60,7 +104,7 @@ class PositionManager:
         # Aktualizacja mechanik BE i TSL (TSL i BE jedynie TRIGGER/KANDYDAT na tę świecę)
         self._update_mechanics(current_candle)
 
-        # Logika wyjścia sygnałem z modelu
+        # Logika wyjścia sygnałem z modelu (dla longa – krótsze SYG)
         votes_short = self._count_votes(analysis, prediction_target=0)
         if pos.strategy == 'long':
             if votes_short >= 2:
@@ -70,25 +114,38 @@ class PositionManager:
             if pos.opposing_signal_count >= self.config.EXIT_SIGNAL_PERSISTENCE:
                 exit_reason = "Model Exit Signal"
 
-        # Logika wyjścia przez SL/TP
+        # Logika wyjścia przez SL/TP (pesymistyczny priorytet: SL przed TP)
         if not exit_reason:
             if pos.strategy == 'long':
                 if current_candle['low'] <= pos.current_sl_price:
                     exit_reason = "Break-Even" if pos.is_be else ("Trailing Stop" if pos.is_trailing else "Stop Loss")
-                elif current_candle['high'] >= pos.tp_price:  # TP działa także przy aktywnym TSL
+                elif current_candle['high'] >= pos.tp_price:
+                    exit_reason = "Take Profit"
+            else:  # short
+                if current_candle['high'] >= pos.current_sl_price:
+                    exit_reason = "Break-Even" if pos.is_be else ("Trailing Stop" if pos.is_trailing else "Stop Loss")
+                elif current_candle['low'] <= pos.tp_price:
                     exit_reason = "Take Profit"
 
         if exit_reason:
-            sl_tp_price_map = {
-                "Stop Loss": pos.current_sl_price,
-                "Trailing Stop": pos.current_sl_price,
-                "Break-Even": pos.current_sl_price,
-                "Take Profit": pos.tp_price
-            }
-            exit_price = current_candle['close'] if "Model Exit" in exit_reason else sl_tp_price_map.get(
-                exit_reason, current_candle['close']
-            )
-            pnl = (exit_price - pos.entry_price) * pos.size
+            # Cena surowa wg powodu
+            if "Model Exit" in exit_reason:
+                raw_exit_price = current_candle['close']
+            else:
+                sl_tp_price_map = {
+                    "Stop Loss": pos.current_sl_price,
+                    "Trailing Stop": pos.current_sl_price,
+                    "Break-Even": pos.current_sl_price,
+                    "Take Profit": pos.tp_price
+                }
+                raw_exit_price = sl_tp_price_map.get(exit_reason, current_candle['close'])
+
+            # Zastosuj poślizg (adverse) i oblicz PnL
+            exit_price = self._apply_slippage(exit_reason, pos, raw_exit_price, current_candle)
+            if pos.strategy == 'long':
+                pnl = (exit_price - pos.entry_price) * pos.size
+            else:
+                pnl = (pos.entry_price - exit_price) * pos.size
 
             return {
                 'entry_date': pos.entry_date, 'exit_date': current_candle.name,
@@ -142,21 +199,20 @@ class PositionManager:
     def _update_mechanics(self, current_candle):
         pos = self.active_position
         if pos.strategy == 'long':
-            # 1) TRAILING – aktywacja po R-multiple (stan), ale bez natychmiastowego podnoszenia SL
+            # 1) TRAILING – aktywacja po R-multiple (stan), bez natychmiastowego podnoszenia SL
             if self.config.TRAILING_SL_TRIGGER_R > 0 and not pos.is_trailing and current_candle['high'] >= pos.trailing_trigger_price:
                 pos.is_trailing = True
                 self._log_event(current_candle.name, 'trailing_sl_activated', {'trade_entry_date': pos.entry_date})
 
             # 2) BE – tylko TRIGGER na tej świecy; zastosujemy na początku następnej
             elif self.config.BREAKEVEN_TRIGGER_PERCENT > 0 and not pos.is_be and current_candle['high'] >= pos.breakeven_trigger_price:
-                pos._pending_be = True  # ← odkładamy BE
+                pos._pending_be = True
                 self._log_event(current_candle.name, 'breakeven_activated', {'trade_entry_date': pos.entry_date})
 
-            # 3) TRAILING – zamiast od razu podnosić SL, zapisujemy „kandydata” do zastosowania na N+1
+            # 3) TRAILING – zapisujemy kandydata SL do zastosowania na N+1
             if pos.is_trailing:
                 atr_here = current_candle['ATRr_14_5m']
                 new_sl_candidate = current_candle['close'] - (atr_here * self.config.TRAILING_SL_DISTANCE_ATR)
-                # trzymaj tylko najlepszy kandydat w tej świecy
                 best = getattr(pos, "_pending_tsl_sl", None)
                 if (best is None) or (new_sl_candidate > best):
                     pos._pending_tsl_sl = new_sl_candidate
