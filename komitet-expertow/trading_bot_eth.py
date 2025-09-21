@@ -18,8 +18,8 @@ from pybit.unified_trading import HTTP
 DEFAULT_TICKER = "ETHUSDT"
 DEFAULT_RISK = 0.02
 DEFAULT_LEVERAGE = "10"
-DEFAULT_ATR_MULTIPLIER = 1.5
-DEFAULT_MIN_CONFIDENCE = 0.58
+DEFAULT_ATR_MULTIPLIER = 2.0
+DEFAULT_MIN_CONFIDENCE = 0.57
 DEFAULT_RRR = 2.0
 DEFAULT_TRADE_COST = 1.0
 
@@ -33,16 +33,13 @@ def log(event, details):
     logging.info(json.dumps({"event": event, "details": details}))
 
 
-# --- NOWA, KOMPLETNA FUNKCJA DO PRZYGOTOWANIA DANYCH ---
+# --- FUNKCJA DO PRZYGOTOWANIA DANYCH ---
 def prepare_full_feature_set(df_5m_raw: pd.DataFrame):
     print("Agregowanie danych i obliczanie wszystkich wskaźników oraz cech...")
-
     ohlc = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
     df_15m_raw = df_5m_raw.resample('15min').agg(ohlc).dropna()
     df_1h_raw = df_5m_raw.resample('1h').agg(ohlc).dropna()
-
     all_dataframes = {'5m': df_5m_raw, '15m': df_15m_raw, '1h': df_1h_raw}
-
     for tf_name, df in all_dataframes.items():
         df.ta.rsi(append=True);
         df.ta.atr(append=True);
@@ -50,15 +47,12 @@ def prepare_full_feature_set(df_5m_raw: pd.DataFrame):
         df.ta.bbands(append=True);
         df.ta.stoch(append=True);
         df.ta.adx(append=True)
-
     df_5m = all_dataframes['5m'].add_suffix('_5m').rename(
         columns={'open_5m': 'open', 'high_5m': 'high', 'low_5m': 'low', 'close_5m': 'close', 'volume_5m': 'volume'})
     df_15m = all_dataframes['15m'].drop(columns=['open', 'high', 'low', 'close', 'volume']).add_suffix('_15m')
     df_1h = all_dataframes['1h'].drop(columns=['open', 'high', 'low', 'close', 'volume']).add_suffix('_1h')
-
     final_df = pd.merge_asof(df_5m, df_15m, left_index=True, right_index=True, direction='backward')
     final_df = pd.merge_asof(final_df, df_1h, left_index=True, right_index=True, direction='backward')
-
     pa_df = final_df[['open', 'high', 'low', 'close', 'volume', 'ATRr_14_5m']].copy()
     pa_df['impulse_strength'] = (pa_df['close'] - pa_df['open']) / (pa_df['high'] - pa_df['low']).replace(0, 1)
     pa_df['volatility_burst'] = (pa_df['high'] - pa_df['low']) / pa_df['ATRr_14_5m'].replace(0, 1)
@@ -66,26 +60,69 @@ def prepare_full_feature_set(df_5m_raw: pd.DataFrame):
     pa_df['volume_spike'] = pa_df['volume'] / pa_df['volume'].rolling(window=20).mean().replace(0, 1)
     for col in ['impulse_strength', 'volatility_burst', 'closing_position', 'volume_spike']:
         for n in [1, 2, 3]: pa_df[f'{col}_lag_{n}'] = pa_df[col].shift(n)
-
     pa_features_to_add = [col for col in pa_df.columns if
                           col not in ['open', 'high', 'low', 'close', 'volume', 'ATRr_14_5m']]
     final_df = pd.concat([final_df, pa_df[pa_features_to_add]], axis=1)
-
     final_df.dropna(inplace=True)
     return final_df
+
+
+# --- FUNKCJE DO GENEROWANIA WYKRESÓW ---
+def plot_equity_and_drawdown(equity_series, ticker):
+    plt.style.use('seaborn-v0_8-darkgrid');
+    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(15, 10), gridspec_kw={'height_ratios': [3, 1]})
+    fig.suptitle(f'Wyniki Strategii - {ticker}', fontsize=16);
+    equity_series.plot(ax=ax1, lw=2, title='Krzywa Kapitału')
+    ax1.set_ylabel('Kapitał ($)');
+    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f'${x:,.0f}'))
+    running_max = equity_series.cummax();
+    drawdown = (equity_series - running_max) / running_max * 100
+    drawdown.plot(ax=ax2, kind='area', color='red', alpha=0.4, title='Obsunięcie Kapitału (Drawdown)')
+    ax2.set_ylabel('Drawdown (%)');
+    ax2.set_xlabel('Data');
+    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f'{x:.1f}%'))
+    plt.tight_layout(rect=[0, 0.03, 1, 0.95]);
+    plt.savefig(f'equity_and_drawdown_{ticker}.png');
+    plt.close()
+    print(f"\nZapisano zintegrowany wykres kapitału i drawdown do pliku: equity_and_drawdown_{ticker}.png")
+
+
+def plot_confidence_scores(trades_df, min_confidence_threshold, ticker):
+    if trades_df.empty or not all(
+        c in trades_df.columns for c in ['conf_momentum', 'conf_reversion', 'conf_pa']): return
+    plt.style.use('seaborn-v0_8-darkgrid');
+    fig, ax = plt.subplots(figsize=(15, 7))
+    ax.plot(trades_df['entry_date'], trades_df['conf_momentum'], label='Momentum', color='blue', alpha=0.7, marker='o',
+            linestyle='--', ms=4)
+    ax.plot(trades_df['entry_date'], trades_df['conf_reversion'], label='Reversion', color='green', alpha=0.7,
+            marker='o', linestyle='--', ms=4)
+    ax.plot(trades_df['entry_date'], trades_df['conf_pa'], label='Price Action', color='orange', alpha=0.7, marker='o',
+            linestyle='--', ms=4)
+    ax.axhline(y=min_confidence_threshold, color='red', linestyle=':', linewidth=2,
+               label=f'Próg Min. Confidence ({min_confidence_threshold})')
+    ax.set_title(f'Poziomy Pewności Modeli (Confidence) w Czasie - {ticker}', fontsize=16)
+    ax.set_xlabel('Data Zawarcia Transakcji');
+    ax.set_ylabel('Poziom Pewności (Confidence)')
+    ax.legend();
+    ax.grid(True, which='both', linestyle='--', linewidth=0.5)
+    ax.set_ylim(0.5, max(1.0, trades_df[['conf_momentum', 'conf_reversion', 'conf_pa']].max().max() * 1.05))
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f'{x:.2f}'))
+    plt.tight_layout();
+    chart_filename = f'confidence_scores_chart_{ticker}.png'
+    plt.savefig(chart_filename);
+    plt.close()
+    print(f"Zapisano wykres pewności modeli do pliku: {chart_filename}")
 
 
 # --- Główna Klasa Bota ---
 class TradingBot:
     def __init__(self, args):
-        print("Inicjalizacja TradingBota...")
-        self.args = args
+        self.args = args;
         self.session = self._initialize_session()
         self.models, self.features, self.scaler_pa = {}, {}, None
         self._load_ml_artifacts()
 
     def _initialize_session(self):
-        print(f"Inicjalizacja sesji Bybit w trybie '{self.args.mode}'...")
         if self.args.mode == 'live':
             api_key, api_secret = os.getenv("BYBIT_API_KEY"), os.getenv("BYBIT_API_SECRET")
             if not (api_key and api_secret): sys.exit("Brak kluczy API dla trybu LIVE")
@@ -93,14 +130,12 @@ class TradingBot:
         return HTTP(testnet=False)
 
     def _load_ml_artifacts(self):
-        print(f"Wczytywanie modeli i cech dla {self.args.ticker_name}...")
         try:
             for expert in ['momentum', 'reversion', 'pa']:
                 self.models[expert] = joblib.load(f'expert_{expert}_{self.args.ticker_name}_5m.joblib')
                 with open(f'features_{expert}_{self.args.ticker_name}_5m.json', 'r') as f:
                     self.features[expert] = json.load(f)
             self.scaler_pa = joblib.load(f'scaler_pa_{self.args.ticker_name}_5m.joblib')
-            print("Wszystkie modele i artefakty ML załadowane pomyślnie.")
         except FileNotFoundError as e:
             sys.exit(f"Nie znaleziono plików modelu: {e.filename}")
 
@@ -108,28 +143,21 @@ class TradingBot:
         expert_opinions = {}
         for expert in ['momentum', 'reversion', 'pa']:
             X_df = pd.DataFrame([data_row[self.features[expert]]])
-
             if expert == 'pa':
                 X_df.replace([np.inf, -np.inf], 0, inplace=True);
                 X_df.fillna(0, inplace=True)
                 X = self.scaler_pa.transform(X_df)
             else:
                 X = X_df
-
             prediction = int(self.models[expert].predict(X)[0])
             confidence = float(self.models[expert].predict_proba(X).max())
             expert_opinions[expert] = {"prediction": prediction, "confidence": confidence}
-
-        return {
-            "current_price": float(data_row['close']),
-            "atr_value_5m": float(data_row['ATRr_14_5m']),
-            "expert_opinions": expert_opinions
-        }
+        return {"current_price": float(data_row['close']), "atr_value_5m": float(data_row['ATRr_14_5m']),
+                "expert_opinions": expert_opinions}
 
     def run_backtest(self):
-        args = self.args
+        args = self.args;
         print("\n--- URUCHAMIANIE BOTA W TRYBIE BACKTESTU ---")
-
         print(f"Pobieranie danych historycznych dla {args.ticker} od {args.start_date} do {args.end_date}...")
         all_data = []
         start_ts = int(datetime.strptime(args.start_date, "%Y-%m-%d").timestamp() * 1000)
@@ -147,32 +175,24 @@ class TradingBot:
             else:
                 break
             time.sleep(0.2)
-
         if not all_data: print("BŁĄD: Nie udało się pobrać danych."); return
-
         df_raw = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
         df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'], unit='ms')
         df_raw.set_index('timestamp', inplace=True)
         df_raw = df_raw.astype(float).sort_index().drop_duplicates()
-
         data_filename = f"backtest_data_{args.ticker}_{args.start_date}_to_{args.end_date}.csv"
         df_raw.to_csv(data_filename)
         print(f"Zapisano surowe dane testowe do pliku: {data_filename}")
-
         test_data = prepare_full_feature_set(df_raw)
-
         capital = args.initial_capital
         trades, active_positions = [], {}
         equity_curve = {test_data.index[0]: capital}
-
         print("Uruchamianie symulacji z prawdziwymi modelami ML...")
         pbar = tqdm(range(len(test_data)))
         for i in pbar:
             current_candle = test_data.iloc[i]
-
             analysis = self._get_analysis_from_row(current_candle)
             if not analysis: continue
-
             if args.debug:
                 confidences = {expert: f"{opinion['confidence']:.2f}" for expert, opinion in
                                analysis['expert_opinions'].items()}
@@ -189,12 +209,26 @@ class TradingBot:
             for strategy in list(active_positions.keys()):
                 pos = active_positions[strategy];
                 exit_reason = None
-                if (strategy == 'long' and votes_short >= 2) or (strategy == 'short' and votes_long >= 2):
-                    exit_reason = "Model Exit Signal"
-                elif strategy == 'long' and current_candle['low'] <= pos['sl_price']:
-                    exit_reason = "Stop Loss"
-                elif strategy == 'long' and current_candle['high'] >= pos['tp_price']:
-                    exit_reason = "Take Profit"
+
+                # --- ZMIANA: Logika wyjścia z uwzględnieniem persystencji sygnału ---
+                if strategy == 'long':
+                    if votes_short >= 2:
+                        pos['opposing_signal_count'] += 1
+                    else:
+                        pos['opposing_signal_count'] = 0  # Resetuj licznik
+                    if pos['opposing_signal_count'] >= args.exit_signal_persistence: exit_reason = "Model Exit Signal"
+                elif strategy == 'short':
+                    if votes_long >= 2:
+                        pos['opposing_signal_count'] += 1
+                    else:
+                        pos['opposing_signal_count'] = 0  # Resetuj licznik
+                    if pos['opposing_signal_count'] >= args.exit_signal_persistence: exit_reason = "Model Exit Signal"
+
+                if not exit_reason:  # Sprawdź SL/TP tylko jeśli nie ma sygnału z modelu
+                    if strategy == 'long' and current_candle['low'] <= pos['sl_price']:
+                        exit_reason = "Stop Loss"
+                    elif strategy == 'long' and current_candle['high'] >= pos['tp_price']:
+                        exit_reason = "Take Profit"
 
                 if exit_reason:
                     exit_price = current_candle['close'] if "Model Exit" in exit_reason else (
@@ -210,9 +244,10 @@ class TradingBot:
                     del active_positions[strategy]
 
             strategy_to_open = None
-            if votes_long >= 2 and 'long' not in active_positions:
+            # --- ZMIANA: Użycie nowego parametru do otwarcia pozycji ---
+            if votes_long >= args.entry_votes and 'long' not in active_positions:
                 strategy_to_open = 'long'
-            elif votes_short >= 2 and 'short' not in active_positions:
+            elif votes_short >= args.entry_votes and 'short' not in active_positions:
                 strategy_to_open = 'short'
 
             if strategy_to_open:
@@ -225,8 +260,10 @@ class TradingBot:
                 position_value = capital * args.risk_percent * float(args.leverage)
                 position_size = position_value / entry_price if entry_price > 0 else 0
 
+                # --- ZMIANA: Dodanie licznika persystencji do nowej pozycji ---
                 active_positions[strategy_to_open] = {'entry_date': current_candle.name, 'entry_price': entry_price,
-                                                      'size': position_size, 'sl_price': sl_price, 'tp_price': tp_price}
+                                                      'size': position_size, 'sl_price': sl_price, 'tp_price': tp_price,
+                                                      'opposing_signal_count': 0}
                 capital -= args.trade_cost
 
             equity_curve[current_candle.name] = capital
@@ -242,6 +279,8 @@ class TradingBot:
             print(f"\nZapisano raport z transakcji do pliku: {report_filename}")
         equity_series = pd.Series(equity_curve)
         plot_equity_and_drawdown(equity_series, args.ticker)
+        if not trades_df.empty:
+            plot_confidence_scores(trades_df, args.min_confidence, args.ticker)
         print("\n--- WYNIKI BACKTESTU ---")
         print(f"Testowany okres: od {args.start_date} do {args.end_date}")
         print(f"Kapitał początkowy: ${args.initial_capital:,.2f}")
@@ -262,42 +301,19 @@ class TradingBot:
             print(f"Średni czas trwania pozycji: {trades_df['duration'].mean()}")
             print("\nRozkład powodów zamknięcia pozycji:")
             print(trades_df['exit_reason'].value_counts(normalize=True).apply("{:.2%}".format))
-
-            # --- NOWA SEKCJA: STATYSTYKI PEWNOŚCI MODELI ---
             print("\n--- Statystyki Pewności Modeli (dla zrealizowanych transakcji) ---")
-            avg_conf_momentum = trades_df['conf_momentum'].mean()
-            avg_conf_reversion = trades_df['conf_reversion'].mean()
+            avg_conf_momentum = trades_df['conf_momentum'].mean();
+            avg_conf_reversion = trades_df['conf_reversion'].mean();
             avg_conf_pa = trades_df['conf_pa'].mean()
-
             all_confs = pd.concat([trades_df['conf_momentum'], trades_df['conf_reversion'], trades_df['conf_pa']])
             avg_conf_overall = all_confs.mean()
-
-            print(f"Średnia pewność (Momentum): {avg_conf_momentum:.2%}")
-            print(f"Średnia pewność (Reversion): {avg_conf_reversion:.2%}")
+            print(f"Średnia pewność (Momentum): {avg_conf_momentum:.2%}");
+            print(f"Średnia pewność (Reversion): {avg_conf_reversion:.2%}");
             print(f"Średnia pewność (Price Action): {avg_conf_pa:.2%}")
             print(f"Średnia pewność (Ogółem): {avg_conf_overall:.2%}")
 
     def run_live(self):
         print("Tryb LIVE nie jest jeszcze w pełni zaimplementowany w tej strukturze.")
-
-
-def plot_equity_and_drawdown(equity_series, ticker):
-    plt.style.use('seaborn-v0_8-darkgrid');
-    fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(15, 10), gridspec_kw={'height_ratios': [3, 1]})
-    fig.suptitle(f'Wyniki Strategii - {ticker}', fontsize=16);
-    equity_series.plot(ax=ax1, lw=2, title='Krzywa Kapitału')
-    ax1.set_ylabel('Kapitał ($)');
-    ax1.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f'${x:,.0f}'))
-    running_max = equity_series.cummax();
-    drawdown = (equity_series - running_max) / running_max * 100
-    drawdown.plot(ax=ax2, kind='area', color='red', alpha=0.4, title='Obsunięcie Kapitału (Drawdown)')
-    ax2.set_ylabel('Drawdown (%)');
-    ax2.set_xlabel('Data');
-    ax2.yaxis.set_major_formatter(mticker.FuncFormatter(lambda x, p: f'{x:.1f}%'))
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95]);
-    plt.savefig(f'equity_and_drawdown_{ticker}.png');
-    plt.close()
-    print(f"\nZapisano zintegrowany wykres kapitału i drawdown do pliku: equity_and_drawdown_{ticker}.png")
 
 
 if __name__ == "__main__":
@@ -323,6 +339,12 @@ if __name__ == "__main__":
     parser.add_argument("--trade-cost", type=float, default=DEFAULT_TRADE_COST, help="Koszt otwarcia pozycji w USD.")
     parser.add_argument("--debug", action='store_true',
                         help="Włącz tryb debugowania, aby wyświetlać confidence w czasie rzeczywistym.")
+
+    # --- NOWE ARGUMENTY ---
+    parser.add_argument("--entry-votes", type=int, default=2, choices=[1, 2, 3],
+                        help="Wymagana liczba głosów do otwarcia pozycji.")
+    parser.add_argument("--exit-signal-persistence", type=int, default=1,
+                        help="Liczba kolejnych świec z sygnałem przeciwnym, aby zamknąć pozycję.")
 
     args = parser.parse_args()
 
