@@ -14,15 +14,6 @@ from datetime import datetime, date
 from tqdm import tqdm
 from pybit.unified_trading import HTTP
 
-# --- Konfiguracja Globalna ---
-DEFAULT_TICKER = "ETHUSDT"
-DEFAULT_RISK = 0.02
-DEFAULT_LEVERAGE = "10"
-DEFAULT_ATR_MULTIPLIER = 2.0
-DEFAULT_MIN_CONFIDENCE = 0.58
-DEFAULT_RRR = 2.0
-DEFAULT_TRADE_COST = 1.0
-
 # --- Konfiguracja Logowania ---
 logging.basicConfig(level=logging.INFO,
                     format='{\"timestamp\": \"%(asctime)s\", \"level\": \"%(levelname)s\", \"service\": \"trading_bot_eth\", \"message\": %(message)s}',
@@ -39,7 +30,7 @@ def log(event, details):
     logging.info(json.dumps({"event": event, "details": details}, default=json_serial))
 
 
-# --- FUNKCJA DO PRZYGOTOWANIA DANYCH ---
+# --- FUNKCJE POMOCNICZE (Standalone) ---
 def prepare_full_feature_set(df_5m_raw: pd.DataFrame):
     print("Agregowanie danych i obliczanie wszystkich wskaźników oraz cech...")
     ohlc = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
@@ -73,7 +64,6 @@ def prepare_full_feature_set(df_5m_raw: pd.DataFrame):
     return final_df
 
 
-# --- FUNKCJE DO GENEROWANIA WYKRESÓW ---
 def plot_equity_and_drawdown(equity_series, ticker):
     plt.style.use('seaborn-v0_8-darkgrid');
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(15, 10), gridspec_kw={'height_ratios': [3, 1]})
@@ -95,24 +85,18 @@ def plot_equity_and_drawdown(equity_series, ticker):
 
 def plot_confidence_scores(trades_df, args, ticker):
     if trades_df.empty or not all(
-        c in trades_df.columns for c in ['conf_momentum', 'conf_reversion', 'conf_pa']): return
-
-    # --- POPRAWKA: Użycie spójnej mapy nazw ---
-    model_map = {
-        'momentum': ('Momentum', args.min_conf_momentum, 'blue'),
-        'reversion': ('Reversion', args.min_conf_reversion, 'green'),
-        'pa': ('Price Action', args.min_conf_pa, 'orange')
-    }
-
+            c in trades_df.columns for c in ['conf_momentum', 'conf_reversion', 'conf_pa']): return
+    min_conf_map = {'Momentum': args.min_conf_momentum, 'Reversion': args.min_conf_reversion,
+                    'Price Action': args.min_conf_pa}
     plt.style.use('seaborn-v0_8-darkgrid');
     fig, ax = plt.subplots(figsize=(15, 7))
-
-    for key, (name, threshold, color) in model_map.items():
-        col_name = f'conf_{key}'
-        ax.plot(trades_df['entry_date'], trades_df[col_name], label=name, color=color, alpha=0.7, marker='o',
+    for model_name, color in [('Momentum', 'blue'), ('Reversion', 'green'), ('Price Action', 'orange')]:
+        col_name = f'conf_{model_name.lower().replace(" ", "")}'
+        if col_name == 'conf_priceaction': col_name = 'conf_pa'
+        ax.plot(trades_df['entry_date'], trades_df[col_name], label=model_name, color=color, alpha=0.7, marker='o',
                 linestyle='--', ms=4)
-        ax.axhline(y=threshold, color=color, linestyle=':', linewidth=2, label=f'Próg {name} ({threshold})')
-
+        ax.axhline(y=min_conf_map[model_name], color=color, linestyle=':', linewidth=2,
+                   label=f'Próg {model_name} ({min_conf_map[model_name]})')
     ax.set_title(f'Poziomy Pewności Modeli (Confidence) w Czasie - {ticker}', fontsize=16)
     ax.set_xlabel('Data Zawarcia Transakcji');
     ax.set_ylabel('Poziom Pewności (Confidence)')
@@ -168,16 +152,15 @@ class TradingBot:
         return {"current_price": float(data_row['close']), "atr_value_5m": float(data_row['ATRr_14_5m']),
                 "expert_opinions": expert_opinions}
 
-    def run_backtest(self):
-        args = self.args;
-        print("\n--- URUCHAMIANIE BOTA W TRYBIE BACKTESTU ---")
-        print(f"Pobieranie danych historycznych dla {args.ticker} od {args.start_date} do {args.end_date}...")
+    def _fetch_historical_data(self):
+        print(
+            f"Pobieranie danych historycznych dla {self.args.ticker} od {self.args.start_date} do {self.args.end_date}...")
         all_data = []
-        start_ts = int(datetime.strptime(args.start_date, "%Y-%m-%d").timestamp() * 1000)
-        end_ts = int(datetime.strptime(args.end_date, "%Y-%m-%d").timestamp() * 1000)
+        start_ts = int(datetime.strptime(self.args.start_date, "%Y-%m-%d").timestamp() * 1000)
+        end_ts = int(datetime.strptime(self.args.end_date, "%Y-%m-%d").timestamp() * 1000)
         current_ts = start_ts
         while current_ts < end_ts:
-            response = self.session.get_kline(category="linear", symbol=args.ticker, interval=5, start=current_ts,
+            response = self.session.get_kline(category="linear", symbol=self.args.ticker, interval=5, start=current_ts,
                                               limit=1000)
             if response.get('retCode') == 0 and response.get('result', {}).get('list'):
                 data_chunk = response['result']['list']
@@ -188,29 +171,113 @@ class TradingBot:
             else:
                 break
             time.sleep(0.2)
-        if not all_data: print("BŁĄD: Nie udało się pobrać danych."); return
+        if not all_data: return None
         df_raw = pd.DataFrame(all_data, columns=["timestamp", "open", "high", "low", "close", "volume", "turnover"])
         df_raw['timestamp'] = pd.to_datetime(df_raw['timestamp'], unit='ms')
         df_raw.set_index('timestamp', inplace=True)
-        df_raw = df_raw.astype(float).sort_index().drop_duplicates()
-        data_filename = f"backtest_data_{args.ticker}_{args.start_date}_to_{args.end_date}.csv"
+        return df_raw.astype(float).sort_index().drop_duplicates()
+
+    def _prepare_data_for_simulation(self, df_raw):
+        data_filename = f"backtest_data_{self.args.ticker}_{self.args.start_date}_to_{self.args.end_date}.csv"
         df_raw.to_csv(data_filename)
         print(f"Zapisano surowe dane testowe do pliku: {data_filename}")
-        test_data = prepare_full_feature_set(df_raw)
-        capital = args.initial_capital
+        return prepare_full_feature_set(df_raw)
+
+    def _manage_active_positions(self, current_candle, active_positions, votes_long, votes_short):
+        closed_trade = None
+        for strategy in list(active_positions.keys()):
+            pos = active_positions[strategy]
+            exit_reason = None
+
+            # Zarządzanie pozycją (BE, Trailing)
+            if strategy == 'long' and not pos['is_trailing']:
+                if self.args.trailing_sl_trigger > 0 and current_candle['high'] >= pos['trailing_trigger_price']:
+                    pos['is_trailing'] = True;
+                    log('trailing_sl_activated', {'trade_entry_date': pos['entry_date']})
+                elif self.args.breakeven_trigger > 0 and not pos['is_be'] and current_candle['high'] >= pos[
+                    'breakeven_trigger_price']:
+                    pos['sl_price'] = pos['entry_price'];
+                    pos['is_be'] = True;
+                    log('breakeven_activated', {'trade_entry_date': pos['entry_date']})
+
+            if pos['is_trailing']:
+                new_sl = current_candle['close'] - (current_candle['ATRr_14_5m'] * self.args.trailing_sl_distance)
+                if new_sl > pos['sl_price']: pos['sl_price'] = new_sl
+
+            # Warunki wyjścia
+            if strategy == 'long':
+                if votes_short >= 2:
+                    pos['opposing_signal_count'] += 1
+                else:
+                    pos['opposing_signal_count'] = 0
+                if pos['opposing_signal_count'] >= self.args.exit_signal_persistence: exit_reason = "Model Exit Signal"
+
+            if not exit_reason:
+                if strategy == 'long' and current_candle['low'] <= pos['sl_price']:
+                    exit_reason = "Stop Loss"
+                elif strategy == 'long' and not pos['is_trailing'] and current_candle['high'] >= pos['tp_price']:
+                    exit_reason = "Take Profit"
+
+            if exit_reason:
+                exit_price = current_candle['close'] if "Model Exit" in exit_reason else (
+                    pos['sl_price'] if "Stop Loss" in exit_reason else pos['tp_price'])
+                pnl = (exit_price - pos['entry_price']) * pos['size']
+                pos.update({'exit_date': current_candle.name, 'exit_price': exit_price, 'pnl_usd': pnl,
+                            'exit_reason': exit_reason, 'strategy': strategy})
+                closed_trade = pos
+                del active_positions[strategy]
+        return closed_trade, active_positions
+
+    def _check_for_new_entry(self, analysis, active_positions, votes_long, votes_short):
+        strategy_to_open = None
+        if votes_long >= self.args.entry_votes and 'long' not in active_positions:
+            strategy_to_open = 'long'
+        elif votes_short >= self.args.entry_votes and 'short' not in active_positions:
+            strategy_to_open = 'short'
+
+        if strategy_to_open:
+            entry_price = analysis['current_price']
+            stop_loss_distance = analysis['atr_value_5m'] * self.args.atr_multiplier
+            sl_price = entry_price - stop_loss_distance if strategy_to_open == 'long' else entry_price + stop_loss_distance
+            tp_price = entry_price + (
+                    abs(entry_price - sl_price) * self.args.rrr) if strategy_to_open == 'long' else entry_price - (
+                    abs(entry_price - sl_price) * self.args.rrr)
+            position_value = self.capital * self.args.risk_percent * float(self.args.leverage)
+            position_size = position_value / entry_price if entry_price > 0 else 0
+
+            tp_distance = abs(tp_price - entry_price)
+            breakeven_trigger_price = entry_price + (
+                    tp_distance * self.args.breakeven_trigger) if self.args.breakeven_trigger > 0 else 0
+            trailing_trigger_price = entry_price + (
+                    stop_loss_distance * self.args.trailing_sl_trigger) if self.args.trailing_sl_trigger > 0 else 0
+
+            return {
+                'entry_date': self.current_candle.name, 'entry_price': entry_price, 'size': position_size,
+                'sl_price': sl_price, 'tp_price': tp_price,
+                'opposing_signal_count': 0, 'is_be': False, 'is_trailing': False,
+                'breakeven_trigger_price': breakeven_trigger_price, 'trailing_trigger_price': trailing_trigger_price
+            }
+        return None
+
+    def run_backtest(self):
+        print("\n--- URUCHAMIANIE BOTA W TRYBIE BACKTESTU ---")
+        df_raw = self._fetch_historical_data()
+        if df_raw is None: return
+        test_data = self._prepare_data_for_simulation(df_raw)
+
+        self.capital = self.args.initial_capital
         trades, active_positions = [], {}
-        equity_curve = {test_data.index[0]: capital}
+        equity_curve = {test_data.index[0]: self.capital}
+        min_conf_map = {'momentum': self.args.min_conf_momentum, 'reversion': self.args.min_conf_reversion,
+                        'pa': self.args.min_conf_pa}
+
         print("Uruchamianie symulacji z prawdziwymi modelami ML...")
         pbar = tqdm(range(len(test_data)))
-
-        min_conf_map = {'momentum': args.min_conf_momentum, 'reversion': args.min_conf_reversion,
-                        'pa': args.min_conf_pa}
-
         for i in pbar:
-            current_candle = test_data.iloc[i]
-            analysis = self._get_analysis_from_row(current_candle)
+            self.current_candle = test_data.iloc[i]
+            analysis = self._get_analysis_from_row(self.current_candle)
             if not analysis: continue
-            if args.debug:
+            if self.args.debug:
                 confidences = {expert: f"{opinion['confidence']:.2f}" for expert, opinion in
                                analysis['expert_opinions'].items()}
                 pbar.set_description(f"Confidence: {confidences}")
@@ -223,83 +290,25 @@ class TradingBot:
                     else:
                         votes_short += 1
 
-            for strategy in list(active_positions.keys()):
-                pos = active_positions[strategy];
-                exit_reason = None
+            closed_trade, active_positions = self._manage_active_positions(self.current_candle, active_positions,
+                                                                           votes_long, votes_short)
+            if closed_trade:
+                self.capital += closed_trade['pnl_usd']
+                closed_trade.update({
+                    'conf_momentum': analysis['expert_opinions']['momentum']['confidence'],
+                    'conf_reversion': analysis['expert_opinions']['reversion']['confidence'],
+                    'conf_pa': analysis['expert_opinions']['pa']['confidence']
+                })
+                trades.append(closed_trade)
 
-                if strategy == 'long' and not pos['is_trailing']:
-                    if args.trailing_sl_trigger > 0 and current_candle['high'] >= pos['trailing_trigger_price']:
-                        pos['is_trailing'] = True;
-                        log('trailing_sl_activated', {'trade': pos})
-                    elif args.breakeven_trigger > 0 and not pos['is_be'] and current_candle['high'] >= pos[
-                        'breakeven_trigger_price']:
-                        pos['sl_price'] = pos['entry_price'];
-                        pos['is_be'] = True;
-                        log('breakeven_activated', {'trade': pos})
+            new_position = self._check_for_new_entry(analysis, active_positions, votes_long, votes_short)
+            if new_position:
+                active_positions['long' if votes_long >= self.args.entry_votes else 'short'] = new_position
+                self.capital -= self.args.trade_cost
 
-                if pos['is_trailing']:
-                    new_sl = current_candle['close'] - (current_candle['ATRr_14_5m'] * args.trailing_sl_distance)
-                    if new_sl > pos['sl_price']: pos['sl_price'] = new_sl
+            equity_curve[self.current_candle.name] = self.capital
 
-                if strategy == 'long':
-                    if votes_short >= 2:
-                        pos['opposing_signal_count'] += 1
-                    else:
-                        pos['opposing_signal_count'] = 0
-                    if pos['opposing_signal_count'] >= args.exit_signal_persistence: exit_reason = "Model Exit Signal"
-
-                if not exit_reason:
-                    if strategy == 'long' and current_candle['low'] <= pos['sl_price']:
-                        exit_reason = "Stop Loss"
-                    elif strategy == 'long' and not pos['is_trailing'] and current_candle['high'] >= pos['tp_price']:
-                        exit_reason = "Take Profit"
-
-                if exit_reason:
-                    exit_price = current_candle['close'] if "Model Exit" in exit_reason else (
-                        pos['sl_price'] if "Stop Loss" in exit_reason else pos['tp_price'])
-                    pnl = (exit_price - pos['entry_price']) * pos['size']
-                    capital += pnl
-                    pos.update({'exit_date': current_candle.name, 'exit_price': exit_price, 'pnl_usd': pnl,
-                                'exit_reason': exit_reason, 'strategy': strategy,
-                                'conf_momentum': analysis['expert_opinions']['momentum']['confidence'],
-                                'conf_reversion': analysis['expert_opinions']['reversion']['confidence'],
-                                'conf_pa': analysis['expert_opinions']['pa']['confidence']})
-                    trades.append(pos)
-                    del active_positions[strategy]
-
-            strategy_to_open = None
-            if votes_long >= args.entry_votes and 'long' not in active_positions:
-                strategy_to_open = 'long'
-            elif votes_short >= args.entry_votes and 'short' not in active_positions:
-                strategy_to_open = 'short'
-
-            if strategy_to_open:
-                entry_price = analysis['current_price']
-                stop_loss_distance = analysis['atr_value_5m'] * args.atr_multiplier
-                sl_price = entry_price - stop_loss_distance if strategy_to_open == 'long' else entry_price + stop_loss_distance
-                tp_price = entry_price + (
-                            abs(entry_price - sl_price) * args.rrr) if strategy_to_open == 'long' else entry_price - (
-                            abs(entry_price - sl_price) * args.rrr)
-                position_value = capital * args.risk_percent * float(args.leverage)
-                position_size = position_value / entry_price if entry_price > 0 else 0
-
-                tp_distance = abs(tp_price - entry_price)
-                breakeven_trigger_price = entry_price + (
-                            tp_distance * args.breakeven_trigger) if args.breakeven_trigger > 0 else 0
-                trailing_trigger_price = entry_price + (
-                            stop_loss_distance * args.trailing_sl_trigger) if args.trailing_sl_trigger > 0 else 0
-
-                active_positions[strategy_to_open] = {
-                    'entry_date': current_candle.name, 'entry_price': entry_price, 'size': position_size,
-                    'sl_price': sl_price, 'tp_price': tp_price,
-                    'opposing_signal_count': 0, 'is_be': False, 'is_trailing': False,
-                    'breakeven_trigger_price': breakeven_trigger_price, 'trailing_trigger_price': trailing_trigger_price
-                }
-                capital -= args.trade_cost
-
-            equity_curve[current_candle.name] = capital
-
-        self._generate_backtest_report(trades, equity_curve, capital)
+        self._generate_backtest_report(trades, equity_curve, self.capital)
 
     def _generate_backtest_report(self, trades, equity_curve, final_capital):
         args = self.args;
@@ -354,37 +363,36 @@ if __name__ == "__main__":
     parser.add_argument("--ticker", type=str, default="ETHUSDT", help="Symbol do handlu lub testowania.")
     parser.add_argument("--ticker-name", type=str, default="ETH",
                         help="Nazwa tickera używana w nazwach plików modeli (np. ETH, ICP).")
-    parser.add_argument("--start-date", type=str, default="2025-09-15",
+    parser.add_argument("--start-date", type=str, default="2025-01-01",
                         help="Data początkowa dla backtestu (YYYY-MM-DD).")
     parser.add_argument("--end-date", type=str, default=datetime.now().strftime('%Y-%m-%d'),
                         help="Data końcowa dla backtestu (YYYY-MM-DD).")
-    parser.add_argument("--initial-capital", type=float, default=3700.0, help="Kapitał początkowy dla backtestu.")
+    parser.add_argument("--initial-capital", type=float, default=10000.0, help="Kapitał początkowy dla backtestu.")
     parser.add_argument("--risk-percent", type=float, default=0.02,
                         help="Procent kapitału ryzykowany na transakcję.")
     parser.add_argument("--leverage", type=str, default=10.0, help="Dźwignia finansowa.")
-    parser.add_argument("--atr-multiplier", type=float, default=2.0,
+    parser.add_argument("--atr-multiplier", type=float, default=2.5,
                         help="Mnożnik ATR dla Stop Lossa.")
     parser.add_argument("--rrr", type=float, default=3.0, help="Risk-Reward Ratio (TP/SL).")
-    parser.add_argument("--trade-cost", type=float, default=1.0, help="Koszt otwarcia pozycji w USD.")
+    parser.add_argument("--trade-cost", type=float, default=0.99, help="Koszt otwarcia pozycji w USD.")
     parser.add_argument("--debug", action='store_true',
                         help="Włącz tryb debugowania, aby wyświetlać confidence w czasie rzeczywistym.")
 
     parser.add_argument("--entry-votes", type=int, default=2, choices=[1, 2, 3],
                         help="Wymagana liczba głosów do otwarcia pozycji.")
-    parser.add_argument("--exit-signal-persistence", type=int, default=20,
+    parser.add_argument("--exit-signal-persistence", type=int, default=3,
                         help="Liczba kolejnych świec z sygnałem przeciwnym, aby zamknąć pozycję.")
-    # Usunięto --min-confidence, zastąpione przez poniższe
-    parser.add_argument("--min-conf-momentum", type=float, default=0.74,
+    parser.add_argument("--min-conf-momentum", type=float, default=0.70,
                         help="Min. pewność dla modelu Momentum.")
-    parser.add_argument("--min-conf-reversion", type=float, default=0.74,
+    parser.add_argument("--min-conf-reversion", type=float, default=0.70,
                         help="Min. pewność dla modelu Reversion.")
-    parser.add_argument("--min-conf-pa", type=float, default=0.59,
+    parser.add_argument("--min-conf-pa", type=float, default=0.55,
                         help="Min. pewność dla modelu Price Action.")
-    parser.add_argument("--breakeven-trigger", type=float, default=0.80,
+    parser.add_argument("--breakeven-trigger", type=float, default=0.50,
                         help="Poziom zysku (jako % drogi do TP), który aktywuje SL na zero (0.0 = wyłączone).")
-    parser.add_argument("--trailing-sl-trigger", type=float, default=1.0,
+    parser.add_argument("--trailing-sl-trigger", type=float, default=2.0,
                         help="Poziom zysku (jako krotność ryzyka R), który aktywuje Trailing SL (0.0 = wyłączone).")
-    parser.add_argument("--trailing-sl-distance", type=float, default=2.0,
+    parser.add_argument("--trailing-sl-distance", type=float, default=1.5,
                         help="Odległość Trailing SL od ceny (jako krotność ATR).")
 
     args = parser.parse_args()
