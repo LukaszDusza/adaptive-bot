@@ -14,24 +14,12 @@ from datetime import datetime, date
 from tqdm import tqdm
 from pybit.unified_trading import HTTP
 
-# --- Konfiguracja Logowania ---
-logging.basicConfig(level=logging.INFO,
-                    format='{\"timestamp\": \"%(asctime)s\", \"level\": \"%(levelname)s\", \"service\": \"trading_bot_eth\", \"message\": %(message)s}',
-                    datefmt='%Y-%m-%dT%H:%M:%S%z')
-
-
-def json_serial(obj):
-    if isinstance(obj, (datetime, date, pd.Timestamp)):
-        return obj.isoformat()
-    raise TypeError(f"Type {type(obj)} not serializable")
-
-
-def log(event, details):
-    logging.info(json.dumps({"event": event, "details": details}, default=json_serial))
-
-
 # --- FUNKCJE POMOCNICZE (Standalone) ---
 def prepare_full_feature_set(df_5m_raw: pd.DataFrame):
+    """
+    Agreguje dane do wyższych interwałów (15m, 1h) i oblicza pełen zestaw wskaźników technicznych
+    oraz cech opartych na Price Action dla zadanego DataFrame'u 5-minutowego.
+    """
     print("Agregowanie danych i obliczanie wszystkich wskaźników oraz cech...")
     ohlc = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}
     df_15m_raw = df_5m_raw.resample('15min').agg(ohlc).dropna()
@@ -65,6 +53,7 @@ def prepare_full_feature_set(df_5m_raw: pd.DataFrame):
 
 
 def plot_equity_and_drawdown(equity_series, ticker):
+    """Generuje i zapisuje wykres krzywej kapitału oraz obsunięcia kapitału."""
     plt.style.use('seaborn-v0_8-darkgrid');
     fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, figsize=(15, 10), gridspec_kw={'height_ratios': [3, 1]})
     fig.suptitle(f'Wyniki Strategii - {ticker}', fontsize=16);
@@ -84,6 +73,7 @@ def plot_equity_and_drawdown(equity_series, ticker):
 
 
 def plot_confidence_scores(trades_df, args, ticker):
+    """Generuje i zapisuje wykres poziomów pewności modeli dla zrealizowanych transakcji."""
     if trades_df.empty or not all(
         c in trades_df.columns for c in ['conf_momentum', 'conf_reversion', 'conf_pa']): return
     model_map = {'momentum': ('Momentum', args.min_conf_momentum, 'blue'),
@@ -116,6 +106,7 @@ class TradingBot:
         self.args = args;
         self.session = self._initialize_session()
         self.models, self.features, self.scaler_pa = {}, {}, None
+        self.event_logs = []  # Lista do przechowywania logów zdarzeń
         self._load_ml_artifacts()
 
     def _initialize_session(self):
@@ -134,6 +125,15 @@ class TradingBot:
             self.scaler_pa = joblib.load(f'scaler_pa_{self.args.ticker_name}_5m.joblib')
         except FileNotFoundError as e:
             sys.exit(f"Nie znaleziono plików modelu: {e.filename}")
+
+    def _log_event(self, event, details):
+        """Zapisuje zdarzenie (np. aktywacja trailing stop) do wewnętrznej listy logów."""
+        log_entry = {
+            "timestamp": self.current_candle.name,
+            "event": event,
+            "details": details
+        }
+        self.event_logs.append(log_entry)
 
     def _get_analysis_from_row(self, data_row: pd.Series) -> dict:
         expert_opinions = {}
@@ -191,13 +191,12 @@ class TradingBot:
             if strategy == 'long' and not pos['is_trailing']:
                 if self.args.trailing_sl_trigger > 0 and current_candle['high'] >= pos['trailing_trigger_price']:
                     pos['is_trailing'] = True;
-                    log('trailing_sl_activated', {'trade_entry_date': pos['entry_date']})
+                    self._log_event('trailing_sl_activated', {'trade_entry_date': pos['entry_date']})
                 elif self.args.breakeven_trigger > 0 and not pos['is_be'] and current_candle['high'] >= pos[
                     'breakeven_trigger_price']:
-                    # --- ZMIANA: Użycie nowego poziomu SL dla Break-Even ---
                     pos['sl_price'] = pos['breakeven_sl_price'];
                     pos['is_be'] = True;
-                    log('breakeven_activated', {'trade_entry_date': pos['entry_date']})
+                    self._log_event('breakeven_activated', {'trade_entry_date': pos['entry_date']})
 
             if pos['is_trailing']:
                 new_sl = current_candle['close'] - (current_candle['ATRr_14_5m'] * self.args.trailing_sl_distance)
@@ -212,7 +211,6 @@ class TradingBot:
 
             if not exit_reason:
                 if strategy == 'long' and current_candle['low'] <= pos['sl_price']:
-                    # --- ZMIANA: Przypisanie nowego powodu zamknięcia "Break-Even" ---
                     if pos['is_be']:
                         exit_reason = "Break-Even"
                     elif pos['is_trailing']:
@@ -253,7 +251,6 @@ class TradingBot:
             tp_distance = abs(tp_price - entry_price)
             breakeven_trigger_price = entry_price + (
                         tp_distance * self.args.breakeven_trigger) if self.args.breakeven_trigger > 0 else 0
-            # --- ZMIANA: Obliczenie ceny SL, która pokryje koszty transakcji ---
             breakeven_sl_price = entry_price + (
                         self.args.trade_cost / position_size) if position_size > 0 else entry_price
             trailing_trigger_price = entry_price + (
@@ -321,20 +318,36 @@ class TradingBot:
     def _generate_backtest_report(self, trades, equity_curve, final_capital):
         args = self.args;
         report_filename = f"backtest_report_{args.ticker}_{args.start_date}_to_{args.end_date}.csv"
+        events_log_filename = f"backtest_events_{args.ticker}_{args.start_date}_to_{args.end_date}.json"
+
+        # Zapis logów zdarzeń do pliku JSON
+        if self.event_logs:
+            def json_serial_helper(obj):
+                if isinstance(obj, (datetime, date, pd.Timestamp)):
+                    return obj.isoformat()
+                raise TypeError(f"Type {type(obj)} not serializable for JSON")
+
+            with open(events_log_filename, 'w') as f:
+                json.dump(self.event_logs, f, indent=4, default=json_serial_helper)
+            print(f"\nZapisano logi zdarzeń do pliku: {events_log_filename}")
+
         trades_df = pd.DataFrame(trades)
         if not trades_df.empty:
             trades_df.to_csv(report_filename, index=False)
-            print(f"\nZapisano raport z transakcji do pliku: {report_filename}")
+            print(f"Zapisano raport z transakcji do pliku: {report_filename}")
+
         equity_series = pd.Series(equity_curve)
         plot_equity_and_drawdown(equity_series, args.ticker)
         if not trades_df.empty:
             plot_confidence_scores(trades_df, args, args.ticker)
+
         print("\n--- WYNIKI BACKTESTU ---")
         print(f"Testowany okres: od {args.start_date} do {args.end_date}")
         print(f"Kapitał początkowy: ${args.initial_capital:,.2f}")
         print(f"Kapitał końcowy: ${final_capital:,.2f}")
         pnl_total = final_capital - args.initial_capital
         print(f"Zysk/Strata (P/L): ${pnl_total:,.2f} ({(pnl_total / args.initial_capital * 100):.2f}%)")
+
         if not trades_df.empty:
             wins = trades_df[trades_df['pnl_usd'] > 0];
             losses = trades_df[trades_df['pnl_usd'] <= 0]
@@ -349,13 +362,10 @@ class TradingBot:
             print(f"Średni czas trwania pozycji: {trades_df['duration'].mean()}")
             print("\nRozkład powodów zamknięcia pozycji:")
             print(trades_df['exit_reason'].value_counts(normalize=True).apply("{:.2%}".format))
-
-            # --- ZMIANA: Nowy, szczegółowy raport P/L ---
             print("\n--- Zysk/Strata według Powodu Zamknięcia ---")
             pnl_by_reason = trades_df.groupby('exit_reason')['pnl_usd'].sum()
             for reason, total_pnl in pnl_by_reason.items():
                 print(f"{reason + ':':<20} ${total_pnl:,.2f}")
-
             print("\n--- Statystyki Pewności Modeli (dla zrealizowanych transakcji) ---")
             avg_conf_momentum = trades_df['conf_momentum'].mean();
             avg_conf_reversion = trades_df['conf_reversion'].mean();
@@ -374,7 +384,7 @@ class TradingBot:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bot handlowy z trybem live i backtest opartym o te same modele ML.")
 
-    parser.add_argument("--mode", type=str, default="live", choices=['live', 'backtest'], help="Tryb pracy bota.")
+    parser.add_argument("--mode", type=str, default="backtest", choices=['live', 'backtest'], help="Tryb pracy bota.")
     parser.add_argument("--ticker", type=str, help="Symbol do handlu lub testowania.")
     parser.add_argument("--ticker-name", type=str, default="ETH",
                         help="Nazwa tickera używana w nazwach plików modeli (np. ETH, ICP).")
