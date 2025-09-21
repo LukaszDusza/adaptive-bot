@@ -426,9 +426,9 @@ if __name__ == "__main__":
     if args.trade_cost is None: args.trade_cost = 1.0
     if args.entry_votes is None: args.entry_votes = 2
     if args.exit_signal_persistence is None: args.exit_signal_persistence = 2
-    if args.min_conf_momentum is None: args.min_conf_momentum = 0.71
-    if args.min_conf_reversion is None: args.min_conf_reversion = 0.71
-    if args.min_conf_pa is None: args.min_conf_pa = 0.55
+    if args.min_conf_momentum is None: args.min_conf_momentum = 0.70
+    if args.min_conf_reversion is None: args.min_conf_reversion = 0.73
+    if args.min_conf_pa is None: args.min_conf_pa = 0.54
 
     bot = TradingBot(args)
     if args.mode == 'backtest':
