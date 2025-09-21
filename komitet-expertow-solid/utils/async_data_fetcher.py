@@ -13,21 +13,21 @@ API_SLEEP_SECONDS = 0.1
 CACHE_DIR = "data_cache"
 
 
-# <<< NOWA FUNKCJA POMOCNICZA DO KONWERSJI TYPÓW DANYCH >>>
 def _convert_dataframe_numeric(df: pd.DataFrame) -> pd.DataFrame:
     """Konwertuje kolumny OHLCV na typ numeryczny i usuwa wiersze z błędami."""
+    if isinstance(df.index, pd.DatetimeIndex):
+        df = df.reset_index()
+
     ohlcv_cols = ['open', 'high', 'low', 'close', 'volume', 'turnover']
     for col in ohlcv_cols:
-        # errors='coerce' zamieni błędne wartości (np. puste) na NaN (Not a Number)
-        df[col] = pd.to_numeric(df[col], errors='coerce')
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
 
-    # Usuwamy wiersze, w których konwersja się nie powiodła
-    initial_rows = len(df)
     df.dropna(subset=ohlcv_cols, inplace=True)
-    removed_rows = initial_rows - len(df)
-    if removed_rows > 0:
-        print(f"Usunięto {removed_rows} wierszy z powodu błędów danych po konwersji na typ numeryczny.")
 
+    # Ustawiamy timestamp z powrotem jako indeks
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df.set_index('timestamp', inplace=True)
     return df
 
 
@@ -43,7 +43,7 @@ def get_bybit_session():
         sys.exit(f"Błąd inicjalizacji sesji Bybit: {e}")
 
 
-async def _fetch_chunk(session, semaphore, ticker, start_ts, end_ts, chunk_id):
+async def _fetch_chunk(session, semaphore, ticker, start_ts, end_ts):
     # ... (bez zmian) ...
     all_data = []
     current_ts = start_ts
@@ -72,13 +72,11 @@ async def fetch_data_for_trainer_async(ticker: str, start_date: str, end_date: s
     cache_filename = f"{CACHE_DIR}/{ticker}_{start_date}_to_{end_date}.csv"
 
     if os.path.exists(cache_filename):
-        print(f"Znaleziono zapisane dane w cache. Wczytywanie z pliku: {cache_filename}")
-        df = pd.read_csv(cache_filename, index_col='timestamp', parse_dates=True)
-        print("Dane wczytane z cache. Rozpoczynanie konwersji typów...")
+        print(f"Znaleziono dane w cache. Wczytywanie z pliku: {cache_filename}")
+        df = pd.read_csv(cache_filename, parse_dates=['timestamp'])
 
-        # <<< UŻYCIE FUNKCJI POMOCNICZEJ DLA DANYCH Z CACHE >>>
+        # <<< POPRAWKA: Używamy funkcji pomocniczej dla danych z cache >>>
         df = _convert_dataframe_numeric(df)
-        print("Konwersja typów dla danych z cache zakończona.")
         return df
 
     print("Brak danych w cache. Rozpoczynanie pobierania z API...")
@@ -97,26 +95,26 @@ async def fetch_data_for_trainer_async(ticker: str, start_date: str, end_date: s
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     tasks = [
-        asyncio.create_task(_fetch_chunk(session, semaphore, ticker, start_ts, end_ts, i + 1))
-        for i, (start_ts, end_ts) in enumerate(date_chunks)
+        asyncio.create_task(_fetch_chunk(session, semaphore, ticker, start_ts, end_ts))
+        for start_ts, end_ts in date_chunks
     ]
     results = await asyncio.gather(*tasks)
+    print("Wszystkie fragmenty pobrane, łączenie wyników...")
 
     all_data_flat = [item for sublist in results for item in sublist]
     if not all_data_flat: return pd.DataFrame()
 
     df = pd.DataFrame(all_data_flat, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-    df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
     df.sort_values(by='timestamp', inplace=True)
     df.drop_duplicates(subset='timestamp', keep='first', inplace=True)
 
-    # <<< UŻYCIE FUNKCJI POMOCNICZEJ DLA NOWYCH DANYCH >>>
+    # <<< POPRAWKA: Używamy funkcji pomocniczej dla nowych danych >>>
     df = _convert_dataframe_numeric(df)
 
-    df.set_index('timestamp', inplace=True)
     print(f"\nZakończono pobieranie. Pobrane {len(df)} unikalnych świec.")
 
+    # Zapisujemy do cache już przekonwertowane dane
     df.to_csv(cache_filename)
-    print(f"Zapisano pobrane dane do cache: {cache_filename}")
+    print(f"Zapisano dane do cache: {cache_filename}")
 
     return df

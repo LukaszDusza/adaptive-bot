@@ -1,5 +1,5 @@
 # logic/position_manager.py
-from position import Position
+from .position import Position
 
 
 class PositionManager:
