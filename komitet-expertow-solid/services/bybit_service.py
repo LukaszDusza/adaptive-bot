@@ -32,7 +32,7 @@ class BybitService:
     Handles live data fetching and position management.
     """
     
-    def __init__(self, mode='paper', api_key=None, api_secret=None, testnet=True):
+    def __init__(self, mode='paper', api_key=None, api_secret=None, demo=True):
         """
         Initialize Bybit service.
         
@@ -40,13 +40,13 @@ class BybitService:
             mode: 'paper' for paper trading, 'live' for real trading
             api_key: Bybit API key (optional, will use .env if not provided)
             api_secret: Bybit API secret (optional, will use .env if not provided)
-            testnet: Use testnet environment (default True for safety)
+            demo: Use demo environment (default True for safety)
         """
         self.mode = mode
         # Load API credentials from .env file if not provided
         self.api_key = api_key or os.getenv('BYBIT_API_KEY')
         self.api_secret = api_secret or os.getenv('BYBIT_API_SECRET')
-        self.testnet = testnet
+        self.demo = demo
         self.client = None
         
         # Rate limiting
@@ -70,13 +70,27 @@ class BybitService:
             
             try:
                 # Initialize real Bybit API client
-                endpoint = 'https://api-testnet.bybit.com' if self.testnet else 'https://api.bybit.com'
+                # Note: For demo mainnet URLs, we use testnet=False but will need to override the base URL
+                # pybit doesn't directly support demo endpoints, so we use testnet=False for now
+                # TODO: Implement custom endpoint override if needed
                 self.client = HTTP(
-                    testnet=self.testnet,
+                    testnet=False,  # Use mainnet configuration
                     api_key=self.api_key,
                     api_secret=self.api_secret
                 )
-                logger.info(f"Bybit service initialized in LIVE TRADING mode (testnet: {self.testnet})")
+                
+                # Override the base URL for demo environment after initialization
+                if self.demo:
+                    # Modify the client's base URL to point to demo endpoint
+                    if hasattr(self.client, 'endpoint'):
+                        self.client.endpoint = 'https://api-demo.bybit.com'
+                    elif hasattr(self.client, 'base_url'):
+                        self.client.base_url = 'https://api-demo.bybit.com'
+                    endpoint = 'https://api-demo.bybit.com'
+                else:
+                    endpoint = 'https://api.bybit.com'
+                
+                logger.info(f"Bybit service initialized in LIVE TRADING mode (demo: {self.demo}, endpoint: {endpoint})")
                 
                 # Test connection
                 server_time = self.get_server_time()

@@ -23,7 +23,7 @@ class LiveTrader:
         self.ticker = config.TICKER
 
         # Inicjalizacja serwisów
-        self.bybit_service = BybitService(mode='live', testnet=True)  # Zmień na False dla realnego handlu!
+        self.bybit_service = BybitService(mode='live', demo=True)  # Zmień na False dla realnego handlu!
         self.analysis_service = AnalysisService(config.TICKER_NAME_FOR_MODELS)
         self.manager = PositionManager(config)
 
