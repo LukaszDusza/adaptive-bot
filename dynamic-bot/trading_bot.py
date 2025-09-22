@@ -16,7 +16,7 @@ LEVERAGE = "10"
 API_URL = "http://api_service:8080/predict"
 POSITION_TIME_EXIT_HOURS = 12
 MIN_CONFIDENCE = 0.55
-QTY_PRECISION = 1
+QTY_PRECISION = 3
 
 # --- Konfiguracja Testów i Logowania ---
 TEST_TICKER = "USDCUSDT"

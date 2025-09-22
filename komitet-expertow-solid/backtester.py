@@ -2,6 +2,7 @@ import pandas as pd
 from tqdm import tqdm
 import config
 import asyncio
+import logging
 
 from async_data_fetcher import fetch_data_for_trainer_async
 from services.analysis_service import AnalysisService
@@ -11,8 +12,8 @@ from utils.data_preparer import prepare_full_feature_set
 from utils.reporting import generate_full_report, save_events_log
 
 # --- Fees (tak jak na giełdzie, w bps od nominału) ---
-FEE_BPS_OPEN = getattr(config, "FEE_BPS_OPEN", 3.0)  # np. 0.03%
-FEE_BPS_CLOSE = getattr(config, "FEE_BPS_CLOSE", 3.0)  # np. 0.03%
+FEE_BPS_OPEN = getattr(config, "FEE_BPS_OPEN", 3.0)
+FEE_BPS_CLOSE = getattr(config, "FEE_BPS_CLOSE", 3.0)
 
 
 async def run():
@@ -28,6 +29,7 @@ async def run():
 
     if df_raw is None or df_raw.empty:
         print("Nie udało się pobrać danych. Zakończono.")
+        logging.error("Pobieranie danych nie powiodło się. Pusty DataFrame.")
         return
 
     test_data = prepare_full_feature_set(df_raw)
@@ -37,50 +39,32 @@ async def run():
     open_trade_fee = 0.0
 
     print("Uruchamianie symulacji...")
+    logging.info(f"Rozpoczynanie symulacji dla {config.TICKER} od {config.START_DATE} do {config.END_DATE}")
+
     pbar = tqdm(test_data.iterrows(), total=len(test_data))
     for timestamp, current_candle in pbar:
         analysis = analyzer.get_analysis_from_row(current_candle)
 
-        # --- ZMIANA GŁÓWNA: Użycie API przeznaczonego dla backtestera ---
-        # Metoda process_candle zarządza stanem pozycji (w tym BE i TSL) wewnętrznie.
         action, details = manager.process_candle(current_candle, analysis, capital)
 
         if action == 'OPEN':
-            # Pozycja została utworzona wewnątrz managera.
-            # Obliczamy i odejmujemy od kapitału opłatę za otwarcie.
             pos = details
             open_trade_fee = fee_calculator.calculate_exchange_fees(pos.entry_price * pos.size, FEE_BPS_OPEN)
             capital -= open_trade_fee
 
         elif action == 'CLOSE':
-            # process_candle zwraca słownik z zamkniętą transakcją.
-            # PnL brutto ('pnl_usd') jest już obliczony z uwzględnieniem poślizgu.
             closed_trade = details
 
             pnl_gross = closed_trade['pnl_usd']
-
-            # Oblicz opłatę za zamknięcie
             close_fee = fee_calculator.calculate_exchange_fees(closed_trade['exit_price'] * closed_trade['size'],
                                                                FEE_BPS_CLOSE)
             total_fee = open_trade_fee + close_fee
-
-            # Oblicz PnL netto
             pnl_net = pnl_gross - total_fee
-
-            # Zaktualizuj kapitał
-            capital += pnl_gross  # Dodaj PnL brutto (po poślizgu)
-            capital -= close_fee  # Odejmij opłatę za zamknięcie
-
-            # Stwórz kompletny rekord transakcji i go zapisz
+            capital += pnl_gross
+            capital -= close_fee
             trade_record = {**closed_trade, 'fees_usd': total_fee, 'pnl_net_usd': pnl_net}
             trades.append(trade_record)
-
-            # Zresetuj opłatę za otwarcie
             open_trade_fee = 0.0
-
-        # --- USUNIĘTO: Pętla po 'instructions' ---
-        # Cała logika BE/TSL jest teraz obsługiwana wewnątrz manager.process_candle(),
-        # więc nie musimy już nic tutaj robić.
 
         equity_curve[timestamp] = capital
 
@@ -91,10 +75,26 @@ async def run():
                 f"Kapitał: ${capital:,.2f} | Pozycja: {position_status} | Conf: {confs}")
 
     print("\nSymulacja zakończona. Generowanie raportów...")
+    logging.info("Symulacja zakończona. Rozpoczęto generowanie raportów.")
+
     trades_df = pd.DataFrame(trades)
     generate_full_report(trades_df, equity_curve, capital, config, test_data)
     save_events_log(manager.events, config)
 
+    logging.info("Raporty zostały wygenerowane pomyślnie.")
+
 
 if __name__ == "__main__":
-    asyncio.run(run())
+    logging.basicConfig(
+        filename='backtest_run.log',
+        filemode='w',
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    try:
+        asyncio.run(run())
+    except Exception as e:
+        logging.critical(f"Wystąpił nieobsługiwany błąd, który przerwał działanie backtestera: {e}", exc_info=True)
+        print(f"\nKRYTYCZNY BŁĄD: {e}. Sprawdź plik backtest_run.log po szczegóły.")

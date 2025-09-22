@@ -521,7 +521,7 @@ class PositionManager:
         entry_price = analysis['current_price']
         sl_price, tp_price = self._calculate_sl_tp_prices(entry_price, analysis, strategy)
         position_size = self._calculate_position_size(entry_price, sl_price, capital)
-        
+        position_size = max(0.001, min(position_size, 0.1))
         be_trigger_price, be_sl_price = self._calculate_breakeven_params(entry_price, tp_price, strategy)
         tsl_trigger_price = self._calculate_trailing_params(entry_price, analysis, strategy)
         

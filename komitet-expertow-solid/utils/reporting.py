@@ -32,6 +32,23 @@ def generate_full_report(trades_df, equity_curve, final_capital, config, market_
         trades_df['duration'] = trades_df['exit_date'] - trades_df['entry_date']
         print(f"Średni czas trwania pozycji: {trades_df['duration'].mean()}")
         print("\nRozkład powodów zamknięcia pozycji:")
+        
+        # Calculate percentages and amounts for each exit reason
+        exit_reason_stats = trades_df.groupby('exit_reason').agg({
+            'pnl_usd': ['count', 'sum']
+        }).round(2)
+        exit_reason_stats.columns = ['count', 'total_pnl']
+        exit_reason_stats['percentage'] = (exit_reason_stats['count'] / len(trades_df) * 100).round(2)
+        
+        # Display results with percentages and amounts
+        for reason, row in exit_reason_stats.iterrows():
+            percentage = row['percentage']
+            amount = row['total_pnl']
+            sign = '+' if amount >= 0 else ''
+            print(f"{reason:<20} {percentage:>6.2f}% ({sign}${amount:>8.2f})")
+        
+        # Also show the traditional percentage breakdown for reference
+        print("\nTraditional percentage breakdown:")
         print(trades_df['exit_reason'].value_counts(normalize=True).apply("{:.2%}".format))
 
     # Zapis i generowanie wykresów
