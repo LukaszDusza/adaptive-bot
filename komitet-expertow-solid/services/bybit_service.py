@@ -203,8 +203,8 @@ class BybitService:
         try:
             self._rate_limit()
             
-            # Get all positions for futures trading
-            response = self.client.get_positions(category="linear")
+            # Get all positions for futures trading - add settleCoin parameter to satisfy API requirements
+            response = self.client.get_positions(category="linear", settleCoin="USDT")
             
             if response['retCode'] == 0:
                 positions = response['result']['list']
@@ -235,7 +235,8 @@ class BybitService:
                 logger.info(f"Found {len(active_positions)} active positions")
                 return active_positions
             else:
-                logger.error(f"Failed to get positions: {response.get('retMsg', 'Unknown error')}")
+                logger.error(f"Error getting current positions: {response.get('retMsg', 'Unknown error')} (ErrCode: {response.get('retCode')}) (ErrTime: {datetime.now().strftime('%H:%M:%S')}).")
+                logger.error(f"Request → GET https://api-demo.bybit.com/v5/position/list: category=linear&settleCoin=USDT.")
                 return []
                 
         except Exception as e:
@@ -508,11 +509,27 @@ class BybitService:
                 }
             }
         
-        # TODO: Implement real balance query
-        # response = self.client.get_wallet_balance()
-        # return response
-        
-        return {}
+        try:
+            self._rate_limit()
+            
+            # Get wallet balance for Unified Trading Account
+            response = self.client.get_wallet_balance(accountType="UNIFIED")
+            
+            if response['retCode'] == 0 and response['result']['list']:
+                # Return the balance data in the format expected by _get_current_capital()
+                balance_data = response['result']['list'][0]  # First account
+                return {
+                    'ret_code': 0,
+                    'coin': balance_data.get('coin', []),  # Direct access to coin array
+                    'result': response['result']
+                }
+            else:
+                logger.error(f"Failed to get wallet balance: {response.get('retMsg', 'Unknown error')}")
+                return {}
+                
+        except Exception as e:
+            logger.error(f"Error getting account balance: {e}")
+            return {}
     
     def get_server_time(self) -> int:
         """Get Bybit server timestamp."""

@@ -1,7 +1,11 @@
 # logic/position_manager.py
+import logging
 from .position import Position
 from .fees import get_fee_calculator
 from typing import Dict, Any, Optional, Tuple
+
+# Setup logging
+logger = logging.getLogger(__name__)
 
 
 class PositionManager:
@@ -30,6 +34,16 @@ class PositionManager:
             - size: position size
             - instructions: list of position management instructions
         """
+        # Log ML predictions at the start
+        logger.info("=== ML PREDICTIONS ===")
+        logger.info(f"Current price: {analysis['current_price']:.4f}")
+        logger.info(f"ATR (5m): {analysis['atr_value_5m']:.6f}")
+        
+        expert_opinions = analysis['expert_opinions']
+        for expert_name, opinion in expert_opinions.items():
+            prediction_text = "BULLISH" if opinion['prediction'] == 1 else "BEARISH"
+            logger.info(f"{expert_name.upper()}: {prediction_text} (confidence: {opinion['confidence']:.4f})")
+        
         instructions = []
         
         # Check for position management instructions first
@@ -294,6 +308,9 @@ class PositionManager:
         if not getattr(pos, "_pending_be", False):
             return
         
+        logger.info("🎯 APPLYING BREAK-EVEN")
+        old_sl = pos.current_sl_price
+        
         # Ustaw SL na poziom break-even
         if pos.strategy == 'long':
             if pos.breakeven_sl_price > pos.current_sl_price:
@@ -304,6 +321,7 @@ class PositionManager:
         
         pos.is_be = True
         pos._pending_be = False
+        logger.info(f"✅ Break-even applied: SL moved from {old_sl:.4f} to {pos.current_sl_price:.4f}")
 
     def _apply_pending_trailing_stop(self):
         """Stosuje oczekujący trailing stop."""
@@ -313,18 +331,29 @@ class PositionManager:
         
         candidate_sl = pos._pending_tsl_sl
         if candidate_sl is not None:
+            old_sl = pos.current_sl_price
+            updated = False
+            
             if pos.strategy == 'long':
                 if candidate_sl > pos.current_sl_price:
                     pos.current_sl_price = candidate_sl
+                    updated = True
             else:  # short
                 if candidate_sl < pos.current_sl_price:
                     pos.current_sl_price = candidate_sl
+                    updated = True
+            
+            if updated:
+                logger.info(f"📈 TRAILING STOP UPDATED: SL moved from {old_sl:.4f} to {pos.current_sl_price:.4f}")
             
             pos._pending_tsl_sl = None
 
     def _manage_active_position(self, current_candle, analysis) -> Optional[Dict[str, Any]]:
         """Zarządza aktywną pozycją i zwraca dane transakcji wyjścia jeśli pozycja zostanie zamknięta."""
         pos = self.active_position
+        logger.info(f"=== MANAGING ACTIVE POSITION: {pos.strategy.upper()} ===")
+        logger.info(f"Position entry: {pos.entry_price:.4f}, current SL: {pos.current_sl_price:.4f}, TP: {pos.tp_price:.4f}")
+        logger.info(f"Position status - BE: {pos.is_be}, Trailing: {pos.is_trailing}")
         
         # Aktualizacja mechanik BE i TSL
         self._update_mechanics(current_candle)
@@ -337,7 +366,10 @@ class PositionManager:
             exit_reason = self._check_stop_take_exit(pos, current_candle)
         
         if exit_reason:
+            logger.info(f"🚪 POSITION EXIT TRIGGERED: {exit_reason}")
             return self._create_exit_trade(pos, exit_reason, current_candle)
+        else:
+            logger.info("✅ Position continues - no exit conditions met")
         
         return None
 
@@ -383,34 +415,56 @@ class PositionManager:
         votes_long = self._count_votes(analysis, prediction_target=1)
         votes_short = self._count_votes(analysis, prediction_target=0)
         
+        logger.info(f"🔍 CHECKING MODEL EXIT: Position {pos.strategy.upper()}, Long votes: {votes_long}, Short votes: {votes_short}")
+        
         if pos.strategy == 'long':
             if votes_short >= 2:
                 pos.opposing_signal_count += 1
+                logger.info(f"⚠️ Opposing signal detected for LONG position! Count: {pos.opposing_signal_count}/{self.config.EXIT_SIGNAL_PERSISTENCE}")
             else:
                 pos.opposing_signal_count = 0
+                logger.info("✅ No opposing signals for LONG position")
+                
             if pos.opposing_signal_count >= self.config.EXIT_SIGNAL_PERSISTENCE:
+                logger.info("🚨 MODEL EXIT SIGNAL TRIGGERED for LONG position!")
                 return "Model Exit Signal"
         elif pos.strategy == 'short':
             if votes_long >= 2:
                 pos.opposing_signal_count += 1
+                logger.info(f"⚠️ Opposing signal detected for SHORT position! Count: {pos.opposing_signal_count}/{self.config.EXIT_SIGNAL_PERSISTENCE}")
             else:
                 pos.opposing_signal_count = 0
+                logger.info("✅ No opposing signals for SHORT position")
+                
             if pos.opposing_signal_count >= self.config.EXIT_SIGNAL_PERSISTENCE:
+                logger.info("🚨 MODEL EXIT SIGNAL TRIGGERED for SHORT position!")
                 return "Model Exit Signal"
         return None
 
     def _check_stop_take_exit(self, pos: Position, current_candle) -> Optional[str]:
         """Sprawdza czy pozycja powinna zostać zamknięta przez SL/TP."""
+        logger.info(f"🎯 CHECKING SL/TP EXIT: {pos.strategy.upper()} position")
+        logger.info(f"Current candle: High={current_candle['high']:.4f}, Low={current_candle['low']:.4f}")
+        logger.info(f"Position levels: SL={pos.current_sl_price:.4f}, TP={pos.tp_price:.4f}")
+        
         if pos.strategy == 'long':
             if current_candle['low'] <= pos.current_sl_price:
-                return self._classify_stop_reason(pos)
+                exit_reason = self._classify_stop_reason(pos)
+                logger.info(f"🔴 STOP LOSS HIT for LONG: {exit_reason}")
+                return exit_reason
             elif current_candle['high'] >= pos.tp_price:
+                logger.info("🟢 TAKE PROFIT HIT for LONG!")
                 return "Take Profit"
         else:  # short
             if current_candle['high'] >= pos.current_sl_price:
-                return self._classify_stop_reason(pos)
+                exit_reason = self._classify_stop_reason(pos)
+                logger.info(f"🔴 STOP LOSS HIT for SHORT: {exit_reason}")
+                return exit_reason
             elif current_candle['low'] <= pos.tp_price:
+                logger.info("🟢 TAKE PROFIT HIT for SHORT!")
                 return "Take Profit"
+        
+        logger.info("✅ No SL/TP exit conditions met")
         return None
 
     def _classify_stop_reason(self, pos: Position) -> str:
@@ -424,25 +478,42 @@ class PositionManager:
 
     def _check_for_new_entry(self, current_candle, analysis, capital) -> Optional[Dict[str, Any]]:
         """Sprawdza czy można otworzyć nową pozycję i zwraca jej parametry."""
-        if not analysis or self.active_position:
+        logger.info("=== CHECKING FOR NEW ENTRY ===")
+        
+        if not analysis:
+            logger.info("❌ No analysis data available - no entry")
+            return None
+            
+        if self.active_position:
+            logger.info("❌ Active position exists - no new entry")
             return None
 
         strategy_to_open = self._determine_entry_strategy(analysis)
         if not strategy_to_open:
+            logger.info("❌ No entry strategy determined - no entry")
             return None
 
-        return self._calculate_position_parameters(current_candle, analysis, capital, strategy_to_open)
+        logger.info(f"✅ Entry strategy determined: {strategy_to_open.upper()}")
+        position_params = self._calculate_position_parameters(current_candle, analysis, capital, strategy_to_open)
+        logger.info(f"✅ Position parameters calculated - Size: {position_params['size']:.4f}, Entry: {position_params['entry_price']:.4f}, SL: {position_params['current_sl_price']:.4f}, TP: {position_params['tp_price']:.4f}")
+        
+        return position_params
 
     def _determine_entry_strategy(self, analysis) -> Optional[str]:
         """Określa strategię wejścia na podstawie głosów ekspertów."""
         votes_long = self._count_votes(analysis, prediction_target=1)
         votes_short = self._count_votes(analysis, prediction_target=0)
         
+        logger.info(f"📊 ENTRY VOTING: Long votes: {votes_long}, Short votes: {votes_short}, Required: {self.config.ENTRY_VOTES}")
+        
         if votes_long >= self.config.ENTRY_VOTES:
+            logger.info("📈 LONG strategy selected based on expert voting")
             return 'long'
         elif votes_short >= self.config.ENTRY_VOTES:
+            logger.info("📉 SHORT strategy selected based on expert voting")
             return 'short'
         else:
+            logger.info("⚖️ No strategy selected - insufficient votes")
             return None
 
     def _calculate_position_parameters(self, current_candle, analysis, capital, strategy: str) -> Dict[str, Any]:
