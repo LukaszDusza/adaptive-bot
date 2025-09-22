@@ -7,7 +7,7 @@ TICKER_NAME_FOR_MODELS = "ETH"
 MODE = "backtest"  # 'backtest' lub 'live'
 
 # --- Konfiguracja Backtestu ---
-START_DATE = "2025-08-20"
+START_DATE = "2025-09-01"
 END_DATE = "2025-09-13"
 INITIAL_CAPITAL = 1000.0
 DEBUG_MODE = True

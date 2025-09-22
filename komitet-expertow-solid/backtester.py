@@ -6,15 +6,13 @@ import asyncio
 from async_data_fetcher import fetch_data_for_trainer_async
 from services.analysis_service import AnalysisService
 from logic.position_manager import PositionManager
+from logic.fees import get_fee_calculator
 from utils.data_preparer import prepare_full_feature_set
 from utils.reporting import generate_full_report, save_events_log
 
 # --- Fees (tak jak na giełdzie, w bps od nominału) ---
 FEE_BPS_OPEN  = getattr(config, "FEE_BPS_OPEN", 3.0)   # np. 0.03%
 FEE_BPS_CLOSE = getattr(config, "FEE_BPS_CLOSE", 3.0)   # np. 0.03%
-
-def fee_usd(notional, bps):
-    return float(notional) * float(bps) / 10_000.0
 
 # --- Fees (round-trip) tylko dla backtestu ---
 from config import TRADE_COST_USD as ROUND_TRIP_COST
@@ -24,6 +22,7 @@ CLOSE_COST = ROUND_TRIP_COST * 0.5
 async def run():
     analyzer = AnalysisService(config.TICKER_NAME_FOR_MODELS)
     manager = PositionManager(config)
+    fee_calculator = get_fee_calculator(config)
 
     df_raw = await fetch_data_for_trainer_async(
         ticker=config.TICKER,
@@ -49,19 +48,19 @@ async def run():
             # details to obiekt Position; pobieramy nominał wejścia
             entry_price = details.entry_price if hasattr(details, "entry_price") else details["entry_price"]
             size = details.size if hasattr(details, "size") else details["size"]
-            open_fee = fee_usd(entry_price * size, FEE_BPS_OPEN)
+            open_fee = fee_calculator.calculate_exchange_fees(entry_price * size, FEE_BPS_OPEN)
             capital -= open_fee
 
         elif decision == 'CLOSE':
             exit_price = details['exit_price']
             size = details['size']
 
-            close_fee = fee_usd(exit_price * size, FEE_BPS_CLOSE)
+            close_fee = fee_calculator.calculate_exchange_fees(exit_price * size, FEE_BPS_CLOSE)
             capital += details['pnl_usd']  # brutto PnL
             capital -= close_fee  # koszt zamknięcia
 
             # policz łączne fee (open przeliczamy deterministycznie z danych wejścia)
-            open_fee = fee_usd(details['entry_price'] * size, FEE_BPS_OPEN)
+            open_fee = fee_calculator.calculate_exchange_fees(details['entry_price'] * size, FEE_BPS_OPEN)
             total_fee = open_fee + close_fee
             details['fees_usd'] = total_fee
             details['pnl_net_usd'] = details['pnl_usd'] - total_fee
@@ -77,7 +76,7 @@ async def run():
 
     print("\nSymulacja zakończona. Generowanie raportów...")
     trades_df = pd.DataFrame(trades)
-    generate_full_report(trades_df, equity_curve, capital, config)
+    generate_full_report(trades_df, equity_curve, capital, config, test_data)
     save_events_log(manager.events, config)
 
 
