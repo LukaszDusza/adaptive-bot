@@ -1,388 +1,193 @@
-# services/bybit_service.py
-"""
-Bybit API service for live trading integration.
-Handles connection, position management, and order execution.
-"""
-
-import pandas as pd
 import time
 import logging
-import os
-from typing import Dict, Any, Optional, List
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+import pandas as pd
 
-# Production Bybit API imports
-try:
-    from pybit.unified_trading import HTTP
+import config  # Importuje konfigurację (TICKER, etc.)
 
-    PYBIT_AVAILABLE = True
-except ImportError:
-    print("Warning: pybit not installed. Install with: pip install pybit")
-    PYBIT_AVAILABLE = False
+# Importy z Twojego projektu
+from services.analysis_service import AnalysisService
+from services.bybit_service import BybitService  # Zakładając, że BybitService jest w tym samym folderze
+from logic.position_manager import PositionManager
+from utils.data_preparer import prepare_full_feature_set
 
-# Setup logging
+# Konfiguracja logowania
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 
-class BybitService:
-    """
-    Service for Bybit API integration.
-    Handles live data fetching and position management.
-    """
+class LiveTrader:
+    def __init__(self, config):
+        """Inicjalizacja kluczowych komponentów tradera."""
+        self.config = config
+        self.ticker = config.TICKER
 
-    def __init__(self, mode='paper', api_key: Optional[str] = None, api_secret: Optional[str] = None,
-                 testnet: bool = True):
-        """
-        Initialize Bybit service.
+        # Inicjalizacja serwisów
+        self.bybit_service = BybitService(mode='live', testnet=True)  # Zmień na False dla realnego handlu!
+        self.analysis_service = AnalysisService(config.TICKER_NAME_FOR_MODELS)
+        self.manager = PositionManager(config)
 
-        Args:
-            mode: 'paper' for paper trading, 'live' for real trading
-            api_key: Bybit API key (optional, will use .env if not provided)
-            api_secret: Bybit API secret (optional, will use .env if not provided)
-            testnet: Use testnet environment (default True for safety)
-        """
-        self.mode = mode
-        # Load API credentials from .env file if not provided
-        self.api_key = api_key or os.getenv('BYBIT_API_KEY')
-        self.api_secret = api_secret or os.getenv('BYBIT_API_SECRET')
-        self.testnet = testnet
-        self.client: Optional[HTTP] = None
+        self.is_running = False
+        logger.info("Live Trader zainicjalizowany.")
 
-        # Rate limiting
-        self.last_request_time = 0
-        self.min_request_interval = 0.1  # 10 requests per second limit
+    def _sync_position_state(self):
+        """Synchronizuje stan PositionManager z rzeczywistą pozycją na giełdzie."""
+        logger.info("Synchronizowanie stanu pozycji z giełdą...")
 
-        # Initialize API client
-        self._init_client()
+        active_positions = self.bybit_service.get_current_positions()
+        position_on_exchange = next((p for p in active_positions if p['symbol'] == self.ticker), None)
 
-    def _init_client(self):
-        """Initialize Bybit API client."""
-        if self.mode == 'paper':
-            logger.info("Bybit service initialized in PAPER TRADING mode")
-            self.client = None
-        else:
-            if not PYBIT_AVAILABLE:
-                raise ImportError("pybit library is required for live trading. Install with: pip install pybit")
+        if not position_on_exchange:
+            self.manager.clear_position()
+            logger.info("Brak aktywnej pozycji na giełdzie. Stan wewnętrzny wyczyszczony.")
+            return
 
-            if not self.api_key or not self.api_secret:
-                raise ValueError("API key and secret are required for live trading")
+        # Jeśli jest pozycja, zaktualizuj stan wewnętrzny
+        pos_data = position_on_exchange['raw_data']
+        strategy = 'long' if pos_data['side'] == 'Buy' else 'short'
 
-            try:
-                self.client = HTTP(
-                    testnet=self.testnet,
-                    api_key=self.api_key,
-                    api_secret=self.api_secret
-                )
-                logger.info(f"Bybit service initialized in LIVE TRADING mode (testnet: {self.testnet})")
+        # UWAGA: Te dane są przybliżone. Brakuje nam triggerów BE/TSL, które musiałyby być
+        # przechowywane w zewnętrznej bazie danych, aby przetrwać restarty.
+        # Dla uproszczenia, zakładamy, że stan BE/TSL jest resetowany.
+        position_details_for_manager = {
+            'strategy': strategy,
+            'entry_date': pd.to_datetime(int(pos_data['updatedTime']), unit='ms'),
+            'entry_price': float(pos_data['avgPrice']),
+            'size': float(pos_data['size']),
+            'current_sl_price': float(pos_data.get('stopLoss', 0.0)),
+            'tp_price': float(pos_data.get('takeProfit', 0.0)),
+            'is_be': False,  # Stan nie jest znany, bezpiecznie założyć False
+            'is_trailing': False,  # Stan nie jest znany, bezpiecznie założyć False
+            # Poniższe wartości są nieznane, ustawiamy na 0
+            'breakeven_trigger_price': 0,
+            'breakeven_sl_price': 0,
+            'trailing_trigger_price': 0,
+            # Konfiguracje confidence nie są dostępne z giełdy
+            'conf_momentum': 0, 'conf_reversion': 0, 'conf_pa': 0
+        }
+        self.manager.update_position_from_live_data(position_details_for_manager)
+        logger.info(
+            f"Stan wewnętrzny zsynchronizowany z pozycją na giełdzie: {strategy} {pos_data['size']} {self.ticker}")
 
-                # Test connection
-                server_time = self.get_server_time()
-                if server_time:
-                    logger.info(
-                        f"Bybit API connection successful. Server time: {datetime.fromtimestamp(server_time / 1000)}")
-                else:
-                    logger.warning("Bybit API connection test failed")
+    def _get_current_capital(self) -> float:
+        """Pobiera dostępny kapitał z konta Unified Trading."""
+        balance_info = self.bybit_service.get_account_balance()
+        if balance_info and 'coin' in balance_info:
+            for coin in balance_info['coin']:
+                if coin.get('coin') == 'USDT':
+                    # Używamy equity, które uwzględnia niezrealizowany PnL
+                    return float(coin.get('equity', 0.0))
+        logger.warning("Nie udało się pobrać kapitału. Zwracam 0.")
+        return 0.0
 
-            except Exception as e:
-                logger.error(f"Failed to initialize Bybit API client: {e}")
-                raise
+    def _process_signal(self, signal: dict, current_candle):
+        """Przetwarza sygnał z PositionManagera i wykonuje akcje na giełdzie."""
+        action = signal.get('action')
 
-    def _rate_limit(self):
-        """Apply rate limiting between API requests."""
-        current_time = time.time()
-        time_since_last = current_time - self.last_request_time
-        if time_since_last < self.min_request_interval:
-            time.sleep(self.min_request_interval - time_since_last)
-        self.last_request_time = time.time()
+        # --- 1. Obsługa instrukcji zarządzania pozycją (BE, TSL) ---
+        # Wykonujemy to w pierwszej kolejności, aby zaktualizować SL przed podjęciem innych decyzji.
+        for instruction in signal.get('instructions', []):
+            logger.info(f"Otrzymano instrukcję: {instruction['type']}")
+            if instruction['type'] == 'MOVE_SL_TO_BREAKEVEN' or instruction['type'] == 'UPDATE_TRAILING_STOP':
+                new_sl = instruction['new_sl_price']
+                self.bybit_service.modify_position(symbol=self.ticker, stop_loss=new_sl)
+                # Aktualizujemy stan wewnętrzny po wysłaniu zlecenia
+                self.manager.update_position_from_live_data({'current_sl_price': new_sl})
 
-    def fetch_recent_candles(self, symbol: str, interval_minutes: int = 5, limit: int = 500) -> pd.DataFrame:
-        """
-        Fetch recent candlestick data from Bybit.
+        # --- 2. Obsługa głównych akcji (OPEN, CLOSE, HOLD) ---
+        if action in ['OPEN_LONG', 'OPEN_SHORT']:
+            side = 'Buy' if action == 'OPEN_LONG' else 'Sell'
+            logger.info(f"Otrzymano sygnał otwarcia: {action} dla {self.ticker}")
 
-        Args:
-            symbol: Trading pair symbol (e.g., 'ETHUSDT')
-            interval_minutes: Candle interval in minutes (default 5)
-            limit: Number of candles to fetch (default 500)
-
-        Returns:
-            DataFrame with OHLCV data, indexed by timestamp.
-        """
-        if self.mode == 'paper' or not self.client:
-            return self._fetch_mock_data(symbol, interval_minutes, limit)
-
-        try:
-            self._rate_limit()
-
-            interval_map = {
-                1: '1', 3: '3', 5: '5', 15: '15', 30: '30', 60: '60',
-                120: '120', 240: '240', 360: '360', 720: '720', 1440: 'D'
-            }
-            interval_str = interval_map.get(interval_minutes, '5')
-
-            response = self.client.get_kline(
-                category="linear", symbol=symbol, interval=interval_str, limit=limit
-            )
-
-            if response['retCode'] == 0 and response['result']['list']:
-                data = response['result']['list']
-                df = pd.DataFrame(data, columns=['start_time', 'open', 'high', 'low', 'close', 'volume', 'turnover'])
-                df['timestamp'] = pd.to_datetime(df['start_time'].astype(int), unit='ms')
-                df.set_index('timestamp', inplace=True)
-                df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-                df = df.sort_index()
-                logger.info(f"Fetched {len(df)} candles for {symbol} ({interval_minutes}m)")
-                return df
-            else:
-                logger.error(f"Failed to fetch candles: {response.get('retMsg', 'Unknown error')}")
-                return pd.DataFrame()
-
-        except Exception as e:
-            logger.error(f"Error fetching candles for {symbol}: {e}")
-            return pd.DataFrame()
-
-    def _fetch_mock_data(self, symbol: str, interval_minutes: int, limit: int) -> pd.DataFrame:
-        """Fetch mock data for paper trading (placeholder)."""
-        logger.info(f"Fetching {limit} mock candles of {symbol} {interval_minutes}m for paper trading")
-        # TODO: Implement mock data or fetch from alternative source
-        return pd.DataFrame()
-
-    def get_current_positions(self) -> List[Dict[str, Any]]:
-        """
-        Get current open positions.
-
-        Returns:
-            List of active position dictionaries.
-        """
-        if self.mode == 'paper' or not self.client:
-            return []
-
-        try:
-            self._rate_limit()
-            response = self.client.get_positions(category="linear", settleCoin="USDT")
-
-            if response['retCode'] == 0:
-                positions = response['result']['list']
-                active_positions = [
-                    {
-                        'symbol': pos['symbol'],
-                        'side': pos['side'],
-                        'size': float(pos.get('size', 0)),
-                        'entry_price': float(pos.get('avgPrice', 0)),
-                        'unrealised_pnl': float(pos.get('unrealisedPnl', 0)),
-                        'leverage': float(pos.get('leverage', 1)),
-                        'position_value': float(pos.get('positionValue', 0)),
-                        'raw_data': pos
-                    }
-                    for pos in positions if float(pos.get('size', 0)) > 0
-                ]
-                logger.info(f"Found {len(active_positions)} active positions")
-                return active_positions
-            else:
-                logger.error(f"Failed to get positions: {response.get('retMsg', 'Unknown error')}")
-                return []
-
-        except Exception as e:
-            logger.error(f"Error getting current positions: {e}")
-            return []
-
-    def place_order(self, symbol: str, side: str, order_type: str, qty: float,
-                    price: Optional[float] = None, stop_loss: Optional[float] = None,
-                    take_profit: Optional[float] = None, reduce_only: bool = False) -> Dict[str, Any]:
-        """
-        Place a new order.
-
-        Args:
-            symbol: Trading pair symbol
-            side: 'Buy' or 'Sell'
-            order_type: 'Market' or 'Limit'
-            qty: Order quantity
-            price: Order price (for limit orders)
-            stop_loss: Stop loss price
-            take_profit: Take profit price
-            reduce_only: True if the order should only reduce a position
-
-        Returns:
-            Order response dictionary.
-        """
-        if self.mode == 'paper' or not self.client:
-            return self._place_paper_order(symbol, side, order_type, qty, price, stop_loss, take_profit)
-
-        try:
-            self._rate_limit()
-
-            order_params = {
-                "category": "linear", "symbol": symbol, "side": side,
-                "orderType": order_type, "qty": str(qty),
-            }
-
-            if order_type == "Limit":
-                if price is None:
-                    raise ValueError("Price is required for Limit orders")
-                order_params["price"] = str(price)
-                order_params["timeInForce"] = "GTC"
-            else:  # Market order
-                order_params["timeInForce"] = "IOC"
-
-            if stop_loss: order_params["stopLoss"] = str(stop_loss)
-            if take_profit: order_params["takeProfit"] = str(take_profit)
-            if reduce_only: order_params["reduceOnly"] = True
-
-            response = self.client.place_order(**order_params)
-
-            if response['retCode'] == 0:
-                order_id = response['result']['orderId']
-                logger.info(f"Order placed successfully: {side} {qty} {symbol} (ID: {order_id})")
-                return {'ret_code': 0, 'order_id': order_id, 'response': response}
-            else:
-                logger.error(f"Failed to place order: {response.get('retMsg', 'Unknown error')}")
-                return {'ret_code': response['retCode'], 'error': response.get('retMsg', 'Unknown error'),
-                        'response': response}
-
-        except Exception as e:
-            logger.error(f"Error placing order for {symbol}: {e}")
-            return {'ret_code': -1, 'error': str(e)}
-
-    def _place_paper_order(self, symbol, side, order_type, qty, price, stop_loss, take_profit):
-        """Place paper trading order."""
-        order_id = f"paper_{int(time.time() * 1000)}"
-        logger.info(f"PAPER ORDER: {side} {qty} {symbol} at {price or 'market'} (SL: {stop_loss}, TP: {take_profit})")
-        return {'ret_code': 0, 'order_id': order_id, 'status': 'Filled'}
-
-    def modify_position(self, symbol: str, stop_loss: Optional[float] = None, take_profit: Optional[float] = None) -> \
-    Dict[str, Any]:
-        """
-        Modify existing position's stop loss or take profit.
-
-        Args:
-            symbol: Trading pair symbol
-            stop_loss: New stop loss price
-            take_profit: New take profit price
-
-        Returns:
-            Response dictionary.
-        """
-        if self.mode == 'paper' or not self.client:
-            logger.info(f"PAPER MODIFY: {symbol} SL: {stop_loss}, TP: {take_profit}")
-            return {'ret_code': 0, 'message': 'Paper trading position modified'}
-
-        try:
-            self._rate_limit()
-
-            if not stop_loss and not take_profit:
-                logger.warning("No modifications specified for position")
-                return {'ret_code': -1, 'error': 'No stop loss or take profit specified'}
-
-            modify_params = {"category": "linear", "symbol": symbol}
-            if stop_loss: modify_params["stopLoss"] = str(stop_loss)
-            if take_profit: modify_params["takeProfit"] = str(take_profit)
-
-            response = self.client.set_trading_stop(**modify_params)
-
-            if response['retCode'] == 0:
-                logger.info(f"Position modified successfully for {symbol}: SL={stop_loss}, TP={take_profit}")
-                return {'ret_code': 0, 'message': 'Position modified successfully', 'response': response}
-            else:
-                logger.error(f"Failed to modify position: {response.get('retMsg', 'Unknown error')}")
-                return {'ret_code': response['retCode'], 'error': response.get('retMsg', 'Unknown error'),
-                        'response': response}
-
-        except Exception as e:
-            logger.error(f"Error modifying position for {symbol}: {e}")
-            return {'ret_code': -1, 'error': str(e)}
-
-    def close_position(self, symbol: str) -> Dict[str, Any]:
-        """
-        Close an entire position for a given symbol using a market order.
-
-        Args:
-            symbol: Trading pair symbol to close.
-
-        Returns:
-            Response dictionary from the closing order.
-        """
-        if self.mode == 'paper' or not self.client:
-            logger.info(f"PAPER CLOSE: Closing position for {symbol}")
-            return {'ret_code': 0, 'message': 'Paper trading position closed'}
-
-        try:
-            self._rate_limit()
-
-            # Use get_current_positions to find the position to close
-            positions = self.get_current_positions()
-            active_position = next((p for p in positions if p['symbol'] == symbol), None)
-
-            if not active_position:
-                logger.warning(f"No active position found for {symbol} to close.")
-                return {'ret_code': -1, 'error': f'No active position found for {symbol}'}
-
-            current_side = active_position['side']
-            position_size = active_position['size']
-            close_side = 'Sell' if current_side == 'Buy' else 'Buy'
-
-            logger.info(f"Attempting to close {current_side} position of size {position_size} for {symbol}...")
-
-            # Place market order to close position with reduce_only=True
-            return self.place_order(
-                symbol=symbol,
-                side=close_side,
+            # Umieść zlecenie na giełdzie
+            order_response = self.bybit_service.place_order(
+                symbol=self.ticker,
+                side=side,
                 order_type='Market',
-                qty=position_size,
-                reduce_only=True
+                qty=signal['size'],
+                stop_loss=signal['stop_loss'],
+                take_profit=signal['take_profit']
             )
 
-        except Exception as e:
-            logger.error(f"Error closing position for {symbol}: {e}")
-            return {'ret_code': -1, 'error': str(e)}
-
-    def get_account_balance(self) -> Dict[str, Any]:
-        """
-        Get Unified Trading Account balance information.
-
-        Returns:
-            Balance dictionary for the unified account.
-        """
-        if self.mode == 'paper' or not self.client:
-            return {'accountType': 'PAPER', 'totalEquity': '10000.0',
-                    'coin': [{'coin': 'USDT', 'availableToWithdraw': '10000.0'}]}
-
-        try:
-            self._rate_limit()
-            response = self.client.get_wallet_balance(accountType="UNIFIED")
-            if response['retCode'] == 0 and response['result']['list']:
-                logger.info("Successfully fetched account balance.")
-                # The main unified account info is the first item in the list
-                return response['result']['list'][0]
+            # Po udanym zleceniu, zaktualizuj stan wewnętrzny
+            if order_response and order_response.get('ret_code') == 0:
+                logger.info("Zlecenie otwarcia pozycji przyjęte przez giełdę.")
+                # Czekamy chwilę na wypełnienie zlecenia
+                time.sleep(5)
+                # Synchronizujemy stan, aby pobrać faktyczną cenę wejścia etc.
+                self._sync_position_state()
             else:
-                logger.error(f"Failed to fetch account balance: {response.get('retMsg', 'Unknown error')}")
-                return {}
-        except Exception as e:
-            logger.error(f"Error fetching account balance: {e}")
-            return {}
+                logger.error(f"Nie udało się otworzyć pozycji: {order_response.get('error')}")
 
-    def get_server_time(self) -> Optional[int]:
-        """
-        Get Bybit server time in milliseconds.
-
-        Returns:
-            Server timestamp in milliseconds or None if failed.
-        """
-        if self.mode == 'paper' or not self.client:
-            return int(time.time() * 1000)
-
-        try:
-            self._rate_limit()
-            response = self.client.get_server_time()
-            if response.get('retCode') == 0:
-                # timeNano is in nanoseconds, convert to milliseconds
-                return int(response['result']['timeNano']) // 1_000_000
+        elif action == 'CLOSE':
+            logger.info(f"Otrzymano sygnał zamknięcia pozycji: {signal.get('exit_reason')}")
+            close_response = self.bybit_service.close_position(self.ticker)
+            if close_response and close_response.get('ret_code') == 0:
+                logger.info("Zlecenie zamknięcia pozycji przyjęte przez giełdę.")
+                self.manager.clear_position()  # Wyczyść stan wewnętrzny
             else:
-                logger.error(f"Failed to get server time: {response.get('retMsg')}")
-                return None
-        except Exception as e:
-            logger.error(f"Error fetching server time: {e}")
-            return None
+                logger.error(f"Nie udało się zamknąć pozycji: {close_response.get('error')}")
+
+        elif action == 'HOLD':
+            # logger.info("Sygnał: HOLD. Brak akcji.")
+            pass
+
+    def run(self):
+        """Główna pętla działania tradera."""
+        self.is_running = True
+        logger.info(f"Live Trader uruchomiony dla {self.ticker}. Rozpoczynam pętlę.")
+
+        # Synchronizuj stan na starcie
+        self._sync_position_state()
+
+        while self.is_running:
+            try:
+                # 1. Pobierz dane
+                candles_df = self.bybit_service.fetch_recent_candles(self.ticker, interval_minutes=5, limit=500)
+                if candles_df.empty:
+                    logger.warning("Nie udało się pobrać świec. Czekam na następną próbę.")
+                    time.sleep(60)
+                    continue
+
+                # 2. Przygotuj wskaźniki i features
+                features_df = prepare_full_feature_set(candles_df)
+                current_candle = features_df.iloc[-1]
+
+                # 3. Pobierz analizę (predykcje modeli)
+                analysis = self.analysis_service.get_analysis_from_row(current_candle)
+
+                # 4. Pobierz aktualny kapitał z konta
+                current_capital = self._get_current_capital()
+                if current_capital == 0:
+                    logger.error("Kapitał wynosi 0. Zatrzymuję pętlę, aby uniknąć błędów.")
+                    self.stop()
+                    continue
+
+                # 5. Pobierz sygnał transakcyjny
+                # To jest kluczowy moment: przekazujemy aktualny kapitał do PositionManagera,
+                # który obliczy wielkość pozycji na podstawie tego samego wzoru co w backtesterze.
+                signal = self.manager.get_trading_signal(current_candle, analysis, current_capital)
+
+                # 6. Przetwórz sygnał
+                self._process_signal(signal, current_candle)
+
+                # Czekaj na kolejną świecę (z małym buforem)
+                logger.info("Cykl zakończony. Czekam na następną świecę...")
+                time.sleep(305)  # 5 minut * 60 sekund + 5 sekund bufora
+
+            except KeyboardInterrupt:
+                self.stop()
+            except Exception as e:
+                logger.error(f"Wystąpił nieoczekiwany błąd w głównej pętli: {e}", exc_info=True)
+                time.sleep(60)  # Czekaj minutę po błędzie
+
+    def stop(self):
+        """Zatrzymuje pętlę tradera."""
+        self.is_running = False
+        logger.info("Zatrzymywanie Live Tradera...")
+
+
+if __name__ == '__main__':
+    # Uruchomienie tradera
+    trader = LiveTrader(config)
+    trader.run()
