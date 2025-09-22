@@ -15,7 +15,7 @@ DEBUG_MODE = True
 
 # --- Zarządzanie Ryzykiem ---
 RISK_PERCENT = 0.02
-LEVERAGE = 10.0
+LEVERAGE = 1
 ATR_MULTIPLIER = 2.0
 RRR = 2.5
 TRADE_COST_USD = 1.0

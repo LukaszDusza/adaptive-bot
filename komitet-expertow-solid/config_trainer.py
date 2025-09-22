@@ -6,4 +6,4 @@ TICKER_NAME_FOR_MODELS = "ETH"
 
 # Zakres dat, z których zostaną pobrane dane do treningu modeli
 TRAIN_START_DATE = "2022-01-01"
-TRAIN_END_DATE = "2025-05-31"
+TRAIN_END_DATE = "2024-12-31"

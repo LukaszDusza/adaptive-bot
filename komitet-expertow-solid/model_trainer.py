@@ -22,10 +22,11 @@ from utils.data_preparer import prepare_full_feature_set
 
 # --- Konfiguracja Treningu ---
 TARGET_COLUMN_NAME = 'target'
-LOOKAHEAD_BARS = 12
+LOOKAHEAD_BARS = 1  # NAPRAWIONY: Używamy 1 bar zamiast 12 aby uniknąć lookahead bias
 TEST_SIZE = 0.2  # Ten parametr nie jest już używany do walidacji, ale może być przydatny w przyszłości
 RANDOM_STATE = 42
 CV_SPLITS = 5  # Liczba podziałów w walidacji krzyżowej
+HOLDOUT_SIZE = 0.2  # 20% ostatnich danych jako holdout test set
 
 # --- Konfiguracja Modeli Ekspertów ---
 MODEL_CONFIGS: Dict[str, Dict[str, Any]] = {
@@ -54,8 +55,8 @@ def train_and_evaluate_expert(
         ticker_name: str
 ) -> None:
     """
-    Trenuje i ocenia standardowy model eksperta przy użyciu walidacji krzyżowej
-    dla szeregów czasowych, a na końcu trenuje go na pełnym zbiorze danych i zapisuje.
+    Trenuje i ocenia standardowy model eksperta przy użyciu proper holdout validation
+    i purged cross-validation dla szeregów czasowych.
     """
     print(f"\n[KROK] Walidacja i Trening: {model_config['description']}...")
 
@@ -64,17 +65,27 @@ def train_and_evaluate_expert(
 
     # 2. Przygotowanie danych
     model_data = df.dropna(subset=[TARGET_COLUMN_NAME] + features)
-    X = model_data[features]
-    y = model_data[TARGET_COLUMN_NAME]
+    
+    # 3. Podział na train/holdout (temporal split)
+    holdout_split_idx = int(len(model_data) * (1 - HOLDOUT_SIZE))
+    train_data = model_data.iloc[:holdout_split_idx]
+    holdout_data = model_data.iloc[holdout_split_idx:]
+    
+    print(f"Train data: {len(train_data)} samples, Holdout data: {len(holdout_data)} samples")
+    
+    X_train_full = train_data[features]
+    y_train_full = train_data[TARGET_COLUMN_NAME]
+    X_holdout = holdout_data[features]
+    y_holdout = holdout_data[TARGET_COLUMN_NAME]
 
-    # 3. Walidacja krzyżowa (Cross-Validation)
-    print(f"Przeprowadzanie walidacji krzyżowej dla '{model_name}'...")
-    tscv = TimeSeriesSplit(n_splits=CV_SPLITS)
+    # 4. Purged Cross-Validation na danych treningowych
+    print(f"Przeprowadzanie purged cross-validation dla '{model_name}'...")
+    tscv = TimeSeriesSplit(n_splits=CV_SPLITS, gap=3)  # Gap=3 usuwa overlapping samples
     scores = []
 
-    for fold, (train_index, test_index) in enumerate(tscv.split(X)):
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+    for fold, (train_index, test_index) in enumerate(tscv.split(X_train_full)):
+        X_train, X_test = X_train_full.iloc[train_index], X_train_full.iloc[test_index]
+        y_train, y_test = y_train_full.iloc[train_index], y_train_full.iloc[test_index]
 
         model_for_cv = clone(model_config['model'])
         model_for_cv.fit(X_train, y_train)
@@ -84,14 +95,19 @@ def train_and_evaluate_expert(
         scores.append(score)
         print(f"  Fold {fold + 1}/{CV_SPLITS} | Accuracy: {score:.4f}")
 
-    print(f"-> Średnia dokładność (Accuracy) z walidacji: {np.mean(scores):.4f} (+/- {np.std(scores):.4f})")
+    print(f"-> Średnia dokładność CV: {np.mean(scores):.4f} (+/- {np.std(scores):.4f})")
 
-    # 4. Finalny trening na pełnym zbiorze danych
-    print(f"Trening finalnego modelu '{model_name}' na wszystkich danych...")
-    final_model = model_config['model']
-    final_model.fit(X, y)
+    # 5. Finalny trening na wszystkich danych treningowych (bez holdout)
+    print(f"Trening finalnego modelu '{model_name}' na danych treningowych...")
+    final_model = clone(model_config['model'])
+    final_model.fit(X_train_full, y_train_full)
+    
+    # 6. Ewaluacja na holdout set
+    y_holdout_pred = final_model.predict(X_holdout)
+    holdout_accuracy = accuracy_score(y_holdout, y_holdout_pred)
+    print(f"-> HOLDOUT ACCURACY: {holdout_accuracy:.4f}")
 
-    # 5. Zapisanie finalnego modelu i cech
+    # 7. Zapisanie finalnego modelu i cech
     joblib.dump(final_model, f'expert_{model_name}_{ticker_name}_5m.joblib')
     with open(f'features_{model_name}_{ticker_name}_5m.json', 'w') as f:
         json.dump(features, f)
@@ -105,8 +121,8 @@ def train_price_action_expert(
         ticker_name: str
 ) -> None:
     """
-    Specjalistyczna funkcja do trenowania i walidacji modelu Price Action (MLP),
-    który wymaga dodatkowego skalowania danych.
+    Specjalistyczna funkcja do trenowania i walidacji modelu Price Action z proper
+    holdout validation i purged cross-validation, oraz dodatkowym skalowaniem danych.
     """
     print(f"\n[KROK] Walidacja i Trening: {model_config['description']}...")
 
@@ -115,17 +131,27 @@ def train_price_action_expert(
 
     # 2. Przygotowanie danych
     model_data = df.dropna(subset=[TARGET_COLUMN_NAME] + features)
-    X = model_data[features]
-    y = model_data[TARGET_COLUMN_NAME]
+    
+    # 3. Podział na train/holdout (temporal split)
+    holdout_split_idx = int(len(model_data) * (1 - HOLDOUT_SIZE))
+    train_data = model_data.iloc[:holdout_split_idx]
+    holdout_data = model_data.iloc[holdout_split_idx:]
+    
+    print(f"Train data: {len(train_data)} samples, Holdout data: {len(holdout_data)} samples")
+    
+    X_train_full = train_data[features]
+    y_train_full = train_data[TARGET_COLUMN_NAME]
+    X_holdout = holdout_data[features]
+    y_holdout = holdout_data[TARGET_COLUMN_NAME]
 
-    # 3. Walidacja krzyżowa z poprawnym skalowaniem
-    print(f"Przeprowadzanie walidacji krzyżowej dla '{model_name}'...")
-    tscv = TimeSeriesSplit(n_splits=CV_SPLITS)
+    # 4. Purged Cross-Validation z poprawnym skalowaniem
+    print(f"Przeprowadzanie purged cross-validation dla '{model_name}'...")
+    tscv = TimeSeriesSplit(n_splits=CV_SPLITS, gap=3)  # Gap=3 usuwa overlapping samples
     scores = []
 
-    for fold, (train_index, test_index) in enumerate(tscv.split(X)):
-        X_train, X_test = X.iloc[train_index], X.iloc[test_index]
-        y_train, y_test = y.iloc[train_index], y.iloc[test_index]
+    for fold, (train_index, test_index) in enumerate(tscv.split(X_train_full)):
+        X_train, X_test = X_train_full.iloc[train_index], X_train_full.iloc[test_index]
+        y_train, y_test = y_train_full.iloc[train_index], y_train_full.iloc[test_index]
 
         # Skaler musi być dopasowany wewnątrz pętli na danych treningowych!
         scaler_cv = StandardScaler()
@@ -140,18 +166,23 @@ def train_price_action_expert(
         scores.append(score)
         print(f"  Fold {fold + 1}/{CV_SPLITS} | Accuracy: {score:.4f}")
 
-    print(f"-> Średnia dokładność (Accuracy) z walidacji: {np.mean(scores):.4f} (+/- {np.std(scores):.4f})")
+    print(f"-> Średnia dokładność CV: {np.mean(scores):.4f} (+/- {np.std(scores):.4f})")
 
-    # 4. Finalny trening na pełnym zbiorze danych
-    print(f"Trening finalnego modelu '{model_name}' na wszystkich danych...")
-    # Skalujemy cały zbiór danych przy użyciu finalnego skalera
+    # 5. Finalny trening na danych treningowych (bez holdout)
+    print(f"Trening finalnego modelu '{model_name}' na danych treningowych...")
     final_scaler = StandardScaler()
-    X_scaled = final_scaler.fit_transform(X)
+    X_train_scaled = final_scaler.fit_transform(X_train_full)
 
-    final_model = model_config['model']
-    final_model.fit(X_scaled, y)
+    final_model = clone(model_config['model'])
+    final_model.fit(X_train_scaled, y_train_full)
+    
+    # 6. Ewaluacja na holdout set
+    X_holdout_scaled = final_scaler.transform(X_holdout)
+    y_holdout_pred = final_model.predict(X_holdout_scaled)
+    holdout_accuracy = accuracy_score(y_holdout, y_holdout_pred)
+    print(f"-> HOLDOUT ACCURACY: {holdout_accuracy:.4f}")
 
-    # 5. Zapisanie finalnego modelu, skalera i cech
+    # 7. Zapisanie finalnego modelu, skalera i cech
     joblib.dump(final_model, f'expert_{model_name}_{ticker_name}_5m.joblib')
     joblib.dump(final_scaler, f'scaler_{model_name}_{ticker_name}_5m.joblib')
     with open(f'features_{model_name}_{ticker_name}_5m.json', 'w') as f:
@@ -182,11 +213,12 @@ async def main() -> None:
     # Krok 3: Walidacja i trening modeli ekspertów
     print("\n[KROK 3/3] Uruchamianie procedur walidacji i treningu dla ekspertów...")
 
-    # Walidacja i trening wszystkich ekspertów przy użyciu tej samej, standardowej funkcji
+    # Walidacja i trening ekspertów momentum i reversion
     train_and_evaluate_expert(final_df, "momentum", MODEL_CONFIGS["momentum"], config_trainer.TICKER_NAME_FOR_MODELS)
     train_and_evaluate_expert(final_df, "reversion", MODEL_CONFIGS["reversion"], config_trainer.TICKER_NAME_FOR_MODELS)
-    train_and_evaluate_expert(final_df, "price_action", MODEL_CONFIGS["price_action"],
-                              config_trainer.TICKER_NAME_FOR_MODELS)
+    
+    # Walidacja i trening eksperta price_action (wymaga specjalnego skalowania)
+    train_price_action_expert(final_df, "pa", MODEL_CONFIGS["price_action"], config_trainer.TICKER_NAME_FOR_MODELS)
 
     print("\n--- WSZYSCY EKSPERCI ZOSTALI ZWALIDOWANI, WYTRENOWANI I ZAPISANI. ---")
 
