@@ -42,30 +42,95 @@ async def run():
     pbar = tqdm(test_data.iterrows(), total=len(test_data))
     for timestamp, current_candle in pbar:
         analysis = analyzer.get_analysis_from_row(current_candle)
-        decision, details = manager.process_candle(current_candle, analysis, capital)
-
-        if decision == 'OPEN':
-            # details to obiekt Position; pobieramy nominał wejścia
-            entry_price = details.entry_price if hasattr(details, "entry_price") else details["entry_price"]
-            size = details.size if hasattr(details, "size") else details["size"]
+        
+        # Use the same API as live_trader for consistent position management
+        signal = manager.get_trading_signal(current_candle, analysis, capital)
+        
+        if signal['action'] in ['OPEN_LONG', 'OPEN_SHORT']:
+            # Simulate position opening - create position in manager
+            position_data = {
+                'strategy': signal['strategy'],
+                'entry_date': timestamp,
+                'entry_price': signal['entry_price'],
+                'size': signal['size'],
+                'current_sl_price': signal['stop_loss'],
+                'tp_price': signal['take_profit'],
+                'breakeven_trigger_price': signal['breakeven_trigger'],
+                'trailing_trigger_price': signal['trailing_trigger'],
+                'conf_momentum': signal['confidence']['momentum'],
+                'conf_reversion': signal['confidence']['reversion'],
+                'conf_pa': signal['confidence']['pa']
+            }
+            manager.update_position_from_live_data(position_data)
+            
+            # Calculate opening fee
+            entry_price = signal['entry_price']
+            size = signal['size']
             open_fee = fee_calculator.calculate_exchange_fees(entry_price * size, FEE_BPS_OPEN)
             capital -= open_fee
 
-        elif decision == 'CLOSE':
-            exit_price = details['exit_price']
-            size = details['size']
-
-            close_fee = fee_calculator.calculate_exchange_fees(exit_price * size, FEE_BPS_CLOSE)
-            capital += details['pnl_usd']  # brutto PnL
-            capital -= close_fee  # koszt zamknięcia
-
-            # policz łączne fee (open przeliczamy deterministycznie z danych wejścia)
-            open_fee = fee_calculator.calculate_exchange_fees(details['entry_price'] * size, FEE_BPS_OPEN)
-            total_fee = open_fee + close_fee
-            details['fees_usd'] = total_fee
-            details['pnl_net_usd'] = details['pnl_usd'] - total_fee
-
-            trades.append(details)
+        elif signal['action'] == 'CLOSE':
+            # Get position details before closing
+            position_status = manager.get_position_status()
+            if position_status['has_position']:
+                pos = position_status['position']
+                
+                # Apply slippage to exit price (just like in real trading)
+                raw_exit_price = signal['exit_price']
+                exit_price = fee_calculator.apply_slippage(
+                    exit_reason=signal['exit_reason'],
+                    strategy=pos['strategy'],
+                    raw_price=raw_exit_price,
+                    candle=current_candle
+                )
+                
+                # Calculate PnL using fees.py
+                pnl_gross = fee_calculator.calculate_pnl(
+                    strategy=pos['strategy'],
+                    entry_price=pos['entry_price'],
+                    exit_price=exit_price,
+                    size=pos['size']
+                )
+                
+                # Calculate fees
+                close_fee = fee_calculator.calculate_exchange_fees(exit_price * pos['size'], FEE_BPS_CLOSE)
+                open_fee = fee_calculator.calculate_exchange_fees(pos['entry_price'] * pos['size'], FEE_BPS_OPEN)
+                total_fee = open_fee + close_fee
+                
+                # Net PnL after fees
+                pnl_net = pnl_gross - total_fee
+                capital += pnl_gross  # Add gross PnL
+                capital -= close_fee  # Subtract closing fee
+                
+                # Create trade record
+                trade_record = {
+                    'entry_date': pos['entry_date'],
+                    'exit_date': timestamp,
+                    'entry_price': pos['entry_price'],
+                    'exit_price': exit_price,
+                    'size': pos['size'],
+                    'pnl_usd': pnl_gross,
+                    'exit_reason': signal['exit_reason'],
+                    'strategy': pos['strategy'],
+                    'conf_momentum': pos['confidence_levels']['momentum'],
+                    'conf_reversion': pos['confidence_levels']['reversion'],
+                    'conf_pa': pos['confidence_levels']['pa'],
+                    'fees_usd': total_fee,
+                    'pnl_net_usd': pnl_net
+                }
+                trades.append(trade_record)
+                
+                # Clear position from manager
+                manager.clear_position()
+        
+        # Process position management instructions (BE, TSL, etc.)
+        for instruction in signal.get('instructions', []):
+            if instruction['type'] == 'MOVE_SL_TO_BREAKEVEN':
+                # In backtest, this is handled automatically by position_manager
+                pass
+            elif instruction['type'] in ['ACTIVATE_TRAILING_STOP', 'UPDATE_TRAILING_STOP']:
+                # In backtest, this is handled automatically by position_manager
+                pass
 
         equity_curve[timestamp] = capital
 

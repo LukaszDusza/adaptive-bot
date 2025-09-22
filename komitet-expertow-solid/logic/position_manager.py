@@ -14,6 +14,240 @@ class PositionManager:
     def _log_event(self, timestamp, event_type, details):
         self.events.append({"timestamp": timestamp, "event": event_type, "details": details})
 
+    # ====== LIVE TRADING API METHODS ======
+    
+    def get_trading_signal(self, current_candle, analysis, capital) -> Dict[str, Any]:
+        """
+        API method for live trading - returns trading signal and instructions.
+        
+        Returns:
+            dict with keys:
+            - action: 'OPEN_LONG', 'OPEN_SHORT', 'CLOSE', 'HOLD'
+            - confidence: ML confidence levels
+            - entry_price: suggested entry price
+            - stop_loss: suggested SL price
+            - take_profit: suggested TP price
+            - size: position size
+            - instructions: list of position management instructions
+        """
+        instructions = []
+        
+        # Check for position management instructions first
+        if self.active_position:
+            pos_instructions = self._get_position_instructions(current_candle, analysis)
+            instructions.extend(pos_instructions)
+            
+            # Check for exit signal
+            exit_reason = self._check_model_exit_signal(self.active_position, analysis)
+            if not exit_reason:
+                exit_reason = self._check_stop_take_exit(self.active_position, current_candle)
+            
+            if exit_reason:
+                return {
+                    'action': 'CLOSE',
+                    'exit_reason': exit_reason,
+                    'exit_price': self._get_raw_exit_price(exit_reason, self.active_position, current_candle),
+                    'instructions': instructions,
+                    'confidence': {
+                        'momentum': analysis['expert_opinions']['momentum']['confidence'],
+                        'reversion': analysis['expert_opinions']['reversion']['confidence'],
+                        'pa': analysis['expert_opinions']['pa']['confidence']
+                    }
+                }
+        
+        # Check for new entry signal
+        if not self.active_position:
+            strategy = self._determine_entry_strategy(analysis)
+            if strategy:
+                position_params = self._calculate_position_parameters(current_candle, analysis, capital, strategy)
+                
+                return {
+                    'action': f'OPEN_{strategy.upper()}',
+                    'strategy': strategy,
+                    'entry_price': position_params['entry_price'],
+                    'stop_loss': position_params['current_sl_price'],
+                    'take_profit': position_params['tp_price'],
+                    'size': position_params['size'],
+                    'breakeven_trigger': position_params['breakeven_trigger_price'],
+                    'trailing_trigger': position_params['trailing_trigger_price'],
+                    'instructions': instructions,
+                    'confidence': {
+                        'momentum': analysis['expert_opinions']['momentum']['confidence'],
+                        'reversion': analysis['expert_opinions']['reversion']['confidence'],
+                        'pa': analysis['expert_opinions']['pa']['confidence']
+                    }
+                }
+        
+        return {
+            'action': 'HOLD',
+            'instructions': instructions,
+            'confidence': {
+                'momentum': analysis['expert_opinions']['momentum']['confidence'],
+                'reversion': analysis['expert_opinions']['reversion']['confidence'],
+                'pa': analysis['expert_opinions']['pa']['confidence']
+            }
+        }
+    
+    def _get_position_instructions(self, current_candle, analysis) -> list:
+        """
+        Returns list of position management instructions for live trader.
+        """
+        instructions = []
+        pos = self.active_position
+        
+        if not pos:
+            return instructions
+        
+        # Check for break-even trigger
+        if self.config.BREAKEVEN_TRIGGER_PERCENT > 0 and not pos.is_be:
+            if pos.strategy == 'long':
+                if current_candle['high'] >= pos.breakeven_trigger_price:
+                    instructions.append({
+                        'type': 'MOVE_SL_TO_BREAKEVEN',
+                        'new_sl_price': pos.breakeven_sl_price,
+                        'reason': 'Breakeven trigger reached'
+                    })
+            else:  # short
+                if current_candle['low'] <= pos.breakeven_trigger_price:
+                    instructions.append({
+                        'type': 'MOVE_SL_TO_BREAKEVEN',
+                        'new_sl_price': pos.breakeven_sl_price,
+                        'reason': 'Breakeven trigger reached'
+                    })
+        
+        # Check for trailing stop activation
+        if self.config.TRAILING_SL_TRIGGER_R > 0 and not pos.is_trailing:
+            if pos.strategy == 'long':
+                if current_candle['high'] >= pos.trailing_trigger_price:
+                    instructions.append({
+                        'type': 'ACTIVATE_TRAILING_STOP',
+                        'reason': 'Trailing stop trigger reached'
+                    })
+            else:  # short
+                if current_candle['low'] <= pos.trailing_trigger_price:
+                    instructions.append({
+                        'type': 'ACTIVATE_TRAILING_STOP',
+                        'reason': 'Trailing stop trigger reached'
+                    })
+        
+        # Check for trailing stop update
+        if pos.is_trailing:
+            atr_here = current_candle['ATRr_14_5m']
+            if pos.strategy == 'long':
+                new_sl_candidate = current_candle['close'] - (atr_here * self.config.TRAILING_SL_DISTANCE_ATR)
+                if new_sl_candidate > pos.current_sl_price:
+                    instructions.append({
+                        'type': 'UPDATE_TRAILING_STOP',
+                        'new_sl_price': new_sl_candidate,
+                        'reason': 'Trailing stop update'
+                    })
+            else:  # short
+                new_sl_candidate = current_candle['close'] + (atr_here * self.config.TRAILING_SL_DISTANCE_ATR)
+                if new_sl_candidate < pos.current_sl_price:
+                    instructions.append({
+                        'type': 'UPDATE_TRAILING_STOP',
+                        'new_sl_price': new_sl_candidate,
+                        'reason': 'Trailing stop update'
+                    })
+        
+        return instructions
+    
+    def update_position_from_live_data(self, position_data: Dict[str, Any]):
+        """
+        Updates internal position state from live trading data.
+        
+        Args:
+            position_data: Dict with keys like entry_price, size, current_sl_price, etc.
+        """
+        if not self.active_position:
+            # Create position from live data
+            self.active_position = Position(**position_data)
+        else:
+            # Update existing position
+            for key, value in position_data.items():
+                if hasattr(self.active_position, key):
+                    setattr(self.active_position, key, value)
+    
+    def clear_position(self):
+        """Clears the active position (called when position is closed in live trading)."""
+        self.active_position = None
+    
+    def get_ml_predictions(self, analysis) -> Dict[str, Any]:
+        """
+        Returns ML model predictions and confidence levels separately from trading decisions.
+        
+        Returns:
+            dict with model predictions, votes, and confidence levels
+        """
+        votes_long = self._count_votes(analysis, prediction_target=1)
+        votes_short = self._count_votes(analysis, prediction_target=0)
+        
+        return {
+            'votes_long': votes_long,
+            'votes_short': votes_short,
+            'total_experts': 3,
+            'entry_threshold': self.config.ENTRY_VOTES,
+            'predictions': {
+                'momentum': {
+                    'prediction': analysis['expert_opinions']['momentum']['prediction'],
+                    'confidence': analysis['expert_opinions']['momentum']['confidence'],
+                    'threshold': self.config.MIN_CONF_MOMENTUM,
+                    'vote_eligible': analysis['expert_opinions']['momentum']['confidence'] >= self.config.MIN_CONF_MOMENTUM
+                },
+                'reversion': {
+                    'prediction': analysis['expert_opinions']['reversion']['prediction'],
+                    'confidence': analysis['expert_opinions']['reversion']['confidence'],
+                    'threshold': self.config.MIN_CONF_REVERSION,
+                    'vote_eligible': analysis['expert_opinions']['reversion']['confidence'] >= self.config.MIN_CONF_REVERSION
+                },
+                'pa': {
+                    'prediction': analysis['expert_opinions']['pa']['prediction'],
+                    'confidence': analysis['expert_opinions']['pa']['confidence'],
+                    'threshold': self.config.MIN_CONF_PA,
+                    'vote_eligible': analysis['expert_opinions']['pa']['confidence'] >= self.config.MIN_CONF_PA
+                }
+            },
+            'recommendation': {
+                'signal': 'LONG' if votes_long >= self.config.ENTRY_VOTES else 'SHORT' if votes_short >= self.config.ENTRY_VOTES else 'HOLD',
+                'strength': max(votes_long, votes_short),
+                'consensus': votes_long + votes_short >= 2,
+                'conflicting': votes_long > 0 and votes_short > 0
+            }
+        }
+    
+    def get_position_status(self) -> Dict[str, Any]:
+        """
+        Returns current position status and management state.
+        """
+        if not self.active_position:
+            return {
+                'has_position': False,
+                'position': None
+            }
+        
+        pos = self.active_position
+        return {
+            'has_position': True,
+            'position': {
+                'strategy': pos.strategy,
+                'entry_date': pos.entry_date,
+                'entry_price': pos.entry_price,
+                'size': pos.size,
+                'current_sl_price': pos.current_sl_price,
+                'tp_price': pos.tp_price,
+                'is_be': pos.is_be,
+                'is_trailing': pos.is_trailing,
+                'breakeven_trigger_price': pos.breakeven_trigger_price,
+                'trailing_trigger_price': pos.trailing_trigger_price,
+                'opposing_signal_count': getattr(pos, 'opposing_signal_count', 0),
+                'confidence_levels': {
+                    'momentum': pos.conf_momentum,
+                    'reversion': pos.conf_reversion,
+                    'pa': pos.conf_pa
+                }
+            }
+        }
+
 
     # ====== BE classification helper ======
     def _is_be_price(self, pos: Position) -> bool:
@@ -146,9 +380,18 @@ class PositionManager:
 
     def _check_model_exit_signal(self, pos: Position, analysis) -> Optional[str]:
         """Sprawdza czy wystąpił sygnał wyjścia z modelu."""
+        votes_long = self._count_votes(analysis, prediction_target=1)
         votes_short = self._count_votes(analysis, prediction_target=0)
+        
         if pos.strategy == 'long':
             if votes_short >= 2:
+                pos.opposing_signal_count += 1
+            else:
+                pos.opposing_signal_count = 0
+            if pos.opposing_signal_count >= self.config.EXIT_SIGNAL_PERSISTENCE:
+                return "Model Exit Signal"
+        elif pos.strategy == 'short':
+            if votes_long >= 2:
                 pos.opposing_signal_count += 1
             else:
                 pos.opposing_signal_count = 0
@@ -193,7 +436,14 @@ class PositionManager:
     def _determine_entry_strategy(self, analysis) -> Optional[str]:
         """Określa strategię wejścia na podstawie głosów ekspertów."""
         votes_long = self._count_votes(analysis, prediction_target=1)
-        return 'long' if votes_long >= self.config.ENTRY_VOTES else None
+        votes_short = self._count_votes(analysis, prediction_target=0)
+        
+        if votes_long >= self.config.ENTRY_VOTES:
+            return 'long'
+        elif votes_short >= self.config.ENTRY_VOTES:
+            return 'short'
+        else:
+            return None
 
     def _calculate_position_parameters(self, current_candle, analysis, capital, strategy: str) -> Dict[str, Any]:
         """Oblicza wszystkie parametry nowej pozycji."""
@@ -201,8 +451,8 @@ class PositionManager:
         sl_price, tp_price = self._calculate_sl_tp_prices(entry_price, analysis, strategy)
         position_size = self._calculate_position_size(entry_price, sl_price, capital)
         
-        be_trigger_price, be_sl_price = self._calculate_breakeven_params(entry_price, tp_price)
-        tsl_trigger_price = self._calculate_trailing_params(entry_price, analysis)
+        be_trigger_price, be_sl_price = self._calculate_breakeven_params(entry_price, tp_price, strategy)
+        tsl_trigger_price = self._calculate_trailing_params(entry_price, analysis, strategy)
         
         return {
             'strategy': strategy,
@@ -239,19 +489,31 @@ class PositionManager:
         risk_usd = capital * self.config.RISK_PERCENT
         return (risk_usd / sl_distance) if sl_distance > 0 else 0
 
-    def _calculate_breakeven_params(self, entry_price: float, tp_price: float) -> Tuple[float, float]:
+    def _calculate_breakeven_params(self, entry_price: float, tp_price: float, strategy: str = 'long') -> Tuple[float, float]:
         """Oblicza parametry break-even."""
         tp_distance = abs(tp_price - entry_price)
         be_trigger = self.config.BREAKEVEN_TRIGGER_PERCENT
-        be_trigger_price = entry_price + (tp_distance * be_trigger) if be_trigger > 0 else 0
+        
+        if strategy == 'long':
+            be_trigger_price = entry_price + (tp_distance * be_trigger) if be_trigger > 0 else 0
+        else:  # short
+            be_trigger_price = entry_price - (tp_distance * be_trigger) if be_trigger > 0 else 0
+        
         be_sl_price = entry_price  # BE = entry (realne 0)
         return be_trigger_price, be_sl_price
 
-    def _calculate_trailing_params(self, entry_price: float, analysis) -> float:
+    def _calculate_trailing_params(self, entry_price: float, analysis, strategy: str = 'long') -> float:
         """Oblicza parametry trailing stop."""
         stop_loss_distance = analysis['atr_value_5m'] * self.config.ATR_MULTIPLIER
         tsl_trigger = self.config.TRAILING_SL_TRIGGER_R
-        return entry_price + (stop_loss_distance * tsl_trigger) if tsl_trigger > 0 else 0
+        
+        if tsl_trigger <= 0:
+            return 0
+        
+        if strategy == 'long':
+            return entry_price + (stop_loss_distance * tsl_trigger)
+        else:  # short
+            return entry_price - (stop_loss_distance * tsl_trigger)
 
     def _update_mechanics(self, current_candle):
         pos = self.active_position
@@ -272,6 +534,25 @@ class PositionManager:
                 new_sl_candidate = current_candle['close'] - (atr_here * self.config.TRAILING_SL_DISTANCE_ATR)
                 best = getattr(pos, "_pending_tsl_sl", None)
                 if (best is None) or (new_sl_candidate > best):
+                    pos._pending_tsl_sl = new_sl_candidate
+        
+        else:  # short
+            # 1) Trailing – aktywacja po R-multiple (stan), bez natychmiastowego podnoszenia SL
+            if self.config.TRAILING_SL_TRIGGER_R > 0 and not pos.is_trailing and current_candle['low'] <= pos.trailing_trigger_price:
+                pos.is_trailing = True
+                self._log_event(current_candle.name, 'trailing_sl_activated', {'trade_entry_date': pos.entry_date})
+
+            # 2) BE – tylko TRIGGER na tej świecy; zastosujemy na początku następnej
+            elif self.config.BREAKEVEN_TRIGGER_PERCENT > 0 and not pos.is_be and current_candle['low'] <= pos.breakeven_trigger_price:
+                pos._pending_be = True
+                self._log_event(current_candle.name, 'breakeven_activated', {'trade_entry_date': pos.entry_date})
+
+            # 3) Trailing – zapisujemy kandydata SL do zastosowania na N+1
+            if pos.is_trailing:
+                atr_here = current_candle['ATRr_14_5m']
+                new_sl_candidate = current_candle['close'] + (atr_here * self.config.TRAILING_SL_DISTANCE_ATR)
+                best = getattr(pos, "_pending_tsl_sl", None)
+                if (best is None) or (new_sl_candidate < best):
                     pos._pending_tsl_sl = new_sl_candidate
 
     def _count_votes(self, analysis, prediction_target):
