@@ -7,8 +7,13 @@ Handles connection, position management, and order execution.
 import pandas as pd
 import time
 import logging
+import os
 from typing import Dict, Any, Optional, List
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Production Bybit API imports
 try:
@@ -33,13 +38,14 @@ class BybitService:
         
         Args:
             mode: 'paper' for paper trading, 'live' for real trading
-            api_key: Bybit API key (required for live trading)
-            api_secret: Bybit API secret (required for live trading)
+            api_key: Bybit API key (optional, will use .env if not provided)
+            api_secret: Bybit API secret (optional, will use .env if not provided)
             testnet: Use testnet environment (default True for safety)
         """
         self.mode = mode
-        self.api_key = api_key
-        self.api_secret = api_secret
+        # Load API credentials from .env file if not provided
+        self.api_key = api_key or os.getenv('BYBIT_API_KEY')
+        self.api_secret = api_secret or os.getenv('BYBIT_API_SECRET')
         self.testnet = testnet
         self.client = None
         
@@ -129,7 +135,7 @@ class BybitService:
             
             # Fetch kline data from Bybit
             response = self.client.get_kline(
-                category="spot",
+                category="linear",
                 symbol=symbol,
                 interval=interval_str,
                 limit=min(limit, 1000)  # Bybit limit is 1000
@@ -177,15 +183,50 @@ class BybitService:
             List of position dictionaries
         """
         if self.mode == 'paper':
-            # Return paper trading positions
+            # Return empty list for paper trading (positions managed internally)
             return []
         
-        # TODO: Implement real Bybit position query
-        # response = self.client.my_position(symbol=symbol)
-        # if response['ret_code'] == 0:
-        #     return response['result']
-        
-        return []
+        try:
+            self._rate_limit()
+            
+            # Get all positions for futures trading
+            response = self.client.get_positions(category="linear")
+            
+            if response['retCode'] == 0:
+                positions = response['result']['list']
+                
+                # Filter only positions with size > 0 (active positions)
+                active_positions = []
+                for pos in positions:
+                    position_size = float(pos.get('size', 0))
+                    if position_size > 0:
+                        # Format position data for consistency
+                        formatted_position = {
+                            'symbol': pos['symbol'],
+                            'side': pos['side'],  # 'Buy' or 'Sell'
+                            'size': position_size,
+                            'entry_price': float(pos.get('avgPrice', 0)),
+                            'unrealised_pnl': float(pos.get('unrealisedPnl', 0)),
+                            'percentage': float(pos.get('unrealisedPnlPercentage', 0)),
+                            'leverage': float(pos.get('leverage', 1)),
+                            'position_value': float(pos.get('positionValue', 0)),
+                            'risk_id': pos.get('riskId', ''),
+                            'risk_limit_value': float(pos.get('riskLimitValue', 0)),
+                            'created_time': pos.get('createdTime', ''),
+                            'updated_time': pos.get('updatedTime', ''),
+                            'raw_data': pos  # Keep original data for debugging
+                        }
+                        active_positions.append(formatted_position)
+                
+                logger.info(f"Found {len(active_positions)} active positions")
+                return active_positions
+            else:
+                logger.error(f"Failed to get positions: {response.get('retMsg', 'Unknown error')}")
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error getting current positions: {e}")
+            return []
     
     def place_order(self, symbol: str, side: str, order_type: str, qty: float, 
                    price: Optional[float] = None, stop_loss: Optional[float] = None,
@@ -213,7 +254,7 @@ class BybitService:
             
             # Prepare order parameters
             order_params = {
-                "category": "spot",
+                "category": "linear",
                 "symbol": symbol,
                 "side": side,
                 "orderType": order_type,
@@ -309,7 +350,7 @@ class BybitService:
             
             # Prepare modification parameters
             modify_params = {
-                "category": "spot",
+                "category": "linear",
                 "symbol": symbol
             }
             
@@ -364,24 +405,76 @@ class BybitService:
             Response dictionary
         """
         if self.mode == 'paper':
-            print(f"PAPER CLOSE: Closing position for {symbol}")
+            logger.info(f"PAPER CLOSE: Closing position for {symbol}")
             return {'ret_code': 0, 'message': 'Paper trading position closed'}
         
-        # TODO: Implement real position closing
-        # First get current position
-        # positions = self.get_current_positions()
-        # for pos in positions:
-        #     if pos['symbol'] == symbol and float(pos['size']) > 0:
-        #         side = 'Sell' if pos['side'] == 'Buy' else 'Buy'
-        #         response = self.place_order(
-        #             symbol=symbol,
-        #             side=side,
-        #             order_type='Market',
-        #             qty=float(pos['size'])
-        #         )
-        #         return response
-        
-        return {}
+        try:
+            self._rate_limit()
+            
+            # First get current positions to find the position to close
+            positions_response = self.client.get_positions(
+                category="linear",
+                symbol=symbol
+            )
+            
+            if positions_response['retCode'] != 0:
+                logger.error(f"Failed to get positions: {positions_response.get('retMsg', 'Unknown error')}")
+                return {
+                    'ret_code': positions_response['retCode'],
+                    'error': positions_response.get('retMsg', 'Unknown error')
+                }
+            
+            positions = positions_response['result']['list']
+            
+            # Find active position for this symbol
+            active_position = None
+            for pos in positions:
+                if pos['symbol'] == symbol and float(pos['size']) > 0:
+                    active_position = pos
+                    break
+            
+            if not active_position:
+                logger.warning(f"No active position found for {symbol}")
+                return {
+                    'ret_code': -1,
+                    'error': f'No active position found for {symbol}'
+                }
+            
+            # Determine opposite side to close position
+            current_side = active_position['side']
+            close_side = 'Sell' if current_side == 'Buy' else 'Buy'
+            position_size = float(active_position['size'])
+            
+            logger.info(f"Closing {current_side} position of size {position_size} for {symbol}")
+            
+            # Place market order to close position
+            close_response = self.place_order(
+                symbol=symbol,
+                side=close_side,
+                order_type='Market',
+                qty=position_size
+            )
+            
+            if close_response.get('ret_code') == 0:
+                logger.info(f"Position closed successfully for {symbol}")
+                return {
+                    'ret_code': 0,
+                    'symbol': symbol,
+                    'closed_side': current_side,
+                    'closed_size': position_size,
+                    'message': 'Position closed successfully',
+                    'order_response': close_response
+                }
+            else:
+                logger.error(f"Failed to close position: {close_response.get('error', 'Unknown error')}")
+                return close_response
+                
+        except Exception as e:
+            logger.error(f"Error closing position for {symbol}: {e}")
+            return {
+                'ret_code': -1,
+                'error': str(e)
+            }
     
     def get_account_balance(self) -> Dict[str, Any]:
         """
