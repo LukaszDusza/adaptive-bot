@@ -4,6 +4,45 @@ import pandas_ta as ta
 import numpy as np
 
 
+def add_fibonacci_features(df, window=100):
+    """
+    Oblicza i dodaje cechy oparte na zniesieniach Fibonacciego.
+    """
+    # 1. Automatyczne wykrywanie swingu high/low w oknie
+    swing_high = df['high'].rolling(window=window).max()
+    swing_low = df['low'].rolling(window=window).min()
+    swing_range = swing_high - swing_low
+    swing_range = swing_range.replace(0, np.nan)  # Unikamy dzielenia przez zero
+
+    # 2. Obliczanie poziomów Fibo
+    fibo_levels = {
+        'FIBO_0.0': swing_high,
+        'FIBO_23.6': swing_high - swing_range * 0.236,
+        'FIBO_38.2': swing_high - swing_range * 0.382,
+        'FIBO_50.0': swing_high - swing_range * 0.5,
+        'FIBO_61.8': swing_high - swing_range * 0.618,
+        'FIBO_100.0': swing_low
+    }
+    fibo_df = pd.DataFrame(fibo_levels, index=df.index)
+
+    # 3. Tworzenie cech dla modelu
+
+    # Cecha 1: Względna pozycja ceny w swingu (0 = na dołku, 1 = na szczycie)
+    df['FIBO_relative_position'] = (df['close'] - swing_low) / swing_range
+
+    # Cecha 2 & 3: Dystans i nazwa najbliższego poziomu Fibo
+    # Obliczamy dystans od ceny 'close' do każdego z poziomów Fibo
+    distances = fibo_df.sub(df['close'], axis=0).abs()
+
+    # Znajdujemy, który poziom jest najbliżej
+    df['FIBO_nearest_level'] = distances.idxmin(axis=1)
+    df['FIBO_distance_to_nearest'] = distances.min(axis=1) / swing_range  # Normalizujemy dystans
+
+    # Przekształcamy nazwy poziomów na wartości liczbowe (np. 'FIBO_38.2' -> 38.2)
+    df['FIBO_nearest_level'] = df['FIBO_nearest_level'].str.replace('FIBO_', '').astype(float)
+
+    return df
+
 def add_divergence_feature(df, indicator_col, price_high_col='high', price_low_col='low', window=28):
     """
     Oblicza i dodaje cechę dywergencji dla danego wskaźnika.
@@ -50,6 +89,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
             all_dfs[tf_name] = df_5m_raw.resample(tf_pandas).agg(ohlc).dropna()
 
     for tf_name, df in all_dfs.items():
+        print(f"Obliczanie wskaźników dla interwału {tf_name}...")
         # --- Standardowe wskaźniki ---
         df.ta.rsi(append=True)
         df.ta.atr(append=True)
@@ -88,8 +128,26 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         if 'MACDh_12_26_9' in df.columns:
             df['MACDh_12_26_9_roc_1'] = df['MACDh_12_26_9'].diff()
 
+        # TTM Squeeze
+        df.ta.squeeze(append=True)
+        # Kanały Donchiana
+        df.ta.donchian(append=True)
+
+        # Parabolic SAR (w inteligentny sposób, aby uniknąć NaN)
+        psar_df = df.ta.psar(append=False)
+        if psar_df is not None and not psar_df.empty:
+            reversal_col = next((col for col in psar_df.columns if 'PSARr' in col), None)
+            if reversal_col:
+                df[reversal_col] = psar_df[reversal_col]
+        # =====================================
+
         # Automatyczne rozpoznawanie formacji świecowych
         df.ta.cdl_pattern(name="all", append=True)
+
+        # === DODANIE CECH FIBONACCIEGO ===
+        print(f"Dodawanie cech Fibonacciego dla interwału {tf_name}...")
+        df = add_fibonacci_features(df, window=100)  # Okno 100 świec do znalezienia swingu
+        # ==================================
 
         all_dfs[tf_name] = df
 
@@ -132,7 +190,6 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
     if adx_col_name in final_df.columns:
         final_df['market_regime_trending'] = (final_df[adx_col_name] > 25).astype(int)
 
-    # Cechy czasowe i cykliczne
     print("Dodawanie cech czasowych...")
     if not pd.api.types.is_datetime64_any_dtype(final_df.index):
         final_df.index = pd.to_datetime(final_df.index)

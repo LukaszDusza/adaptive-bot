@@ -1,4 +1,3 @@
-# model_trainer.py
 import pandas as pd
 import numpy as np
 import joblib
@@ -56,11 +55,11 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
     train_val_df = df.iloc[:holdout_split_idx]
     holdout_df = df.iloc[holdout_split_idx:]
 
-    X_train_val_fs = train_val_df[all_features]
+    x_train_val_fs = train_val_df[all_features]
     y_train_val_fs = train_val_df['target']
 
     selector_model = clone(model_for_trial)
-    selector_model.fit(X_train_val_fs, y_train_val_fs)
+    selector_model.fit(x_train_val_fs, y_train_val_fs)
 
     feature_importances = pd.DataFrame({
         'feature': all_features,
@@ -70,37 +69,37 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
     best_features = feature_importances.head(config.TOP_N_FEATURES)['feature'].tolist()
 
     print(f"[KROK 4/4] Walidacja krzyżowa i finalny trening...")
-    X_train_val = train_val_df[best_features]
+    x_train_val = train_val_df[best_features]
     y_train_val = train_val_df['target']
     tscv = TimeSeriesSplit(n_splits=config.CV_SPLITS, gap=5)
     scores = []
 
     for fold, (train_index, test_index) in enumerate(
-            tqdm(tscv.split(X_train_val), total=config.CV_SPLITS, desc="Walidacja krzyżowa", leave=False, ncols=100)):
-        X_train, X_test = X_train_val.iloc[train_index], X_train_val.iloc[test_index]
+            tqdm(tscv.split(x_train_val), total=config.CV_SPLITS, desc="Walidacja krzyżowa", leave=False, ncols=100)):
+        x_train, x_test = x_train_val.iloc[train_index], x_train_val.iloc[test_index]
         y_train, y_test = y_train_val.iloc[train_index], y_train_val.iloc[test_index]
         scaler = clone(config.SCALER)
-        X_train_scaled = scaler.fit_transform(X_train)
-        X_test_scaled = scaler.transform(X_test)
+        x_train_scaled = scaler.fit_transform(x_train)
+        x_test_scaled = scaler.transform(x_test)
 
         model_for_cv = clone(model_for_trial)
-        model_for_cv.fit(X_train_scaled, y_train)
-        y_pred = model_for_cv.predict(X_test_scaled)
+        model_for_cv.fit(x_train_scaled, y_train)
+        y_pred = model_for_cv.predict(x_test_scaled)
         score = accuracy_score(y_test, y_pred)
         scores.append(score)
 
     print(f"-> Średnia dokładność CV: {np.mean(scores):.4f}")
 
-    X_holdout = holdout_df[best_features]
+    x_holdout = holdout_df[best_features]
     y_holdout = holdout_df['target']
     final_scaler = clone(config.SCALER)
-    X_train_val_scaled = final_scaler.fit_transform(X_train_val)
+    x_train_val_scaled = final_scaler.fit_transform(x_train_val)
 
     final_model = clone(model_for_trial)
-    final_model.fit(X_train_val_scaled, y_train_val)
+    final_model.fit(x_train_val_scaled, y_train_val)
 
-    X_holdout_scaled = final_scaler.transform(X_holdout)
-    y_holdout_pred = final_model.predict(X_holdout_scaled)
+    x_holdout_scaled = final_scaler.transform(x_holdout)
+    y_holdout_pred = final_model.predict(x_holdout_scaled)
     holdout_accuracy = accuracy_score(y_holdout, y_holdout_pred)
 
     f1 = f1_score(y_holdout, y_holdout_pred, average=None, labels=[0, 2])
@@ -135,7 +134,7 @@ def objective(trial: optuna.Trial, df_features: pd.DataFrame) -> float:
 
     # Krok 3: Uruchomienie procesu z użyciem zadanych parametrów --
     print(f"\n--- Rozpoczynanie Trial #{trial.number} ---")
-    # Zmieniony print, aby odzwierciedlał stałe parametry
+
     print(f"Parametry: Target={target_pct * 100:.1f}% (stały), Horyzont={horizon} (stały)")
     print(f"Parametry modelu: n_est={model_params['n_estimators']}, lr={model_params['learning_rate']:.4f}, max_depth={model_params['max_depth']}")
 
