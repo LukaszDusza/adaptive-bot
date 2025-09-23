@@ -12,6 +12,185 @@ from contextlib import nullcontext
 
 import math
 
+# === NUMBA SETUP (add this under imports) ===
+try:
+    from numba import njit
+    _HAS_NUMBA = True
+except Exception:
+    _HAS_NUMBA = False
+
+
+import numpy as np  # ensure available above
+
+# ---------- ATR (Wilder) ----------
+if _HAS_NUMBA:
+    @njit(cache=True, fastmath=True)
+    def _atr_wilder_numba(high, low, close, n):
+        m = high.shape[0]
+        out = np.empty(m, dtype=np.float64)
+        out[:] = np.nan
+        if m == 0:
+            return out
+        # TR[0]
+        tr0 = max(high[0]-low[0], abs(high[0]-close[0]), abs(low[0]-close[0]))
+        if m > 1:
+            out[1] = tr0
+        s = tr0; cnt = 1
+        limit = n if n < m-1 else (m-1)
+        for i in range(2, limit+1):
+            tr = max(high[i-1]-low[i-1], abs(high[i-1]-close[i-2]), abs(low[i-1]-close[i-2]))
+            s += tr; cnt += 1
+            out[i] = s / cnt
+        alpha = 1.0 / n if n > 0 else 1.0
+        for i in range(limit+1, m):
+            tr = max(high[i-1]-low[i-1], abs(high[i-1]-close[i-2]), abs(low[i-1]-close[i-2]))
+            out[i] = out[i-1] + alpha * (tr - out[i-1])
+        return out
+else:
+    def _atr_wilder_numba(high, low, close, n):
+        m = len(high)
+        out = np.empty(m, dtype=float); out[:] = np.nan
+        if m == 0: return out
+        tr0 = max(high[0]-low[0], abs(high[0]-close[0]), abs(low[0]-close[0]))
+        if m > 1: out[1] = tr0
+        s = tr0; cnt = 1
+        limit = n if n < m-1 else (m-1)
+        for i in range(2, limit+1):
+            tr = max(high[i-1]-low[i-1], abs(high[i-1]-close[i-2]), abs(low[i-1]-close[i-2]))
+            s += tr; cnt += 1; out[i] = s/cnt
+        alpha = 1.0/n if n>0 else 1.0
+        for i in range(limit+1, m):
+            tr = max(high[i-1]-low[i-1], abs(high[i-1]-close[i-2]), abs(low[i-1]-close[i-2]))
+            out[i] = out[i-1] + alpha*(tr - out[i-1])
+        return out
+
+# ---------- ZigZag on ATR threshold ----------
+if _HAS_NUMBA:
+    @njit(cache=True, fastmath=True)
+    def _zigzag_atr_numba(high, low, close, atr, atr_mult, seed_first_pivot):
+        m = high.shape[0]
+        piv = np.empty(m, dtype=np.float64); piv[:] = np.nan
+        last_price = close[0]
+        if seed_first_pivot:
+            piv[0] = last_price
+        dirn = 0  # 1=szczyt, -1=dołek, 0=brak
+        for i in range(1, m):
+            t = atr[i] * atr_mult
+            if not np.isfinite(t) or t <= 0.0:
+                continue
+            if dirn >= 0:
+                if high[i] >= last_price + t:
+                    dirn = 1; last_price = high[i]; piv[i] = last_price
+                elif low[i] <= last_price - t:
+                    dirn = -1; last_price = low[i]; piv[i] = last_price
+            else:
+                if low[i] <= last_price - t:
+                    dirn = -1; last_price = low[i]; piv[i] = last_price
+                elif high[i] >= last_price + t:
+                    dirn = 1; last_price = high[i]; piv[i] = last_price
+        return piv
+else:
+    def _zigzag_atr_numba(high, low, close, atr, atr_mult, seed_first_pivot):
+        m = len(high)
+        piv = np.empty(m, dtype=float); piv[:] = np.nan
+        last_price = close[0]
+        if seed_first_pivot:
+            piv[0] = last_price
+        dirn = 0
+        for i in range(1, m):
+            t = atr[i] * atr_mult
+            if not np.isfinite(t) or t <= 0.0:
+                continue
+            if dirn >= 0:
+                if high[i] >= last_price + t:
+                    dirn = 1; last_price = high[i]; piv[i] = last_price
+                elif low[i] <= last_price - t:
+                    dirn = -1; last_price = low[i]; piv[i] = last_price
+            else:
+                if low[i] <= last_price - t:
+                    dirn = -1; last_price = low[i]; piv[i] = last_price
+                elif high[i] >= last_price + t:
+                    dirn = 1; last_price = high[i]; piv[i] = last_price
+        return piv
+
+# ---------- Kalman 1D ----------
+if _HAS_NUMBA:
+    @njit(cache=True, fastmath=True)
+    def _kalman_1d_numba(z, q, r):
+        n = z.shape[0]
+        xhat = np.empty(n, dtype=np.float64); P = np.empty(n, dtype=np.float64)
+        xhat[0] = z[0]; P[0] = 1.0
+        for t in range(1, n):
+            Pm = P[t-1] + q
+            K = Pm / (Pm + r)
+            xhat[t] = xhat[t-1] + K * (z[t] - xhat[t-1])
+            P[t] = (1.0 - K) * Pm
+        return xhat
+else:
+    def _kalman_1d_numba(z, q, r):
+        n = len(z)
+        xhat = np.empty(n, dtype=float); P = np.empty(n, dtype=float)
+        xhat[0] = z[0]; P[0] = 1.0
+        for t in range(1, n):
+            Pm = P[t-1] + q
+            K = Pm / (Pm + r)
+            xhat[t] = xhat[t-1] + K*(z[t] - xhat[t-1])
+            P[t] = (1.0 - K)*Pm
+        return xhat
+
+# ---------- CUSUM ----------
+if _HAS_NUMBA:
+    @njit(cache=True, fastmath=True)
+    def _cusum_events_numba(r, threshold):
+        n = r.shape[0]
+        pos = 0.0; neg = 0.0
+        out = np.zeros(n, dtype=np.int8)
+        for i in range(1, n):
+            pos = max(0.0, pos + r[i])
+            neg = min(0.0, neg + r[i])
+            if pos > threshold:
+                out[i] = 1; pos = 0.0; neg = 0.0
+            elif neg < -threshold:
+                out[i] = -1; pos = 0.0; neg = 0.0
+        return out
+else:
+    def _cusum_events_numba(r, threshold):
+        pos = 0.0; neg = 0.0
+        out = np.zeros_like(r, dtype=np.int8)
+        for i in range(1, len(r)):
+            pos = max(0.0, pos + r[i])
+            neg = min(0.0, neg + r[i])
+            if pos > threshold:
+                out[i] = 1; pos = 0.0; neg = 0.0
+            elif neg < -threshold:
+                out[i] = -1; pos = 0.0; neg = 0.0
+        return out
+
+# ---------- VPIN: bucket id by volume ----------
+if _HAS_NUMBA:
+    @njit(cache=True, fastmath=True)
+    def _bucket_ids_by_volume_numba(volumes, bucket_vol):
+        n = volumes.shape[0]
+        ids = np.empty(n, dtype=np.int64)
+        s = 0.0; b = 0
+        for i in range(n):
+            s += volumes[i]
+            if s >= bucket_vol:
+                b += 1; s = 0.0
+            ids[i] = b
+        return ids
+else:
+    def _bucket_ids_by_volume_numba(volumes, bucket_vol):
+        ids = []
+        s = 0.0; b = 0
+        for v in volumes:
+            s += float(v)
+            if s >= bucket_vol:
+                b += 1; s = 0.0
+            ids.append(b)
+        return np.array(ids, dtype=np.int64)
+
+
 
 def downcast_float32(df: pd.DataFrame, exclude=('open','high','low','close','volume','turnover')) -> pd.DataFrame:
     d = df.copy()
@@ -21,21 +200,57 @@ def downcast_float32(df: pd.DataFrame, exclude=('open','high','low','close','vol
         d[c] = pd.to_numeric(d[c], downcast='float')
     return d
 
-def winsorize_df(df: pd.DataFrame, lower=0.005, upper=0.995, exclude_prefixes=('open','high','low','close','volume','turnover')) -> pd.DataFrame:
+def winsorize_df(
+    df: pd.DataFrame,
+    lower: float = 0.005,
+    upper: float = 0.995,
+    exclude: tuple[str, ...] = ("open", "high", "low", "close", "volume", "turnover"),
+) -> pd.DataFrame:
     """
-    Prosta winsoryzacja kolumn numerycznych. Na produkcji rozważ dopasowanie progów na train-set.
+    Winsoryzacja per-kolumna, odporna na duplikaty nazw:
+    - iteracja po indeksach kolumn (iloc), więc zawsze Series 1-D,
+    - omija kolumny z 'exclude' po nazwie,
+    - ignoruje NaN/Inf przy liczeniu kwantyli,
+    - przycina do [lo, hi] dla każdej kolumny numerycznej.
     """
     d = df.copy()
-    num_cols = d.select_dtypes(include=[np.number]).columns.tolist()
-    # nie przycinamy podstawowych OHLCV
-    num_cols = [c for c in num_cols if not any(c == p or c.startswith(p + '_') for p in exclude_prefixes)]
-    for c in num_cols:
-        s = d[c].dropna()
-        if len(s) < 100:  # zbyt mała seria – pomijamy
+
+    # zbuduj listę indeksów kolumn numerycznych (po dtype), niezależnie od duplikatów nazw
+    num_idx = []
+    for i in range(d.shape[1]):
+        col = d.columns[i]
+        if col in exclude:
             continue
-        lo, hi = s.quantile(lower), s.quantile(upper)
-        d[c] = d[c].clip(lo, hi)
+        s = d.iloc[:, i]
+        if pd.api.types.is_numeric_dtype(s):
+            num_idx.append(i)
+
+    for i in num_idx:
+        s = pd.to_numeric(d.iloc[:, i], errors="coerce")
+        # usuń +/-inf -> NaN
+        s = s.replace([np.inf, -np.inf], np.nan)
+
+        # jeśli brak realnych wartości – pomiń
+        valid = s.to_numpy()
+        if np.isnan(valid).all():
+            continue
+
+        # kwantyle na realnych wartościach
+        lo = np.nanquantile(valid, lower)
+        hi = np.nanquantile(valid, upper)
+
+        # awaryjne granice gdyby kwantyle nie były skończone
+        if not np.isfinite(lo):
+            lo = np.nanmin(valid)
+        if not np.isfinite(hi):
+            hi = np.nanmax(valid)
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            continue
+
+        d.iloc[:, i] = s.clip(lower=lo, upper=hi)
+
     return d
+
 
 def add_gating_features(final_df: pd.DataFrame, base_tf: str) -> pd.DataFrame:
     """
@@ -87,7 +302,6 @@ def assert_no_lookahead_after_merge(final_df: pd.DataFrame):
     if not final_df.index.is_monotonic_increasing:
         raise ValueError("Index must be monotonic increasing to avoid lookahead issues in merge_asof.")
 
-
 def add_roll_spread(df, window=100):
     d = df.copy()
     r = d['close'].pct_change()
@@ -108,20 +322,9 @@ def add_variance_ratio(df, k_list=(2,4,8,16)):
     return d
 
 def add_kalman_trend(df, q=1e-5, r=1e-3):
-    """
-    Jednowymiarowy filtr Kalmana (model poziomu). q – wariancja procesu, r – wariancja obserwacji.
-    """
     d = df.copy()
-    z = d['close'].values.astype(float)
-    xhat = np.zeros_like(z); P = np.zeros_like(z)
-    xhat[0] = z[0]; P[0] = 1.0
-    for t in range(1, len(z)):
-        # predict
-        xhat_minus = xhat[t-1]; P_minus = P[t-1] + q
-        # update
-        K = P_minus / (P_minus + r)
-        xhat[t] = xhat_minus + K*(z[t]-xhat_minus)
-        P[t] = (1-K)*P_minus
+    z = d['close'].to_numpy(dtype=np.float64)
+    xhat = _kalman_1d_numba(z, float(q), float(r))
     d['kalman_trend'] = xhat
     d['kalman_slope'] = pd.Series(xhat, index=d.index).diff()
     d['dist_from_kalman'] = _safe_div(d['close'] - d['kalman_trend'], d['close'])
@@ -173,35 +376,46 @@ def add_vol_scaled_momentum(df, horizons=(10,20,50), vol_win=50):
 
 def add_cusum_events(df, threshold=3e-3):
     d = df.copy()
-    r = np.log(d['close']).diff().fillna(0.0).values
-    pos = np.zeros_like(r); neg = np.zeros_like(r)
-    events = np.zeros_like(r)
-    for i in range(1,len(r)):
-        pos[i] = max(0, pos[i-1] + r[i])
-        neg[i] = min(0, neg[i-1] + r[i])
-        if pos[i] > threshold: events[i]= 1; pos[i]=0; neg[i]=0
-        elif neg[i] < -threshold: events[i]= -1; pos[i]=0; neg[i]=0
+    r = np.log(d['close']).diff().fillna(0.0).to_numpy(dtype=np.float64)
+    events = _cusum_events_numba(r, float(threshold))
     d['cusum_event'] = events
     return d
 
-def add_vpin_like(df, bucket_vol=None, lookback=20):
+def add_vpin_like(df: pd.DataFrame, bucket_vol: int | None = None, lookback: int = 30) -> pd.DataFrame:
     d = df.copy()
     if bucket_vol is None:
-        bucket_vol = int(d['volume'].median()*50)  # heurystyka
-    d['ret'] = d['close'].pct_change()
-    d['vol_up'] = np.where(d['ret']>=0, d['volume'], 0)
-    d['vol_dn'] = np.where(d['ret']<0,  d['volume'], 0)
-    # kubełkuj po sumie wolumenu
-    cumv = d['volume'].cumsum()
-    bucket = (cumv // bucket_vol).astype(int)
-    agg = d.groupby(bucket).agg({'vol_up':'sum','vol_dn':'sum'})
-    agg['vpin_bin'] = np.abs(agg['vol_up'] - agg['vol_dn']) / (agg['vol_up'] + agg['vol_dn']).replace(0, np.nan)
-    agg['vpin'] = agg['vpin_bin'].rolling(lookback).mean()
-    # mapuj z powrotem na indeks czasu
-    agg.index = d.groupby(bucket).apply(lambda g: g.index[-1])
-    d['VPIN'] = pd.merge_asof(d[['ret']], agg[['vpin']].dropna(), left_index=True, right_index=True,
+        bucket_vol = int(max(1, d['volume'].median() * 80))  # większe wiadro = stabilniej i szybciej
+
+    ret = d['close'].pct_change().fillna(0.0).to_numpy(dtype=np.float64)
+    vol = d['volume'].to_numpy(dtype=np.float64)
+    up_mask = (ret >= 0.0).astype(np.int8)
+
+    # bucket ids (Numba)
+    bucket = _bucket_ids_by_volume_numba(vol, float(bucket_vol))
+
+    # agregacje po bucketach (bincount)
+    max_b = int(bucket.max())
+    up_sum = np.bincount(bucket, weights=vol * up_mask, minlength=max_b+1).astype(np.float64)
+    dn_sum = np.bincount(bucket, weights=vol * (1 - up_mask), minlength=max_b+1).astype(np.float64)
+    tot = up_sum + dn_sum
+    with np.errstate(divide='ignore', invalid='ignore'):
+        vpin_bin = np.abs(up_sum - dn_sum) / tot
+        vpin_bin[~np.isfinite(vpin_bin)] = np.nan
+
+    # rolling mean po kubełkach (użyj pandas dla prostoty)
+    vpin_s = pd.Series(vpin_bin)
+    vpin = vpin_s.rolling(lookback, min_periods=1).mean()
+
+    # indeks „czasowy” = ostatni timestamp w kubełku (bez groupby)
+    change = np.r_[True, np.diff(bucket) != 0]
+    last_pos = np.flatnonzero(np.r_[np.diff(bucket) != 0, True])  # końce kubełków
+    idx_map = pd.Index(d.index[last_pos])
+
+    vpin.index = idx_map
+    # mapowanie na asof (ostatnia znana wartość kubełka)
+    d['VPIN'] = pd.merge_asof(d[['close']], vpin.to_frame('vpin').dropna(),
+                              left_index=True, right_index=True,
                               direction='backward')['vpin'].values
-    d.drop(columns=['ret','vol_up','vol_dn'], inplace=True)
     return d
 
 def build_dollar_bars(df, threshold_multiplier=20):
@@ -463,14 +677,6 @@ def add_zigzag_features(df: pd.DataFrame,
                         atr_len: int = 14,
                         atr_mult: float = 2.0,
                         seed_first_pivot: bool = True) -> pd.DataFrame:
-    """
-    ZigZag oparty o próg ATR (bez pandas_ta.zigzag):
-    - Bezpieczny odczyt ATR (Series lub DataFrame) + fallback na własne wyliczenie.
-    - Pivot gdy ruch >= atr_mult * ATR od ostatniego pivotu.
-    Zwraca: zigzag_signal, dist_from_last_pivot, bars_since_last_pivot.
-    """
-    import numpy as np
-
     d = df.copy()
     if len(d) < max(atr_len, 10):
         d["zigzag_signal"] = 0.0
@@ -478,79 +684,19 @@ def add_zigzag_features(df: pd.DataFrame,
         d["bars_since_last_pivot"] = 0.0
         return d
 
-    # --- 1) Bezpieczne pozyskanie ATR ---
-    atr = None
-    try:
-        atr_obj = d.ta.atr(length=atr_len, append=False)
-        # Może być Series albo DataFrame – obsłuż oba przypadki:
-        if isinstance(atr_obj, pd.Series):
-            atr = atr_obj.astype(float)
-        elif isinstance(atr_obj, pd.DataFrame):
-            # bierz pierwszą kolumnę (np. 'ATRr_14' lub 'ATR_14' zależnie od wersji)
-            atr = atr_obj.iloc[:, 0].astype(float)
-    except Exception:
-        atr = None
+    high = d['high'].to_numpy(dtype=np.float64)
+    low  = d['low'].to_numpy(dtype=np.float64)
+    close= d['close'].to_numpy(dtype=np.float64)
 
-    if atr is None or atr.isna().all():
-        # Fallback: własny ATR (Wilder)
-        high = d['high'].astype(float)
-        low  = d['low'].astype(float)
-        close= d['close'].astype(float)
-        prev_close = close.shift(1)
-        tr = pd.concat([
-            (high - low).abs(),
-            (high - prev_close).abs(),
-            (low  - prev_close).abs()
-        ], axis=1).max(axis=1)
-        # Wilder ATR = EMA z alpha=1/n
-        atr = tr.ewm(alpha=1/atr_len, adjust=False).mean()
+    # ATR Wilder -> progi
+    atr = _atr_wilder_numba(high, low, close, int(atr_len))
+    piv = _zigzag_atr_numba(high, low, close, atr, float(atr_mult), seed_first_pivot)
 
-    thr = atr_mult * atr
-
-    # --- 2) ZigZag z progiem ATR ---
-    high = d['high'].to_numpy(dtype=float)
-    low  = d['low'].to_numpy(dtype=float)
-    close= d['close'].to_numpy(dtype=float)
-
-    piv = np.full(len(d), np.nan, dtype=float)
-
-    last_price = close[0]
-    if seed_first_pivot:
-        piv[0] = last_price  # ułatwia późniejsze ffill
-    dirn = 0  # 1=ostatnio szczyt (szukamy dołka), -1=ostatnio dołek (szukamy szczytu), 0=brak
-
-    # Uwaga: thr może mieć NaNy na początku — pomiń te punkty
-    thr_vals = thr.to_numpy(dtype=float)
-
-    for i in range(1, len(d)):
-        t = thr_vals[i] if i < len(thr_vals) else np.nan
-        if not np.isfinite(t) or t <= 0.0:
-            continue
-        if dirn >= 0:
-            if high[i] >= last_price + t:
-                dirn = 1
-                last_price = high[i]
-                piv[i] = last_price
-            elif low[i] <= last_price - t:
-                dirn = -1
-                last_price = low[i]
-                piv[i] = last_price
-        else:
-            if low[i] <= last_price - t:
-                dirn = -1
-                last_price = low[i]
-                piv[i] = last_price
-            elif high[i] >= last_price + t:
-                dirn = 1
-                last_price = high[i]
-                piv[i] = last_price
-
-    # --- 3) Cechy na bazie pivotów ---
     d['zigzag_signal'] = pd.Series(piv, index=d.index).ffill()
 
+    # cechy od pivotów
     pivot_prices = d['close'].where(d['zigzag_signal'].notna())
     pivot_times  = d.index.to_series().where(d['zigzag_signal'].notna())
-
     d['last_pivot_price'] = pivot_prices.ffill()
     last_pivot_time = pivot_times.ffill()
 
@@ -562,14 +708,9 @@ def add_zigzag_features(df: pd.DataFrame,
     else:
         d['bars_since_last_pivot'] = 0.0
 
-    d.fillna({
-        'zigzag_signal': 0.0,
-        'dist_from_last_pivot': 0.0,
-        'bars_since_last_pivot': 0.0
-    }, inplace=True)
+    d.fillna({'zigzag_signal': 0.0, 'dist_from_last_pivot': 0.0, 'bars_since_last_pivot': 0.0}, inplace=True)
     d.drop(columns=['last_pivot_price'], inplace=True, errors='ignore')
     return d
-
 
 def add_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -906,6 +1047,8 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         if show_progress: progress.update(t_time, advance=1)
 
         # 10) Winsoryzacja
+        # zachowaj pierwsze wystąpienie każdej nazwy
+        final_df = final_df.loc[:, ~final_df.columns.duplicated()]
         final_df = winsorize_df(final_df, lower=0.005, upper=0.995)
         if show_progress: progress.update(t_win, advance=1)
 
