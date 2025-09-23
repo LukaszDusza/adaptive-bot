@@ -8,7 +8,7 @@ from async_data_fetcher import fetch_data_for_trainer_async
 from services.analysis_service import AnalysisService
 from logic.position_manager import PositionManager
 from logic.fees import get_fee_calculator
-from utils.data_preparer import prepare_full_feature_set
+from utils.data_preparer import prepare_feature_set_for_timeframe
 from utils.reporting import generate_full_report, save_events_log
 
 # --- Fees (tak jak na giełdzie, w bps od nominału) ---
@@ -32,7 +32,7 @@ async def run():
         logging.error("Pobieranie danych nie powiodło się. Pusty DataFrame.")
         return
 
-    test_data = prepare_full_feature_set(df_raw)
+    test_data = prepare_feature_set_for_timeframe(df_raw)
 
     capital = config.INITIAL_CAPITAL
     trades, equity_curve = [], {test_data.index[0]: capital}
