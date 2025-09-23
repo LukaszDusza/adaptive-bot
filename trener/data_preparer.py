@@ -4,15 +4,78 @@ import pandas_ta as ta
 import numpy as np
 
 
+# W pliku data_preparer.py
+
+def add_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Oblicza dzienne Pivot Points i dołącza je do danych intraday.
+    Wersja ostateczna, z zabezpieczeniem na wypadek, gdyby resample zwróciło Serię.
+    """
+    print("Obliczanie dziennych Pivot Points...")
+    df_copy = df.copy()
+    df_copy.index = pd.to_datetime(df_copy.index)
+
+    # 1. Stwórz dane dzienne
+    daily_agg = {
+        'high': 'max', 'low': 'min', 'close': lambda x: x.iloc[-1] if not x.empty else np.nan
+    }
+    df_daily = df_copy.resample('1D', offset='-2h').agg(daily_agg).dropna()
+
+    # === OSTATECZNA POPRAWKA: Obsługa nietypowego przypadku brzegowego ===
+    # Jeśli w wyniku resamplingu powstanie Seria (zamiast DataFrame),
+    # konwertujemy ją z powrotem na DataFrame o prawidłowej strukturze.
+    if isinstance(df_daily, pd.Series):
+        df_daily = df_daily.to_frame().T
+    # ====================================================================
+
+    if df_daily.empty:
+        print("Ostrzeżenie: Brak danych dziennych do obliczenia Pivot Points. Pomijanie kroku.")
+        return df
+
+    prev_day = df_daily.shift(1).dropna()  # Dodajemy dropna() tutaj dla bezpieczeństwa
+
+    if prev_day.empty:
+        print("Ostrzeżenie: Brak danych z poprzedniego dnia do obliczenia Pivot Points. Pomijanie kroku.")
+        return df
+
+    # 2. Oblicz poziomy Pivot Points
+    pp = (prev_day['high'] + prev_day['low'] + prev_day['close']) / 3
+    r1 = 2 * pp - prev_day['low']
+    s1 = 2 * pp - prev_day['high']
+    r2 = pp + (prev_day['high'] - prev_day['low'])
+    s2 = pp - (prev_day['high'] - prev_day['low'])
+
+    prev_day_date_index = pd.to_datetime(prev_day.index).date
+
+    pp_series = pd.Series(pp, index=prev_day_date_index)
+    r1_series = pd.Series(r1, index=prev_day_date_index)
+    s1_series = pd.Series(s1, index=prev_day_date_index)
+    r2_series = pd.Series(r2, index=prev_day_date_index)
+    s2_series = pd.Series(s2, index=prev_day_date_index)
+
+    pivots_map = {'PP': pp_series, 'R1': r1_series, 'S1': s1_series, 'R2': r2_series, 'S2': s2_series}
+
+    df_copy['date_map'] = df_copy.index.date
+
+    for level_name, level_series in pivots_map.items():
+        pivot_values = df_copy['date_map'].map(level_series)
+        df_copy[f'dist_to_{level_name}'] = \
+            (df_copy['close'] - pivot_values) / pivot_values.replace(0, np.nan)
+
+    df_copy.drop(columns=['date_map'], inplace=True)
+
+    return df_copy
+
 def add_fibonacci_features(df, window=100):
     """
     Oblicza i dodaje cechy oparte na zniesieniach Fibonacciego.
+    Wersja poprawiona, aby unikać FutureWarning.
     """
     # 1. Automatyczne wykrywanie swingu high/low w oknie
     swing_high = df['high'].rolling(window=window).max()
     swing_low = df['low'].rolling(window=window).min()
     swing_range = swing_high - swing_low
-    swing_range = swing_range.replace(0, np.nan)  # Unikamy dzielenia przez zero
+    swing_range = swing_range.replace(0, np.nan)
 
     # 2. Obliczanie poziomów Fibo
     fibo_levels = {
@@ -26,19 +89,21 @@ def add_fibonacci_features(df, window=100):
     fibo_df = pd.DataFrame(fibo_levels, index=df.index)
 
     # 3. Tworzenie cech dla modelu
-
-    # Cecha 1: Względna pozycja ceny w swingu (0 = na dołku, 1 = na szczycie)
     df['FIBO_relative_position'] = (df['close'] - swing_low) / swing_range
 
-    # Cecha 2 & 3: Dystans i nazwa najbliższego poziomu Fibo
-    # Obliczamy dystans od ceny 'close' do każdego z poziomów Fibo
     distances = fibo_df.sub(df['close'], axis=0).abs()
 
-    # Znajdujemy, który poziom jest najbliżej
-    df['FIBO_nearest_level'] = distances.idxmin(axis=1)
-    df['FIBO_distance_to_nearest'] = distances.min(axis=1) / swing_range  # Normalizujemy dystans
+    # === POPRAWIONY FRAGMENT KODU ===
+    # Obliczamy najbliższy poziom. To wygeneruje NaN na początku.
+    nearest_level_series = distances.idxmin(axis=1)
 
-    # Przekształcamy nazwy poziomów na wartości liczbowe (np. 'FIBO_38.2' -> 38.2)
+    # Wypełniamy początkowe NaNy domyślną wartością, np. poziomem 100.0 (dołek swingu)
+    # To rozwiązuje problem i sprawia, że kod jest gotowy na przyszłe wersje pandas.
+    df['FIBO_nearest_level'] = nearest_level_series.fillna('FIBO_100.0')
+    # =================================
+
+    df['FIBO_distance_to_nearest'] = distances.min(axis=1) / swing_range
+
     df['FIBO_nearest_level'] = df['FIBO_nearest_level'].str.replace('FIBO_', '').astype(float)
 
     return df
@@ -53,13 +118,8 @@ def add_divergence_feature(df, indicator_col, price_high_col='high', price_low_c
 
     high_price_lookback = df[price_high_col].rolling(window=window).max().shift(1)
     high_indicator_lookback = df[indicator_col].rolling(window=window).max().shift(1)
-
-    bullish_divergence = (df[price_low_col] < low_price_lookback) & \
-                         (df[indicator_col] > low_indicator_lookback)
-
-    bearish_divergence = (df[price_high_col] > high_price_lookback) & \
-                         (df[indicator_col] < high_indicator_lookback)
-
+    bullish_divergence = (df[price_low_col] < low_price_lookback) & (df[indicator_col] > low_indicator_lookback)
+    bearish_divergence = (df[price_high_col] > high_price_lookback) & (df[indicator_col] < high_indicator_lookback)
     div_col_name = f'DIVERGENCE_{indicator_col}'
     df[div_col_name] = 0
     df.loc[bullish_divergence, div_col_name] = 1
@@ -79,7 +139,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
     if base_tf not in timeframes:
         raise ValueError(f"Nieobsługiwany interwał bazowy: {base_tf}.")
 
-    ohlc = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum', 'turnover': 'sum'}
+    ohlc = {'open': 'first', 'high': 'max', 'low': 'min', 'close': lambda x: x.iloc[-1] if not x.empty else np.nan, 'volume': 'sum', 'turnover': 'sum'}
 
     all_dfs = {}
     for tf_name, tf_pandas in timeframes.items():
@@ -90,18 +150,17 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
 
     for tf_name, df in all_dfs.items():
         print(f"Obliczanie wskaźników dla interwału {tf_name}...")
-        # --- Standardowe wskaźniki ---
-        df.ta.rsi(append=True)
-        df.ta.atr(append=True)
-        df.ta.macd(append=True)
-        df.ta.bbands(append=True)
-        df.ta.stoch(append=True)
-        df.ta.adx(append=True)
-        df.ta.obv(append=True)
-        df.ta.vwap(append=True)
-        df.ta.cci(append=True)
-        df.ta.mfi(append=True)
-        df.ta.aroon(append=True)
+        df.ta.rsi(append=True); df.ta.atr(append=True); df.ta.macd(append=True); df.ta.bbands(append=True)
+        df.ta.stoch(append=True); df.ta.adx(append=True); df.ta.obv(append=True); df.ta.vwap(append=True)
+        df.ta.cci(append=True); df.ta.mfi(append=True); df.ta.aroon(append=True)
+
+        df.ta.ema(length=20, append=True); df.ta.ema(length=50, append=True); df.ta.ema(length=200, append=True)
+        df.ta.dema(length=50, append=True); df.ta.tema(length=50, append=True)
+
+        if 'EMA_200' in df.columns:
+            df['dist_from_ema_200'] = (df['close'] - df['EMA_200']) / df['EMA_200']
+        if 'EMA_20' in df.columns and 'EMA_50' in df.columns:
+            df['ema_cross_signal'] = (df['EMA_20'] > df['EMA_50']).astype(int)
 
         # --- Zaawansowane wskaźniki i cechy ---
 
@@ -114,8 +173,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         st_df = df.ta.supertrend(append=False)
         if st_df is not None and not st_df.empty:
             direction_col_name = next((col for col in st_df.columns if 'SUPERTd' in col), None)
-            if direction_col_name:
-                df[direction_col_name] = st_df[direction_col_name]
+            if direction_col_name: df[direction_col_name] = st_df[direction_col_name]
 
         # Ichimoku
         ichimoku_df = df.ta.ichimoku(append=False)[0]
@@ -128,26 +186,20 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         if 'MACDh_12_26_9' in df.columns:
             df['MACDh_12_26_9_roc_1'] = df['MACDh_12_26_9'].diff()
 
-        # TTM Squeeze
-        df.ta.squeeze(append=True)
-        # Kanały Donchiana
-        df.ta.donchian(append=True)
+        df.ta.squeeze(append=True); df.ta.donchian(append=True)
 
         # Parabolic SAR (w inteligentny sposób, aby uniknąć NaN)
         psar_df = df.ta.psar(append=False)
         if psar_df is not None and not psar_df.empty:
             reversal_col = next((col for col in psar_df.columns if 'PSARr' in col), None)
-            if reversal_col:
-                df[reversal_col] = psar_df[reversal_col]
-        # =====================================
+            if reversal_col: df[reversal_col] = psar_df[reversal_col]
 
         # Automatyczne rozpoznawanie formacji świecowych
         df.ta.cdl_pattern(name="all", append=True)
 
         # === DODANIE CECH FIBONACCIEGO ===
         print(f"Dodawanie cech Fibonacciego dla interwału {tf_name}...")
-        df = add_fibonacci_features(df, window=100)  # Okno 100 świec do znalezienia swingu
-        # ==================================
+        df = add_fibonacci_features(df, window=100)
 
         all_dfs[tf_name] = df
 
@@ -161,8 +213,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
     final_df = base_df
     for tf_name, df_to_merge in all_dfs.items():
         if tf_name == base_tf: continue
-        df_with_suffix = df_to_merge.drop(columns=['open', 'high', 'low', 'close', 'volume', 'turnover'],
-                                          errors='ignore').add_suffix(f'_{tf_name}')
+        df_with_suffix = df_to_merge.drop(columns=['open', 'high', 'low', 'close', 'volume', 'turnover'], errors='ignore').add_suffix(f'_{tf_name}')
         final_df = pd.merge_asof(final_df, df_with_suffix, left_index=True, right_index=True, direction='backward')
 
     # --- Cechy Price Action ---
@@ -181,11 +232,19 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         for n in [1, 2, 3]:
             pa_df[f'{col}_lag_{n}'] = pa_df[col].shift(n)
 
-    pa_features_to_add = [col for col in pa_df.columns if
-                          col not in ['open', 'high', 'low', 'close', 'volume', atr_col_name]]
+    pa_features_to_add = [col for col in pa_df.columns if col not in ['open', 'high', 'low', 'close', 'volume', atr_col_name]]
     final_df = pd.concat([final_df, pa_df[pa_features_to_add]], axis=1)
 
-    # --- Cechy Reżimu Rynkowego i Czasowe ---
+    # === TUTAJ WKLEJ BLOK DIAGNOSTYCZNY ===
+    print("\n[DIAGNOSTYKA] Sprawdzanie indeksu PRZED wywołaniem add_pivot_points:")
+    print(f"Typ indeksu: {type(final_df.index)}")
+    print("Pierwsze 5 wartości indeksu:")
+    print(final_df.index[:5])
+    # ======================================
+
+    # === DODANIE DZIENNYCH PIVOT POINTS ===
+    final_df = add_pivot_points(final_df)
+
     adx_col_name = f'ADX_14_{base_tf}'
     if adx_col_name in final_df.columns:
         final_df['market_regime_trending'] = (final_df[adx_col_name] > 25).astype(int)
@@ -194,14 +253,11 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
     if not pd.api.types.is_datetime64_any_dtype(final_df.index):
         final_df.index = pd.to_datetime(final_df.index)
 
-    day_of_week = final_df.index.dayofweek
-    hour_of_day = final_df.index.hour
-
+    day_of_week, hour_of_day = final_df.index.dayofweek, final_df.index.hour
     final_df['hour_sin'] = np.sin(2 * np.pi * hour_of_day / 24)
     final_df['hour_cos'] = np.cos(2 * np.pi * hour_of_day / 24)
     final_df['day_sin'] = np.sin(2 * np.pi * day_of_week / 7)
     final_df['day_cos'] = np.cos(2 * np.pi * day_of_week / 7)
 
-    # --- Finalizacja ---
     print(f"Zakończono przygotowywanie cech. Finalny kształt danych: {final_df.shape}")
     return final_df

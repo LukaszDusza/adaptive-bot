@@ -10,6 +10,7 @@ from optuna import trial
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score
 from sklearn.base import clone
+from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm
 
 import optuna
@@ -50,7 +51,8 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
 
     print(f"\n[KROK 3/4] Selekcja {config.TOP_N_FEATURES} najważniejszych cech...")
     df = df.loc[:, ~df.columns.duplicated()]
-    all_features = [col for col in df.columns if col not in ['open', 'high', 'low', 'close', 'volume', 'target']]
+    all_features = [col for col in df.columns if
+                    col not in ['open', 'high', 'low', 'close', 'volume', 'turnover', 'target']]
     holdout_split_idx = int(len(df) * (1 - config.HOLDOUT_SIZE))
     train_val_df = df.iloc[:holdout_split_idx]
     holdout_df = df.iloc[holdout_split_idx:]
@@ -68,6 +70,11 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
 
     best_features = feature_importances.head(config.TOP_N_FEATURES)['feature'].tolist()
 
+    # === NOWY BLOK KODU: Logowanie najważniejszych cech ===
+    print(f"-> Top 10 najważniejszych cech w tym trialu:")
+    print(feature_importances.head(10).to_string(index=False))
+    # =======================================================
+
     print(f"[KROK 4/4] Walidacja krzyżowa i finalny trening...")
     x_train_val = train_val_df[best_features]
     y_train_val = train_val_df['target']
@@ -78,7 +85,10 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
             tqdm(tscv.split(x_train_val), total=config.CV_SPLITS, desc="Walidacja krzyżowa", leave=False, ncols=100)):
         x_train, x_test = x_train_val.iloc[train_index], x_train_val.iloc[test_index]
         y_train, y_test = y_train_val.iloc[train_index], y_train_val.iloc[test_index]
+
+        # Używamy asercji, aby pomóc edytorowi w inspekcji kodu
         scaler = clone(config.SCALER)
+        assert isinstance(scaler, StandardScaler)
         x_train_scaled = scaler.fit_transform(x_train)
         x_test_scaled = scaler.transform(x_test)
 
@@ -92,7 +102,9 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
 
     x_holdout = holdout_df[best_features]
     y_holdout = holdout_df['target']
+
     final_scaler = clone(config.SCALER)
+    assert isinstance(final_scaler, StandardScaler)
     x_train_val_scaled = final_scaler.fit_transform(x_train_val)
 
     final_model = clone(model_for_trial)
@@ -100,7 +112,6 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
 
     x_holdout_scaled = final_scaler.transform(x_holdout)
     y_holdout_pred = final_model.predict(x_holdout_scaled)
-    holdout_accuracy = accuracy_score(y_holdout, y_holdout_pred)
 
     f1 = f1_score(y_holdout, y_holdout_pred, average=None, labels=[0, 2])
     mean_f1_score = np.mean(f1)
