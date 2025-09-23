@@ -9,7 +9,7 @@ BASE_TIMEFRAME = '5m'  # Główny interwał analizy ('5m', '15m', '1h')
 
 # --- 2. Konfiguracja Procesu Treningu ---
 # Ile najlepszych cech wybrać do finalnego modelu
-TOP_N_FEATURES = 40
+TOP_N_FEATURES = 60
 CV_SPLITS = 5
 HOLDOUT_SIZE = 0.2  # 20% danych jako zbiór testowy (holdout)
 RANDOM_STATE = 42
