@@ -2,12 +2,24 @@
 import pandas as pd
 import pandas_ta as ta
 import numpy as np
+
 from rich.progress import Progress, BarColumn, TimeRemainingColumn, TimeElapsedColumn, TextColumn
 from contextlib import nullcontext
 
-
+from rich.progress import Progress, BarColumn, TimeRemainingColumn, TimeElapsedColumn, TextColumn
+from rich.console import Console
+from contextlib import nullcontext
 
 import math
+
+
+def downcast_float32(df: pd.DataFrame, exclude=('open','high','low','close','volume','turnover')) -> pd.DataFrame:
+    d = df.copy()
+    num_cols = d.select_dtypes(include=[np.number]).columns
+    num_cols = [c for c in num_cols if not any(c == p or c.startswith(p + '_') for p in exclude)]
+    for c in num_cols:
+        d[c] = pd.to_numeric(d[c], downcast='float')
+    return d
 
 def winsorize_df(df: pd.DataFrame, lower=0.005, upper=0.995, exclude_prefixes=('open','high','low','close','volume','turnover')) -> pd.DataFrame:
     """
@@ -172,7 +184,6 @@ def add_cusum_events(df, threshold=3e-3):
     d['cusum_event'] = events
     return d
 
-
 def add_vpin_like(df, bucket_vol=None, lookback=20):
     d = df.copy()
     if bucket_vol is None:
@@ -222,7 +233,6 @@ def add_features_from_dollar_bars(base_df, bars_df, suffix='_DB'):
     out = pd.merge_asof(base_df.sort_index(), feat.sort_index(),
                         left_index=True, right_index=True, direction='backward')
     return out
-
 
 def _safe_div(a, b):
     b = b.replace(0, np.nan) if isinstance(b, pd.Series) else (np.nan if b == 0 else b)
@@ -449,97 +459,115 @@ def add_vol_norm_and_regime_interactions(df: pd.DataFrame, adx_col: str = 'ADX_1
 
     return d
 
-
-def add_zigzag_features(df: pd.DataFrame) -> pd.DataFrame:
+def add_zigzag_features(df: pd.DataFrame,
+                        atr_len: int = 14,
+                        atr_mult: float = 2.0,
+                        seed_first_pivot: bool = True) -> pd.DataFrame:
     """
-    Szybki i odporny ZigZag:
-    - Najpierw próbuje ZigZag z pandas_ta na zrzadkowanym szeregu (co kilka świec), potem mapuje na pełną siatkę.
-    - Jeśli ZigZag z pandas_ta zwróci same NaNy (za wysoki próg / „gładki” rynek), przechodzi w tryb adaptacyjny ATR.
-    - Zwraca: zigzag_signal, dist_from_last_pivot, bars_since_last_pivot.
+    ZigZag oparty o próg ATR (bez pandas_ta.zigzag):
+    - Bezpieczny odczyt ATR (Series lub DataFrame) + fallback na własne wyliczenie.
+    - Pivot gdy ruch >= atr_mult * ATR od ostatniego pivotu.
+    Zwraca: zigzag_signal, dist_from_last_pivot, bars_since_last_pivot.
     """
     import numpy as np
 
-    # Parametry „bezpieczne” na intraday:
-    PCT_THRESHOLD = 0.01     # 1% – próg procentowy dla pandas_ta ZigZag
-    DECIMATE_EVERY = 5       # licz ZigZag co 5 świec, potem zmapuj
-    ATR_LEN = 14             # ATR dla trybu adaptacyjnego
-    ATR_MULT = 2.0           # próg = ATR_MULT * ATR
-
     d = df.copy()
-    if len(d) < 50:
-        d["zigzag_signal"] = 0
+    if len(d) < max(atr_len, 10):
+        d["zigzag_signal"] = 0.0
         d["dist_from_last_pivot"] = 0.0
         d["bars_since_last_pivot"] = 0.0
         return d
 
-    idx_full = d.index
-    use_adaptive = False
-    sig_full = None
-
-    # --- 1) Spróbuj szybki ZigZag z pandas_ta na zrzadkowanym szeregu ---
+    # --- 1) Bezpieczne pozyskanie ATR ---
+    atr = None
     try:
-        d_s = d.iloc[::max(1, DECIMATE_EVERY)].copy()
-        # W pandas_ta ZigZag używa paramów percent & depth; tu korzystamy z percent
-        zz = d_s.ta.zigzag(high='high', low='low', percent=PCT_THRESHOLD*100, append=False)
-        if zz is not None and not zz.empty and zz.notna().sum().sum() > 0:
-            # Druga kolumna zwykle zawiera wartości pivotów (ZIGZAGv_*). Jeśli nie ma, bierz pierwszą.
-            sig_col = zz.columns[1] if len(zz.columns) > 1 else zz.columns[0]
-            sig_sparse = zz[sig_col]
-            sig_sparse.index = d_s.index
-            # Zmapuj na pełną częstotliwość:
-            sig_full = sig_sparse.reindex(idx_full).ffill()
-        else:
-            use_adaptive = True
+        atr_obj = d.ta.atr(length=atr_len, append=False)
+        # Może być Series albo DataFrame – obsłuż oba przypadki:
+        if isinstance(atr_obj, pd.Series):
+            atr = atr_obj.astype(float)
+        elif isinstance(atr_obj, pd.DataFrame):
+            # bierz pierwszą kolumnę (np. 'ATRr_14' lub 'ATR_14' zależnie od wersji)
+            atr = atr_obj.iloc[:, 0].astype(float)
     except Exception:
-        use_adaptive = True
+        atr = None
 
-    # --- 2) Tryb adaptacyjny ATR (gdy pandas_ta nic nie zwróci / za wolno) ---
-    if use_adaptive or sig_full is None:
-        atr = d.ta.atr(length=ATR_LEN, append=False).iloc[:, 0]
-        thr = ATR_MULT * atr
-        high = d['high'].values
-        low  = d['low'].values
-        close = d['close'].values
+    if atr is None or atr.isna().all():
+        # Fallback: własny ATR (Wilder)
+        high = d['high'].astype(float)
+        low  = d['low'].astype(float)
+        close= d['close'].astype(float)
+        prev_close = close.shift(1)
+        tr = pd.concat([
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low  - prev_close).abs()
+        ], axis=1).max(axis=1)
+        # Wilder ATR = EMA z alpha=1/n
+        atr = tr.ewm(alpha=1/atr_len, adjust=False).mean()
 
-        piv = np.full(len(d), np.nan, dtype=float)
-        last_price = close[0]
-        dirn = 0  # 1=szczyt, -1=dołek, 0=brak
-        for i in range(1, len(d)):
-            t = thr.iat[i] if i < len(thr) else np.nan
-            if np.isnan(t) or t == 0:
-                continue
-            if dirn >= 0:  # szukamy szczytu
-                if high[i] >= last_price + t:
-                    dirn = 1; last_price = high[i]; piv[i] = last_price
-                elif low[i] <= last_price - t:
-                    dirn = -1; last_price = low[i]; piv[i] = last_price
-            else:          # szukamy dołka
-                if low[i] <= last_price - t:
-                    dirn = -1; last_price = low[i]; piv[i] = last_price
-                elif high[i] >= last_price + t:
-                    dirn = 1; last_price = high[i]; piv[i] = last_price
-        sig_full = pd.Series(piv, index=d.index).ffill()
+    thr = atr_mult * atr
 
-    # --- 3) Cechy z sygnału ---
-    d['zigzag_signal'] = sig_full
+    # --- 2) ZigZag z progiem ATR ---
+    high = d['high'].to_numpy(dtype=float)
+    low  = d['low'].to_numpy(dtype=float)
+    close= d['close'].to_numpy(dtype=float)
+
+    piv = np.full(len(d), np.nan, dtype=float)
+
+    last_price = close[0]
+    if seed_first_pivot:
+        piv[0] = last_price  # ułatwia późniejsze ffill
+    dirn = 0  # 1=ostatnio szczyt (szukamy dołka), -1=ostatnio dołek (szukamy szczytu), 0=brak
+
+    # Uwaga: thr może mieć NaNy na początku — pomiń te punkty
+    thr_vals = thr.to_numpy(dtype=float)
+
+    for i in range(1, len(d)):
+        t = thr_vals[i] if i < len(thr_vals) else np.nan
+        if not np.isfinite(t) or t <= 0.0:
+            continue
+        if dirn >= 0:
+            if high[i] >= last_price + t:
+                dirn = 1
+                last_price = high[i]
+                piv[i] = last_price
+            elif low[i] <= last_price - t:
+                dirn = -1
+                last_price = low[i]
+                piv[i] = last_price
+        else:
+            if low[i] <= last_price - t:
+                dirn = -1
+                last_price = low[i]
+                piv[i] = last_price
+            elif high[i] >= last_price + t:
+                dirn = 1
+                last_price = high[i]
+                piv[i] = last_price
+
+    # --- 3) Cechy na bazie pivotów ---
+    d['zigzag_signal'] = pd.Series(piv, index=d.index).ffill()
 
     pivot_prices = d['close'].where(d['zigzag_signal'].notna())
-    pivot_times = d.index.to_series().where(d['zigzag_signal'].notna())
+    pivot_times  = d.index.to_series().where(d['zigzag_signal'].notna())
 
     d['last_pivot_price'] = pivot_prices.ffill()
     last_pivot_time = pivot_times.ffill()
 
     d['dist_from_last_pivot'] = (d['close'] - d['last_pivot_price']) / d['last_pivot_price']
 
-    time_diff = d.index.to_series().diff().median()
-    if pd.notna(time_diff) and time_diff != pd.Timedelta(0):
-        d['bars_since_last_pivot'] = (d.index - last_pivot_time) / time_diff
+    dt = d.index.to_series().diff().median()
+    if pd.notna(dt) and dt != pd.Timedelta(0):
+        d['bars_since_last_pivot'] = (d.index - last_pivot_time) / dt
     else:
         d['bars_since_last_pivot'] = 0.0
 
-    d.fillna({'zigzag_signal': 0, 'dist_from_last_pivot': 0.0, 'bars_since_last_pivot': 0.0}, inplace=True)
+    d.fillna({
+        'zigzag_signal': 0.0,
+        'dist_from_last_pivot': 0.0,
+        'bars_since_last_pivot': 0.0
+    }, inplace=True)
     d.drop(columns=['last_pivot_price'], inplace=True, errors='ignore')
-
     return d
 
 
@@ -639,14 +667,11 @@ def add_fibonacci_features(df, window=100):
 
     distances = fibo_df.sub(df['close'], axis=0).abs()
 
-    # === POPRAWIONY FRAGMENT KODU ===
-    # Obliczamy najbliższy poziom. To wygeneruje NaN na początku.
-    nearest_level_series = distances.idxmin(axis=1)
-
-    # Wypełniamy początkowe NaNy domyślną wartością, np. poziomem 100.0 (dołek swingu)
-    # To rozwiązuje problem i sprawia, że kod jest gotowy na przyszłe wersje pandas.
+    distances_safe = distances.where(~distances.isna(), np.inf)
+    nearest_level_series = distances_safe.idxmin(axis=1)
+    all_nan_rows = distances.isna().all(axis=1)
+    nearest_level_series = nearest_level_series.mask(all_nan_rows)
     df['FIBO_nearest_level'] = nearest_level_series.fillna('FIBO_100.0')
-    # =================================
 
     df['FIBO_distance_to_nearest'] = distances.min(axis=1) / swing_range
 
@@ -673,199 +698,218 @@ def add_divergence_feature(df, indicator_col, price_high_col='high', price_low_c
 
     return df
 
-
-def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5m'):
+def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5m', show_progress: bool = True):
     """
     Agreguje dane, oblicza wskaźniki i wszystkie zaawansowane cechy,
-    a następnie łączy je w jeden DataFrame (bez lookahead).
+    a następnie łączy je w jeden DataFrame (bez lookahead) z paskami postępu Rich.
     """
-    print(f"Przygotowywanie zestawu cech dla interwału bazowego: {base_tf}...")
+    print(f"Przygotowywanie zestawu cech dla interwału bazowego: {base_tf}...", flush=True)
 
-    timeframes = {'5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h'}
-    if base_tf not in timeframes:
-        raise ValueError(f"Nieobsługiwany interwał bazowy: {base_tf}.")
+    console = Console(force_terminal=True) if show_progress else None
+    progress_ctx = Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        "[progress.percentage]{task.percentage:>3.0f}%",
+        "•",
+        TimeElapsedColumn(),
+        "• ETA",
+        TimeRemainingColumn(),
+        console=console
+    ) if show_progress else nullcontext()
 
-    ohlc = {
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': lambda x: x.iloc[-1] if not x.empty else np.nan,
-        'volume': 'sum',
-        'turnover': 'sum'
-    }
+    with progress_ctx as progress:
+        # --- konfiguracja ---
+        timeframes = {'5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h'}
+        if base_tf not in timeframes:
+            raise ValueError(f"Nieobsługiwany interwał bazowy: {base_tf}.")
 
-    # 1) Budowa ramek TF
-    all_dfs = {}
-    for tf_name, tf_pandas in timeframes.items():
-        if tf_name == '5m':
-            all_dfs['5m'] = df_5m_raw.copy()
-        else:
-            all_dfs[tf_name] = df_5m_raw.resample(tf_pandas).agg(ohlc).dropna()
+        ohlc = {
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': lambda x: x.iloc[-1] if not x.empty else np.nan,
+            'volume': 'sum',
+            'turnover': 'sum'
+        }
 
-    # 2) Wskaźniki/cechy per TF (heavy → tylko base_tf)
-    for tf_name, df in all_dfs.items():
-        print(f"Obliczanie wskaźników dla interwału {tf_name}...")
-        # Core TA
-        df.ta.rsi(append=True); df.ta.atr(append=True); df.ta.macd(append=True); df.ta.bbands(append=True)
-        df.ta.stoch(append=True); df.ta.adx(append=True); df.ta.obv(append=True); df.ta.vwap(append=True)
-        df.ta.cci(append=True); df.ta.mfi(append=True); df.ta.aroon(append=True)
+        # Główne taski
+        PHASES_PER_TF = 8
+        t_tf    = progress.add_task("TF: wskaźniki/cechy", total=len(timeframes) * PHASES_PER_TF) if show_progress else None
+        t_heavy = progress.add_task("Heavy pack (base TF)", total=10) if show_progress else None
+        t_dbars = progress.add_task("Dollar bars", total=1) if show_progress else None
+        t_merge = progress.add_task("Merge interwałów", total=len(timeframes)-1) if show_progress else None
+        t_pa    = progress.add_task("Price Action", total=1) if show_progress else None
+        t_piv   = progress.add_task("Pivot Points", total=1) if show_progress else None
+        t_gate  = progress.add_task("Gating", total=1) if show_progress else None
+        t_time  = progress.add_task("Cechy czasowe", total=1) if show_progress else None
+        t_win   = progress.add_task("Winsoryzacja", total=1) if show_progress else None
 
-        # RSI vs SMA
-        rsi_col = 'RSI_14'
-        if rsi_col in df.columns:
-            rsi_sma_col = 'RSI_14_SMA_10'
-            df[rsi_sma_col] = df.ta.sma(close=df[rsi_col], length=10, append=False)
-            if df[rsi_sma_col].notna().any():
-                df['RSI_vs_SMA_signal'] = (df[rsi_col] > df[rsi_sma_col]).astype(int)
-                df['RSI_SMA_dist'] = df[rsi_col] - df[rsi_sma_col]
+        # 1) Budowa ramek TF
+        all_dfs = {}
+        for tf_name, tf_pandas in timeframes.items():
+            if tf_name == '5m':
+                all_dfs['5m'] = df_5m_raw.copy()
+            else:
+                all_dfs[tf_name] = df_5m_raw.resample(tf_pandas).agg(ohlc).dropna()
 
-        # EMA/DEMA/TEMA
-        df.ta.ema(length=20, append=True); df.ta.ema(length=50, append=True); df.ta.ema(length=200, append=True)
-        df.ta.dema(length=50, append=True); df.ta.tema(length=50, append=True)
-        if 'EMA_200' in df.columns:
-            df['dist_from_ema_200'] = (df['close'] - df['EMA_200']) / df['EMA_200']
-        if 'EMA_20' in df.columns and 'EMA_50' in df.columns:
-            df['ema_cross_signal'] = (df['EMA_20'] > df['EMA_50']).astype(int)
+        # 2) Wskaźniki/cechy per TF
+        for tf_name, df in all_dfs.items():
+            # sub-task dla faz w ramach jednego TF
+            t_phase = progress.add_task(f"TF {tf_name}: fazy", total=PHASES_PER_TF) if show_progress else None
 
-        # Zaawansowane klasyki
-        if 'RSI_14' in df.columns:
-            df = add_divergence_feature(df, indicator_col='RSI_14')
+            # --- Faza 1: Core TA ---
+            df.ta.rsi(append=True); df.ta.atr(append=True); df.ta.macd(append=True); df.ta.bbands(append=True)
+            df.ta.stoch(append=True); df.ta.adx(append=True); df.ta.obv(append=True); df.ta.vwap(append=True)
+            df.ta.cci(append=True); df.ta.mfi(append=True); df.ta.aroon(append=True)
+            if show_progress: progress.update(t_phase, advance=1); progress.update(t_tf, advance=1)
 
-        st_df = df.ta.supertrend(append=False)
-        if st_df is not None and not st_df.empty:
-            direction_col_name = next((col for col in st_df.columns if 'SUPERTd' in col), None)
-            if direction_col_name: df[direction_col_name] = st_df[direction_col_name]
+            # --- Faza 2: RSI vs SMA ---
+            rsi_col = 'RSI_14'
+            if rsi_col in df.columns:
+                rsi_sma_col = 'RSI_14_SMA_10'
+                df[rsi_sma_col] = df.ta.sma(close=df[rsi_col], length=10, append=False)
+                if df[rsi_sma_col].notna().any():
+                    df['RSI_vs_SMA_signal'] = (df[rsi_col] > df[rsi_sma_col]).astype(int)
+                    df['RSI_SMA_dist'] = df[rsi_col] - df[rsi_sma_col]
+            if show_progress: progress.update(t_phase, advance=1); progress.update(t_tf, advance=1)
 
-        ichimoku_df = df.ta.ichimoku(append=False)[0]
-        df = pd.concat([df, ichimoku_df], axis=1)
+            # --- Faza 3: EMA/DEMA/TEMA + sygnały ---
+            df.ta.ema(length=20, append=True); df.ta.ema(length=50, append=True); df.ta.ema(length=200, append=True)
+            df.ta.dema(length=50, append=True); df.ta.tema(length=50, append=True)
+            if 'EMA_200' in df.columns:
+                df['dist_from_ema_200'] = (df['close'] - df['EMA_200']) / df['EMA_200']
+            if 'EMA_20' in df.columns and 'EMA_50' in df.columns:
+                df['ema_cross_signal'] = (df['EMA_20'] > df['EMA_50']).astype(int)
+            if show_progress: progress.update(t_phase, advance=1); progress.update(t_tf, advance=1)
 
-        # Pęd/zmienność wskaźników
-        if 'RSI_14' in df.columns:
-            df['RSI_14_roc_1'] = df['RSI_14'].diff()
-            df['RSI_14_vol_10'] = df['RSI_14'].rolling(window=10).std()
-        if 'MACDh_12_26_9' in df.columns:
-            df['MACDh_12_26_9_roc_1'] = df['MACDh_12_26_9'].diff()
+            # --- Faza 4: SuperTrend / Ichimoku ---
+            st_df = df.ta.supertrend(append=False)
+            if st_df is not None and not st_df.empty:
+                direction_col_name = next((c for c in st_df.columns if 'SUPERTd' in c), None)
+                if direction_col_name: df[direction_col_name] = st_df[direction_col_name]
+            ichimoku_df = df.ta.ichimoku(append=False)[0]
+            df = pd.concat([df, ichimoku_df], axis=1)
+            if show_progress: progress.update(t_phase, advance=1); progress.update(t_tf, advance=1)
 
-        df.ta.squeeze(append=True)
-        df.ta.donchian(append=True)
-        df.ta.pvo(append=True)
-        df.ta.kvo(append=True)
-        df.ta.skew(length=30, append=True)
-        df.ta.kurtosis(length=30, append=True)
+            # --- Faza 5: Momentum zmienność + squeeze/donchian/pvo/kvo/skew/kurtosis ---
+            if 'RSI_14' in df.columns:
+                df['RSI_14_roc_1'] = df['RSI_14'].diff()
+                df['RSI_14_vol_10'] = df['RSI_14'].rolling(window=10).std()
+            if 'MACDh_12_26_9' in df.columns:
+                df['MACDh_12_26_9_roc_1'] = df['MACDh_12_26_9'].diff()
+            df.ta.squeeze(append=True); df.ta.donchian(append=True)
+            df.ta.pvo(append=True); df.ta.kvo(append=True)
+            df.ta.skew(length=30, append=True); df.ta.kurtosis(length=30, append=True)
+            if show_progress: progress.update(t_phase, advance=1); progress.update(t_tf, advance=1)
 
-        # PSAR (tylko reversal)
-        psar_df = df.ta.psar(append=False)
-        if psar_df is not None and not psar_df.empty:
-            reversal_col = next((col for col in psar_df.columns if 'PSARr' in col), None)
-            if reversal_col: df[reversal_col] = psar_df[reversal_col]
+            # --- Faza 6: PSAR + Candle patterns ---
+            psar_df = df.ta.psar(append=False)
+            if psar_df is not None and not psar_df.empty:
+                reversal_col = next((c for c in psar_df.columns if 'PSARr' in c), None)
+                if reversal_col: df[reversal_col] = psar_df[reversal_col]
+            df.ta.cdl_pattern(name=['engulfing','doji','hammer','shootingstar'], append=True)
+            if show_progress: progress.update(t_phase, advance=1); progress.update(t_tf, advance=1)
 
-        # Wzorce świecowe
-        df.ta.cdl_pattern(name="all", append=True)
+            # --- Faza 7: Fibo + ZigZag ---
+            df = add_fibonacci_features(df, window=100)
+            df = add_zigzag_features(df)
+            if show_progress: progress.update(t_phase, advance=1); progress.update(t_tf, advance=1)
 
-        # Fibo + ZigZag
-        print(f"Dodawanie cech Fibonacciego dla interwału {tf_name}...")
-        df = add_fibonacci_features(df, window=100)
-        df = add_zigzag_features(df)
+            # --- Faza 8: Lekkie zaawansowane ---
+            df = add_volatility_risk_features(df, daily=False, window=60)
+            df = add_quantile_channel_features(df, window=100)
+            df = add_vol_norm_and_regime_interactions(df)
+            if show_progress: progress.update(t_phase, advance=1); progress.update(t_tf, advance=1)
 
-        # Lekkie zaawansowane (na wszystkich TF)
-        df = add_volatility_risk_features(df, daily=False, window=60)
-        df = add_quantile_channel_features(df, window=100)
-        df = add_vol_norm_and_regime_interactions(df)
+            # --- Heavy pack (tylko base_tf), rozbite na 10 kroków ---
+            if tf_name == base_tf:
+                df = add_entropy_features(df, window=192);           progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_memory_fractal_features(df, window=192);    progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_intraday_seasonality(df, window_days=20);   progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_roll_spread(df, window=200);                progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_variance_ratio(df, k_list=(2,4,8,16));      progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_kalman_trend(df, q=1e-5, r=5e-4);           progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_up_down_vol(df, window=120);                progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_market_profile(df, window=400, bins=40);    progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_vol_scaled_momentum(df, (10,20,50), 50);    progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_cusum_events(df, threshold=3e-3);           progress.update(t_heavy, advance=1) if show_progress else None
+                df = add_vpin_like(df, bucket_vol=None, lookback=30) # bonus poza licznik 10
 
-        # Cięższe – tylko na bazowym TF
-        if tf_name == base_tf:
-            df = add_entropy_features(df, window=256)
-            df = add_memory_fractal_features(df, window=256)
-            df = add_intraday_seasonality(df, window_days=20)
-            df = add_roll_spread(df, window=200)
-            df = add_variance_ratio(df, k_list=(2,4,8,16))
-            df = add_kalman_trend(df, q=1e-5, r=5e-4)
-            df = add_up_down_vol(df, window=120)
-            df = add_market_profile(df, window=600, bins=60)
-            df = add_vol_scaled_momentum(df, horizons=(10,20,50), vol_win=50)
-            df = add_cusum_events(df, threshold=3e-3)
-            df = add_vpin_like(df, bucket_vol=None, lookback=30)
+            all_dfs[tf_name] = df
 
-        all_dfs[tf_name] = df
+        # 3) Dollar Bars
+        dbars = build_dollar_bars(all_dfs[base_tf], threshold_multiplier=20)
+        all_dfs[base_tf] = add_features_from_dollar_bars(all_dfs[base_tf], dbars, suffix='_DB')
+        if show_progress: progress.update(t_dbars, advance=1)
 
-    # 3) Dollar Bars – licz raz na bazowym TF i zmerguj do bazowego DF
-    if base_tf not in all_dfs:
-        raise ValueError("Brak danych dla interwału bazowego.")
-    dbars = build_dollar_bars(all_dfs[base_tf], threshold_multiplier=20)
-    all_dfs[base_tf] = add_features_from_dollar_bars(all_dfs[base_tf], dbars, suffix='_DB')
+        # 4) Merge TF-ów (postęp po każdym TF≠base)
+        base_df = all_dfs[base_tf].add_suffix(f'_{base_tf}')
+        base_df.rename(columns={
+            f'open_{base_tf}':'open', f'high_{base_tf}':'high', f'low_{base_tf}':'low',
+            f'close_{base_tf}':'close', f'volume_{base_tf}':'volume', f'turnover_{base_tf}':'turnover'
+        }, inplace=True)
 
-    # 4) Łączenie interwałów (asof backward → bez lookahead)
-    base_df = all_dfs[base_tf].add_suffix(f'_{base_tf}')
-    base_df.rename(columns={
-        f'open_{base_tf}': 'open',
-        f'high_{base_tf}': 'high',
-        f'low_{base_tf}': 'low',
-        f'close_{base_tf}': 'close',
-        f'volume_{base_tf}': 'volume',
-        f'turnover_{base_tf}': 'turnover'
-    }, inplace=True)
+        final_df = base_df
+        for tf_name, df_to_merge in all_dfs.items():
+            if tf_name == base_tf:
+                continue
+            df_with_suffix = df_to_merge.drop(
+                columns=['open','high','low','close','volume','turnover'],
+                errors='ignore'
+            ).add_suffix(f'_{tf_name}')
+            final_df = pd.merge_asof(final_df.sort_index(),
+                                     df_with_suffix.sort_index(),
+                                     left_index=True, right_index=True,
+                                     direction='backward')
+            if show_progress: progress.update(t_merge, advance=1)
 
-    final_df = base_df
-    for tf_name, df_to_merge in all_dfs.items():
-        if tf_name == base_tf:
-            continue
-        df_with_suffix = df_to_merge.drop(
-            columns=['open', 'high', 'low', 'close', 'volume', 'turnover'],
-            errors='ignore'
-        ).add_suffix(f'_{tf_name}')
-        final_df = pd.merge_asof(final_df.sort_index(),
-                                 df_with_suffix.sort_index(),
-                                 left_index=True, right_index=True,
-                                 direction='backward')
+        # 5) Price Action
+        atr_col_name = f'ATRr_14_{base_tf}'
+        if atr_col_name not in final_df.columns:
+            final_df.ta.atr(col_names=(atr_col_name,), append=True)
 
-    # 5) Cechy Price Action (bazowy TF)
-    atr_col_name = f'ATRr_14_{base_tf}'
-    if atr_col_name not in final_df.columns:
-        final_df.ta.atr(col_names=(atr_col_name,), append=True)
+        pa_df = final_df[['open','high','low','close','volume', atr_col_name]].copy()
+        pa_df['impulse_strength'] = (pa_df['close'] - pa_df['open']) / (pa_df['high'] - pa_df['low']).replace(0, 1)
+        pa_df['volatility_burst'] = (pa_df['high'] - pa_df['low']) / pa_df[atr_col_name].replace(0, 1)
+        pa_df['closing_position'] = (pa_df['close'] - pa_df['low']) / (pa_df['high'] - pa_df['low']).replace(0, 1)
+        volume_rolling_mean = pa_df['volume'].rolling(window=20).mean().replace(0, 1)
+        pa_df['volume_spike'] = pa_df['volume'] / volume_rolling_mean
+        for col in ['impulse_strength','volatility_burst','closing_position','volume_spike']:
+            for n in [1,2,3]:
+                pa_df[f'{col}_lag_{n}'] = pa_df[col].shift(n)
+        pa_features_to_add = [c for c in pa_df.columns if c not in ['open','high','low','close','volume', atr_col_name]]
+        final_df = pd.concat([final_df, pa_df[pa_features_to_add]], axis=1)
+        if show_progress: progress.update(t_pa, advance=1)
 
-    pa_df = final_df[['open', 'high', 'low', 'close', 'volume', atr_col_name]].copy()
-    pa_df['impulse_strength'] = (pa_df['close'] - pa_df['open']) / (pa_df['high'] - pa_df['low']).replace(0, 1)
-    pa_df['volatility_burst'] = (pa_df['high'] - pa_df['low']) / pa_df[atr_col_name].replace(0, 1)
-    pa_df['closing_position'] = (pa_df['close'] - pa_df['low']) / (pa_df['high'] - pa_df['low']).replace(0, 1)
-    volume_rolling_mean = pa_df['volume'].rolling(window=20).mean().replace(0, 1)
-    pa_df['volume_spike'] = pa_df['volume'] / volume_rolling_mean
+        # 6) Diagnostyka / brak lookahead
+        assert_no_lookahead_after_merge(final_df)
 
-    for col in ['impulse_strength', 'volatility_burst', 'closing_position', 'volume_spike']:
-        for n in [1, 2, 3]:
-            pa_df[f'{col}_lag_{n}'] = pa_df[col].shift(n)
+        # 7) Pivot Points
+        final_df = add_pivot_points(final_df)
+        if show_progress: progress.update(t_piv, advance=1)
 
-    pa_features_to_add = [c for c in pa_df.columns if c not in ['open','high','low','close','volume', atr_col_name]]
-    final_df = pd.concat([final_df, pa_df[pa_features_to_add]], axis=1)
+        # 8) Gating
+        adx_col_name = f'ADX_14_{base_tf}'
+        if adx_col_name in final_df.columns:
+            final_df['market_regime_trending'] = (final_df[adx_col_name] > 25).astype(int)
+        final_df = add_gating_features(final_df, base_tf=base_tf)
+        if show_progress: progress.update(t_gate, advance=1)
 
-    # 6) Diagnostyka / brak lookahead
-    assert_no_lookahead_after_merge(final_df)
-    print("\n[DIAGNOSTYKA] Sprawdzanie indeksu PRZED wywołaniem add_pivot_points:")
-    print(f"Typ indeksu: {type(final_df.index)}")
-    print("Pierwsze 5 wartości indeksu:")
-    print(final_df.index[:5])
+        # 9) Cechy czasowe (sin/cos)
+        if not pd.api.types.is_datetime64_any_dtype(final_df.index):
+            final_df.index = pd.to_datetime(final_df.index)
+        dow, hod = final_df.index.dayofweek, final_df.index.hour
+        final_df['hour_sin'] = np.sin(2*np.pi*hod/24)
+        final_df['hour_cos'] = np.cos(2*np.pi*hod/24)
+        final_df['day_sin']  = np.sin(2*np.pi*dow/7)
+        final_df['day_cos']  = np.cos(2*np.pi*dow/7)
+        if show_progress: progress.update(t_time, advance=1)
 
-    # 7) Dzienne Pivot Points
-    final_df = add_pivot_points(final_df)
+        # 10) Winsoryzacja
+        final_df = winsorize_df(final_df, lower=0.005, upper=0.995)
+        if show_progress: progress.update(t_win, advance=1)
 
-    # 8) Regime ADX + bramkowanie (gating)
-    adx_col_name = f'ADX_14_{base_tf}'
-    if adx_col_name in final_df.columns:
-        final_df['market_regime_trending'] = (final_df[adx_col_name] > 25).astype(int)
+        print(f"Zakończono przygotowywanie cech. Finalny kształt danych: {final_df.shape}", flush=True)
+        final_df = downcast_float32(final_df)
 
-    final_df = add_gating_features(final_df, base_tf=base_tf)
-
-    # 9) Cechy czasowe (sin/cos)
-    print("Dodawanie cech czasowych...")
-    if not pd.api.types.is_datetime64_any_dtype(final_df.index):
-        final_df.index = pd.to_datetime(final_df.index)
-    day_of_week, hour_of_day = final_df.index.dayofweek, final_df.index.hour
-    final_df['hour_sin'] = np.sin(2 * np.pi * hour_of_day / 24)
-    final_df['hour_cos'] = np.cos(2 * np.pi * hour_of_day / 24)
-    final_df['day_sin'] = np.sin(2 * np.pi * day_of_week / 7)
-    final_df['day_cos'] = np.cos(2 * np.pi * day_of_week / 7)
-
-    # 10) Winsoryzacja (ogony 0.5%/99.5%)
-    final_df = winsorize_df(final_df, lower=0.005, upper=0.995)
-
-    print(f"Zakończono przygotowywanie cech. Finalny kształt danych: {final_df.shape}")
-    return final_df
+        return final_df
