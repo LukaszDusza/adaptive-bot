@@ -199,6 +199,18 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         df.ta.stoch(append=True); df.ta.adx(append=True); df.ta.obv(append=True); df.ta.vwap(append=True)
         df.ta.cci(append=True); df.ta.mfi(append=True); df.ta.aroon(append=True)
 
+        # "Inteligentny" wskaźnik - RSI vs jego własna średnia
+        rsi_col = 'RSI_14'
+        if rsi_col in df.columns:
+            # Oblicz SMA z RSI
+            rsi_sma_col = 'RSI_14_SMA_10'
+            df[rsi_sma_col] = df.ta.sma(close=df[rsi_col], length=10, append=False)
+
+            # Stwórz sygnał przecięcia i dystans (zabezpieczone przed NaNami w SMA)
+            if df[rsi_sma_col].notna().any():
+                df['RSI_vs_SMA_signal'] = (df[rsi_col] > df[rsi_sma_col]).astype(int)
+                df['RSI_SMA_dist'] = df[rsi_col] - df[rsi_sma_col]
+
         df.ta.ema(length=20, append=True); df.ta.ema(length=50, append=True); df.ta.ema(length=200, append=True)
         df.ta.dema(length=50, append=True); df.ta.tema(length=50, append=True)
 
@@ -235,6 +247,10 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         df.ta.donchian(append=True)
         df.ta.pvo(append=True)
         df.ta.kvo(append=True)
+
+        # Cechy statystyczne (charakter rynku)
+        df.ta.skew(length=30, append=True)
+        df.ta.kurtosis(length=30, append=True)
 
         # Parabolic SAR (w inteligentny sposób, aby uniknąć NaN)
         psar_df = df.ta.psar(append=False)
