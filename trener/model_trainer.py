@@ -5,6 +5,7 @@ import joblib
 import json
 import asyncio
 from typing import Dict, Any, List
+from sklearn.metrics import f1_score
 
 from optuna import trial
 from sklearn.model_selection import TimeSeriesSplit
@@ -49,6 +50,7 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
     """Przeprowadza trening i walidację, a na końcu zwraca dokładność na zbiorze holdout."""
 
     print(f"\n[KROK 3/4] Selekcja {config.TOP_N_FEATURES} najważniejszych cech...")
+    df = df.loc[:, ~df.columns.duplicated()]
     all_features = [col for col in df.columns if col not in ['open', 'high', 'low', 'close', 'volume', 'target']]
     holdout_split_idx = int(len(df) * (1 - config.HOLDOUT_SIZE))
     train_val_df = df.iloc[:holdout_split_idx]
@@ -101,8 +103,10 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
     y_holdout_pred = final_model.predict(X_holdout_scaled)
     holdout_accuracy = accuracy_score(y_holdout, y_holdout_pred)
 
-    # Na koniec zwracamy wynik, aby Optuna wiedziała, jak ocenić ten "trial"
-    return holdout_accuracy
+    f1 = f1_score(y_holdout, y_holdout_pred, average=None, labels=[0, 2])
+    mean_f1_score = np.mean(f1)
+
+    return mean_f1_score
 
 
 def objective(trial: optuna.Trial, df_features: pd.DataFrame) -> float:
@@ -111,25 +115,30 @@ def objective(trial: optuna.Trial, df_features: pd.DataFrame) -> float:
     Optuna wywołuje tę funkcję wielokrotnie z różnymi parametrami.
     """
     # -- Krok 1: Optuna sugeruje hiperparametry do przetestowania w tej iteracji --
-    target_pct = trial.suggest_float('PRICE_TARGET_PCT', 0.005, 0.03, step=0.005)
-    horizon = trial.suggest_int('HORIZON_BARS', 12, 48, step=6)
+    # target_pct = trial.suggest_float('PRICE_TARGET_PCT', 0.005, 0.015, step=0.005)
+    # horizon = trial.suggest_int('HORIZON_BARS', 6, 24, step=6)
+    target_pct = 0.01
+    horizon = 32
 
+    # Krok 2: Optuna sugeruje już tylko hiperparametry modelu --
     model_params = {
         'objective': 'multiclass',
         'n_estimators': trial.suggest_int('n_estimators', 200, 1200, step=100),
         'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
         'max_depth': trial.suggest_int('max_depth', 3, 7),
         'num_leaves': trial.suggest_int('num_leaves', 20, 100),
-        'random_state': 42,
+        'random_state': config.RANDOM_STATE,
         'n_jobs': -1,
         'verbose': -1
     }
     model_for_trial = LGBMClassifier(**model_params)
 
-    # -- Krok 2: Uruchomienie procesu z użyciem sugerowanych parametrów --
+    # Krok 3: Uruchomienie procesu z użyciem zadanych parametrów --
     print(f"\n--- Rozpoczynanie Trial #{trial.number} ---")
-    print(
-        f"Parametry: Target={target_pct * 100:.1f}%, Horyzont={horizon}, n_est={model_params['n_estimators']}, lr={model_params['learning_rate']:.4f}, max_depth={model_params['max_depth']}")
+    # Zmieniony print, aby odzwierciedlał stałe parametry
+    print(f"Parametry: Target={target_pct * 100:.1f}% (stały), Horyzont={horizon} (stały)")
+    print(f"Parametry modelu: n_est={model_params['n_estimators']}, lr={model_params['learning_rate']:.4f}, max_depth={model_params['max_depth']}")
+
 
     df = df_features.copy()
     targets = calculate_multiclass_target(df, target_pct, horizon)
@@ -140,12 +149,10 @@ def objective(trial: optuna.Trial, df_features: pd.DataFrame) -> float:
         print("Zbyt mało danych po obróbce, pomijanie triala.")
         return 0.0
 
-    holdout_accuracy = train_unified_model(df, model_for_trial)
-
-    print(f"--- Trial #{trial.number} Zakończony | Dokładność Holdout: {holdout_accuracy:.4f} ---")
-
-    return holdout_accuracy
-
+    # Zmieniliśmy metrykę na F1-score
+    f1_result = train_unified_model(df, model_for_trial)
+    print(f"--- Trial #{trial.number} Zakończony | Średni F1-score (UP/DOWN): {f1_result:.4f} ---")
+    return f1_result
 
 async def main() -> None:
     # Krok 1: Pobranie i przygotowanie cech (bez zmian, wykonuje się raz na start workera)
