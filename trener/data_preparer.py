@@ -6,37 +6,73 @@ import numpy as np
 
 # W pliku data_preparer.py
 
+def add_zigzag_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Oblicza wskaźnik ZigZag i tworzy z niego użyteczne cechy.
+    Wersja poprawiona, aby unikać błędu 'ValueError: Length of values...'.
+    """
+    print(f"Dodawanie cech ZigZag...")
+    zigzag_df = df.ta.zigzag(high='high', low='low', append=False)
+    if zigzag_df is None or zigzag_df.empty:
+        return df
+
+    df['zigzag_signal'] = zigzag_df.iloc[:, 1]
+
+    # === POPRAWIONY BLOK LOGIKI ===
+    # Krok 1: Stwórz "rzadką" serię, która ma wartości tylko w punktach zwrotnych
+    pivot_prices = df['close'].where(df['zigzag_signal'].notna())
+    pivot_times = df.index.to_series().where(df['zigzag_signal'].notna())
+
+    # Krok 2: Użyj ffill (forward-fill), aby wypełnić puste miejsca ostatnią znaną wartością
+    df['last_pivot_price'] = pivot_prices.ffill()
+    last_pivot_time = pivot_times.ffill()
+
+    # Krok 3: Oblicz cechy na podstawie wypełnionych danych
+    df['dist_from_last_pivot'] = (df['close'] - df['last_pivot_price']) / df['last_pivot_price']
+
+    time_diff = df.index.to_series().diff().median()
+    if pd.notna(time_diff):
+        df['bars_since_last_pivot'] = (df.index - last_pivot_time) / time_diff
+    else:
+        df['bars_since_last_pivot'] = 0
+    # ===============================
+
+    df.fillna({'zigzag_signal': 0, 'dist_from_last_pivot': 0, 'bars_since_last_pivot': 0}, inplace=True)
+    df.drop(columns=['last_pivot_price'], inplace=True, errors='ignore')
+
+    return df
+
 def add_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
     """
     Oblicza dzienne Pivot Points i dołącza je do danych intraday.
-    Wersja ostateczna, z zabezpieczeniem na wypadek, gdyby resample zwróciło Serię.
+    Wersja ostateczna, używająca groupby zamiast zepsutego resample.
     """
     print("Obliczanie dziennych Pivot Points...")
     df_copy = df.copy()
     df_copy.index = pd.to_datetime(df_copy.index)
 
-    # 1. Stwórz dane dzienne
-    daily_agg = {
-        'high': 'max', 'low': 'min', 'close': lambda x: x.iloc[-1] if not x.empty else np.nan
-    }
-    df_daily = df_copy.resample('1D', offset='-2h').agg(daily_agg).dropna()
+    # === OSTATECZNA POPRAWKA: Używamy groupby zamiast resample ===
+    # Krok 1: Stwórz tymczasową kolumnę z samą datą
+    df_copy['date_for_grouping'] = df_copy.index.date
 
-    # === OSTATECZNA POPRAWKA: Obsługa nietypowego przypadku brzegowego ===
-    # Jeśli w wyniku resamplingu powstanie Seria (zamiast DataFrame),
-    # konwertujemy ją z powrotem na DataFrame o prawidłowej strukturze.
-    if isinstance(df_daily, pd.Series):
-        df_daily = df_daily.to_frame().T
-    # ====================================================================
+    # Krok 2: Grupuj po dacie i agreguj, aby uzyskać dane dzienne
+    daily_agg = {
+        'high': 'max', 'low': 'min', 'close': 'last'
+    }
+    df_daily = df_copy.groupby('date_for_grouping').agg(daily_agg)
+    # =============================================================
+
+    print(f"-> Znaleziono {len(df_daily)} dni z danymi do obliczenia pivotów.")
 
     if df_daily.empty:
         print("Ostrzeżenie: Brak danych dziennych do obliczenia Pivot Points. Pomijanie kroku.")
-        return df
+        return df.drop(columns=['date_for_grouping'], errors='ignore')
 
-    prev_day = df_daily.shift(1).dropna()  # Dodajemy dropna() tutaj dla bezpieczeństwa
+    prev_day = df_daily.shift(1).dropna()
 
     if prev_day.empty:
-        print("Ostrzeżenie: Brak danych z poprzedniego dnia do obliczenia Pivot Points. Pomijanie kroku.")
-        return df
+        print("Ostrzeżenie: Brak danych z poprzedniego dnia. Pomijanie kroku.")
+        return df.drop(columns=['date_for_grouping'], errors='ignore')
 
     # 2. Oblicz poziomy Pivot Points
     pp = (prev_day['high'] + prev_day['low'] + prev_day['close']) / 3
@@ -45,16 +81,22 @@ def add_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
     r2 = pp + (prev_day['high'] - prev_day['low'])
     s2 = pp - (prev_day['high'] - prev_day['low'])
 
-    prev_day_date_index = pd.to_datetime(prev_day.index).date
+    pivots_for_log = pd.DataFrame({'PP': pp, 'R1': r1, 'S1': s1}, index=prev_day.index)
+    print("-> Przykładowe obliczone poziomy Pivot (pierwsze 3 dni):")
+    print(pivots_for_log.head(3).to_string())
 
-    pp_series = pd.Series(pp, index=prev_day_date_index)
-    r1_series = pd.Series(r1, index=prev_day_date_index)
-    s1_series = pd.Series(s1, index=prev_day_date_index)
-    r2_series = pd.Series(r2, index=prev_day_date_index)
-    s2_series = pd.Series(s2, index=prev_day_date_index)
+    # Indeksem prev_day jest teraz data, więc nie musimy używać .date
+    prev_day_date_index = prev_day.index
+
+    pp_series = pd.Series(pp.values, index=prev_day_date_index)
+    r1_series = pd.Series(r1.values, index=prev_day_date_index)
+    s1_series = pd.Series(s1.values, index=prev_day_date_index)
+    r2_series = pd.Series(r2.values, index=prev_day_date_index)
+    s2_series = pd.Series(s2.values, index=prev_day_date_index)
 
     pivots_map = {'PP': pp_series, 'R1': r1_series, 'S1': s1_series, 'R2': r2_series, 'S2': s2_series}
 
+    # Używamy tej samej kolumny tymczasowej do mapowania
     df_copy['date_map'] = df_copy.index.date
 
     for level_name, level_series in pivots_map.items():
@@ -62,7 +104,10 @@ def add_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
         df_copy[f'dist_to_{level_name}'] = \
             (df_copy['close'] - pivot_values) / pivot_values.replace(0, np.nan)
 
-    df_copy.drop(columns=['date_map'], inplace=True)
+    # Usuń obie kolumny tymczasowe
+    df_copy.drop(columns=['date_map', 'date_for_grouping'], inplace=True, errors='ignore')
+
+    print("-> Cechy oparte na Pivot Points zostały dodane.")
 
     return df_copy
 
@@ -186,7 +231,10 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         if 'MACDh_12_26_9' in df.columns:
             df['MACDh_12_26_9_roc_1'] = df['MACDh_12_26_9'].diff()
 
-        df.ta.squeeze(append=True); df.ta.donchian(append=True)
+        df.ta.squeeze(append=True)
+        df.ta.donchian(append=True)
+        df.ta.pvo(append=True)
+        df.ta.kvo(append=True)
 
         # Parabolic SAR (w inteligentny sposób, aby uniknąć NaN)
         psar_df = df.ta.psar(append=False)
@@ -200,6 +248,10 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         # === DODANIE CECH FIBONACCIEGO ===
         print(f"Dodawanie cech Fibonacciego dla interwału {tf_name}...")
         df = add_fibonacci_features(df, window=100)
+
+        # === NOWY BLOK: Dodanie cech ZigZag ===
+        df = add_zigzag_features(df)
+        # ====================================
 
         all_dfs[tf_name] = df
 
