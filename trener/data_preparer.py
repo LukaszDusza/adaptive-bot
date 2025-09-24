@@ -22,6 +22,78 @@ except Exception:
 
 import numpy as np  # ensure available above
 
+def log_final_training_summary(df: pd.DataFrame, target_col: str | None = None) -> None:
+    """
+    Krótki raport o gotowym zbiorze cech:
+    - rozmiar, liczba kolumn num./nienum.,
+    - ile wierszy zostaje po dropna (numeryczne),
+    - NaN w komórkach (%),
+    - zakres czasowy i RAM,
+    - (opcjonalnie) ile wierszy z niepustym targetem i przecięciem z feature'ami.
+    """
+    try:
+        from rich.table import Table
+        from rich.panel import Panel
+        from rich.console import Console
+        console = Console(force_terminal=True)
+        use_rich = True
+    except Exception:
+        console = None
+        use_rich = False
+
+    rows_total, cols_total = df.shape
+    num_df = df.select_dtypes(include=[np.number])
+    cols_num = num_df.shape[1]
+    cols_cat = cols_total - cols_num
+
+    rows_num_usable = int(num_df.dropna().shape[0])  # dropna po kolumnach numerycznych
+    rows_all_usable = int(df.dropna().shape[0])      # dropna po wszystkich kolumnach (bardziej restrykcyjnie)
+
+    nan_cells = int(df.isna().sum().sum())
+    total_cells = int(rows_total * cols_total) if rows_total and cols_total else 0
+    nan_pct_cells = (nan_cells / total_cells) if total_cells else 0.0
+
+    mem_mb = float(df.memory_usage(deep=True).sum()) / 1e6
+    try:
+        start_ts = pd.to_datetime(df.index.min())
+        end_ts   = pd.to_datetime(df.index.max())
+        span_str = f"{start_ts} → {end_ts}"
+    except Exception:
+        span_str = "-"
+
+    # Target (opcjonalnie)
+    tgt_info = ""
+    if target_col and target_col in df.columns:
+        tgt_nonnull = int(df[target_col].notna().sum())
+        rows_with_target_and_features = int(num_df.join(df[[target_col]]).dropna().shape[0])
+        tgt_info = f"\nTarget '{target_col}': {tgt_nonnull} niepustych; " \
+                   f"użytecznych (target ∩ feat.num, bez NaN): {rows_with_target_and_features}"
+
+    if use_rich:
+        t = Table(title="Finalny zestaw do treningu — podsumowanie", show_header=False)
+        t.add_row("Wiersze (razem)", f"{rows_total:,}")
+        t.add_row("Kolumny (razem)", f"{cols_total:,}")
+        t.add_row("Kolumny numeryczne / inne", f"{cols_num:,} / {cols_cat:,}")
+        t.add_row("Wiersze użyteczne (dropna na numerycznych)", f"{rows_num_usable:,}")
+        t.add_row("Wiersze w pełni kompletne (dropna na wszystkich)", f"{rows_all_usable:,}")
+        t.add_row("NaN w komórkach", f"{nan_cells:,} ({nan_pct_cells:.1%})")
+        t.add_row("Zakres czasu", span_str)
+        t.add_row("RAM (DataFrame)", f"{mem_mb:.1f} MB")
+        console.print(t)
+        if tgt_info:
+            console.print(Panel.fit(tgt_info, title="Target", border_style="cyan"))
+    else:
+        print("\n=== Finalny zestaw do treningu — podsumowanie ===")
+        print(f"Wiersze: {rows_total:,} | Kolumny: {cols_total:,} (num: {cols_num:,}, inne: {cols_cat:,})")
+        print(f"Użyteczne wiersze (dropna na num): {rows_num_usable:,}")
+        print(f"Wiersze kompletne (dropna na wszystkich): {rows_all_usable:,}")
+        print(f"NaN komórki: {nan_cells:,} ({nan_pct_cells:.1%})")
+        print(f"Zakres czasu: {span_str}")
+        print(f"RAM: {mem_mb:.1f} MB")
+        if tgt_info:
+            print(tgt_info)
+
+
 # ---------- ATR (Wilder) ----------
 if _HAS_NUMBA:
     @njit(cache=True, fastmath=True)
@@ -190,7 +262,102 @@ else:
             ids.append(b)
         return np.array(ids, dtype=np.int64)
 
+def add_vol_estimators(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    # Garman–Klass
+    rs = (np.log(d['high']) - np.log(d['low']))**2
+    gm = (np.log(d['close']) - np.log(d['open']))**2
+    d['vol_gk'] = 0.5*rs - (2*np.log(2)-1)*gm
 
+    # Rogers–Satchell
+    ho = np.log(d['high']) - np.log(d['open'])
+    lo = np.log(d['low'])  - np.log(d['open'])
+    co = np.log(d['close'])- np.log(d['open'])
+    d['vol_rs'] = (ho*(ho-co) + lo*(lo-co))
+
+    # Yang–Zhang (przybliżenie intraday; najlepiej na danych dziennych)
+    prev_close = d['close'].shift(1)
+    oc = np.log(d['open']) - np.log(prev_close)
+    co = np.log(d['close'])- np.log(d['open'])
+    k = 0.34/(1.34 + (len(d)-1)/(len(d)))  # stała wag
+    d['vol_yz'] = oc.rolling(20).var() + k* gm.rolling(20).var() + (1-k)* rs.rolling(20).var()
+    return d
+
+def add_wick_body_features(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    rng = (d['high']-d['low']).replace(0, np.nan)
+    body = (d['close']-d['open']).abs()
+    d['body_to_range'] = body / rng
+    d['upper_wick'] = (d['high']-d[['open','close']].max(axis=1)) / rng
+    d['lower_wick'] = (d[['open','close']].min(axis=1)-d['low']) / rng
+    d[['upper_wick','lower_wick','body_to_range']] = d[['upper_wick','lower_wick','body_to_range']].fillna(0.0)
+
+    # asymetria knotów i “agresja” świecy
+    d['wick_asym'] = d['upper_wick'] - d['lower_wick']
+    d['body_signed'] = (d['close']-d['open'])/rng.replace(0, np.nan)
+    d['body_signed'] = d['body_signed'].fillna(0.0)
+    return d
+
+def add_breakout_pressure(df: pd.DataFrame, win: int = 100, q_hi=0.95, q_lo=0.05) -> pd.DataFrame:
+    d = df.copy()
+    qh = d['close'].rolling(win).quantile(q_hi)
+    ql = d['close'].rolling(win).quantile(q_lo)
+    rng = (qh-ql).replace(0, np.nan)
+    d['brk_pressure'] = (d['close'] - (ql + qh)/2) / rng
+    d['near_hi'] = (d['close'] - qh)/rng
+    d['near_lo'] = (d['close'] - ql)/rng
+    return d
+
+def add_runlength_features(df: pd.DataFrame) -> pd.DataFrame:
+    d = df.copy()
+    r = np.sign(d['close'].diff()).fillna(0.0).to_numpy()
+    up = np.zeros_like(r); dn = np.zeros_like(r)
+    cu = cd = 0
+    for i in range(len(r)):
+        if r[i] > 0: cu += 1; cd = 0
+        elif r[i] < 0: cd += 1; cu = 0
+        else: cu = cd = 0
+        up[i] = cu; dn[i] = cd
+    d['streak_up'] = up
+    d['streak_dn'] = dn
+    return d
+
+def add_autocorr_features(df: pd.DataFrame, lags=(1,2,5,10)) -> pd.DataFrame:
+    d = df.copy()
+    ret = d['close'].pct_change().fillna(0.0)
+    rnk = ret.rank(pct=True).fillna(0.5)
+    for L in lags:
+        d[f'ac_ret_{L}'] = ret.rolling(200).apply(lambda x: x.autocorr(L), raw=False)
+        d[f'ac_rank_{L}'] = rnk.rolling(200).apply(lambda x: x.autocorr(L), raw=False)
+    return d
+
+def add_fft_cycle_features(df: pd.DataFrame, win=256) -> pd.DataFrame:
+    d = df.copy()
+    x = d['close'].pct_change().fillna(0.0).to_numpy()
+    dom_per = np.full(len(x), np.nan, dtype=float)
+    purity = np.full(len(x), np.nan, dtype=float)
+    for i in range(win, len(x)):
+        seg = x[i-win:i]
+        seg = seg - seg.mean()
+        spec = np.abs(np.fft.rfft(seg))**2
+        # pominąć DC
+        spec[0] = 0.0
+        k = np.argmax(spec)
+        if k <= 0:
+            continue
+        dom_per[i] = win / k
+        purity[i]  = spec[k] / (spec.sum() + 1e-12)
+    d['fft_dom_period'] = dom_per
+    d['fft_purity'] = purity
+    return d
+
+def add_drawdown_features(df: pd.DataFrame, win=200) -> pd.DataFrame:
+    d = df.copy()
+    roll_max = d['close'].rolling(win, min_periods=1).max()
+    roll_min = d['close'].rolling(win, min_periods=1).min()
+    d['dd_from_max'] = (d['close'] - roll_max) / roll_max.replace(0, np.nan)
+    d['ru_from_min'] = (d['close'] - roll_min) / roll_min.replace(0, np.nan)
+    return d
 
 def downcast_float32(df: pd.DataFrame, exclude=('open','high','low','close','volume','turnover')) -> pd.DataFrame:
     d = df.copy()
@@ -251,6 +418,23 @@ def winsorize_df(
 
     return d
 
+from sklearn.linear_model import TheilSenRegressor
+
+def add_theilsen_slope(df: pd.DataFrame, win=100) -> pd.DataFrame:
+    d = df.copy()
+    y = d['close'].to_numpy()
+    slopes = np.full(len(d), np.nan, dtype=float)
+    Xfull = np.arange(len(d)).reshape(-1,1)
+    model = TheilSenRegressor(random_state=0, fit_intercept=True)
+    for i in range(win, len(d)):
+        X = Xfull[i-win:i]
+        yy = y[i-win:i]
+        if np.any(~np.isfinite(yy)):
+            continue
+        model.fit(X, yy)
+        slopes[i] = model.coef_[0]
+    d['theilsen_slope'] = slopes
+    return d
 
 def add_gating_features(final_df: pd.DataFrame, base_tf: str) -> pd.DataFrame:
     """
@@ -497,13 +681,18 @@ def add_volatility_risk_features(df: pd.DataFrame, daily: bool = False, window: 
         tmp = d.copy()
         tmp['__date'] = pd.to_datetime(tmp.index).date
         daily_agg = tmp.groupby('__date').agg({
-            'high':'max','low':'min','open':'first','close':'last'
+            'high': 'max', 'low': 'min', 'open': 'first', 'close': 'last'
         })
-        # Parkinson/GK dzienny
+
+        # Dzienny Parkinson + Garman–Klass
         log_hl_d = np.log(_safe_div(daily_agg['high'], daily_agg['low']))
         log_co_d = np.log(_safe_div(daily_agg['close'], daily_agg['open']))
-        gk_d = 0.5*(log_hl_d**2) - (2*np.log(2)-1)*(log_co_d**2)
-        parkinson_d = (1.0/(4.0*np.log(2))) * (log_hl_d**2)
+        gk_d = 0.5 * (log_hl_d ** 2) - (2 * np.log(2) - 1) * (log_co_d ** 2)
+        parkinson_d = (1.0 / (4.0 * np.log(2))) * (log_hl_d ** 2)
+
+        date_index = pd.Series(d.index.to_series().dt.date, index=d.index)
+        d['parkinson_vol_D'] = date_index.map(parkinson_d).astype(float)
+        d['gk_vol_D'] = date_index.map(gk_d).astype(float)
 
         for name, series in {
             'parkinson_vol_D': np.sqrt(parkinson_d.clip(lower=0)),
@@ -962,6 +1151,11 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
             df = add_vol_norm_and_regime_interactions(df)
             if show_progress: progress.update(t_phase, advance=1); progress.update(t_tf, advance=1)
 
+            df = add_wick_body_features(df)
+            df = add_breakout_pressure(df, win=100)
+            df = add_runlength_features(df)
+            df = add_drawdown_features(df)
+
             # --- Heavy pack (tylko base_tf), rozbite na 10 kroków ---
             if tf_name == base_tf:
                 df = add_entropy_features(df, window=192);           progress.update(t_heavy, advance=1) if show_progress else None
@@ -974,7 +1168,12 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
                 df = add_market_profile(df, window=400, bins=40);    progress.update(t_heavy, advance=1) if show_progress else None
                 df = add_vol_scaled_momentum(df, (10,20,50), 50);    progress.update(t_heavy, advance=1) if show_progress else None
                 df = add_cusum_events(df, threshold=3e-3);           progress.update(t_heavy, advance=1) if show_progress else None
-                df = add_vpin_like(df, bucket_vol=None, lookback=30) # bonus poza licznik 10
+                df = add_vpin_like(df, bucket_vol=None, lookback=30)
+                df = add_vol_estimators(df)
+                df = add_autocorr_features(df, lags=(1, 2, 5, 10))
+                df = add_fft_cycle_features(df, win=256)
+                # opcjonalnie (cięższe):
+                df = add_theilsen_slope(df, win=120)
 
             all_dfs[tf_name] = df
 
@@ -1055,4 +1254,5 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = '5
         print(f"Zakończono przygotowywanie cech. Finalny kształt danych: {final_df.shape}", flush=True)
         final_df = downcast_float32(final_df)
 
+        log_final_training_summary(final_df, target_col=None)
         return final_df

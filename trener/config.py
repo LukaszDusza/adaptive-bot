@@ -4,7 +4,7 @@ from sklearn.preprocessing import StandardScaler
 # --- 1. Konfiguracja Danych i API ---
 TICKER = "DOGEUSDT"
 TRAIN_START_DATE = "2022-01-01"
-TRAIN_END_DATE = "2022-02-28"
+TRAIN_END_DATE = "2022-01-14"
 BASE_TIMEFRAME = '5m'  # Główny interwał analizy ('5m', '15m', '1h')
 
 # --- 2. Konfiguracja Procesu Treningu ---
