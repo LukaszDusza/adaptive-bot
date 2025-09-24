@@ -18,7 +18,7 @@ from data_preparer import prepare_feature_set_for_timeframe
 def calculate_multiclass_target(df: pd.DataFrame, horizon: int) -> pd.Series:
     print(f"Obliczanie celu (Typ: {config.TARGET_TYPE}, Horyzont: {horizon} barów)...")
 
-    outcomes = pd.Series(0, index=df.index, dtype=int)
+    outcomes = pd.Series(np.nan, index=df.index)
 
     if config.TARGET_TYPE == 'DYNAMIC_ATR':
         atr_col_name = f'ATRr_{config.FeatureConfig.ATR_LENGTH}_{config.BASE_TIMEFRAME}'
@@ -27,6 +27,7 @@ def calculate_multiclass_target(df: pd.DataFrame, horizon: int) -> pd.Series:
 
     for i in tqdm(range(len(df) - horizon), desc="Obliczanie celu", leave=False, ncols=100):
         entry_price = df['close'].iloc[i]
+        outcomes.iloc[i] = 0 # Domyślna wartość "neutral" dla próbek w pętli
 
         if config.TARGET_TYPE == 'DYNAMIC_ATR':
             current_atr = df[atr_col_name].iloc[i]
@@ -60,6 +61,10 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier, full_
     holdout_split_idx = int(len(df) * (1 - config.HOLDOUT_SIZE))
     train_val_df = df.iloc[:holdout_split_idx]
     holdout_df = df.iloc[holdout_split_idx:]
+
+    print(f"Stosowanie embarga: usuwanie ostatnich {config.HORIZON_BARS} rekordów ze zbioru treningowego...")
+    train_val_df = train_val_df.iloc[:-config.HORIZON_BARS]
+    print(f"Rozmiar zbioru treningowego po embargu: {len(train_val_df)}")
 
     x_train_val_fs = train_val_df[all_features]
     y_train_val_fs = train_val_df['target']
@@ -100,9 +105,9 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier, full_
             cv_scores.append(score)
 
         print(f"-> Średni F1-score z walidacji krzyżowej: {np.mean(cv_scores):.4f}")
-    # ==========================================================
 
     final_scaler = clone(config.SCALER)
+
     x_train_val_scaled = final_scaler.fit_transform(x_train_val)
     final_model = clone(model_for_trial)
     final_model.fit(x_train_val_scaled, y_train_val)
