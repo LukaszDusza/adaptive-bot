@@ -1,22 +1,21 @@
-# utils/async_data_fetcher.py
+import asyncio
 import os
 import sys
-import asyncio
-import pandas as pd
 from datetime import datetime, timezone, timedelta
+
+import pandas as pd
 from dotenv import load_dotenv
 from pybit.unified_trading import HTTP
+import config
 
 # --- Konfiguracja ---
 MAX_CONCURRENT_REQUESTS = 10
 API_SLEEP_SECONDS = 0.1
-CACHE_DIR = "utils/data_cache"
+CACHE_DIR = config.RAW_DATA_CACHE_DIR
 
 
 def _convert_dataframe_numeric(df: pd.DataFrame) -> pd.DataFrame:
-
     if not pd.api.types.is_datetime64_any_dtype(df['timestamp']):
-        print("Wykryto numeryczny timestamp. Konwertowanie...")
         df['timestamp'] = pd.to_datetime(pd.to_numeric(df['timestamp']), unit='ms')
 
     df.set_index('timestamp', inplace=True)
@@ -27,11 +26,11 @@ def _convert_dataframe_numeric(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def get_bybit_session():
-    # ... (bez zmian) ...
     load_dotenv()
     api_key = os.getenv("BYBIT_API_KEY")
     api_secret = os.getenv("BYBIT_API_SECRET")
-    if not api_key or not api_secret: sys.exit("BŁĄD: Klucze API nie są ustawione.")
+    if not api_key or not api_secret:
+        sys.exit("BŁĄD: Klucze API nie są ustawione.")
     try:
         return HTTP(testnet=False, api_key=api_key, api_secret=api_secret, timeout=20)
     except Exception as e:
@@ -39,26 +38,29 @@ def get_bybit_session():
 
 
 async def _fetch_chunk(session, semaphore, ticker, start_ts, end_ts):
-    # ... (bez zmian) ...
     all_data = []
     current_ts = start_ts
     while current_ts < end_ts:
         async with semaphore:
-            response = await asyncio.to_thread(
-                session.get_kline,
-                category="linear", symbol=ticker, interval='5',
-                start=current_ts, limit=1000
-            )
-            await asyncio.sleep(API_SLEEP_SECONDS)
-        if response and response.get('retCode') == 0 and response['result']['list']:
-            data = response['result']['list']
-            if not data: break
-            data.sort(key=lambda k: int(k[0]))
-            all_data.extend(data)
-            current_ts = int(data[-1][0]) + (5 * 60 * 1000)
-        else:
-            await asyncio.sleep(5)
-            continue
+            try:
+                response = await asyncio.to_thread(
+                    session.get_kline,
+                    category="linear", symbol=ticker, interval='5',
+                    start=current_ts, limit=1000
+                )
+                await asyncio.sleep(API_SLEEP_SECONDS)
+                if response and response.get('retCode') == 0 and response['result']['list']:
+                    data = response['result']['list']
+                    if not data: break
+                    data.sort(key=lambda k: int(k[0]))
+                    all_data.extend(data)
+                    current_ts = int(data[-1][0]) + (5 * 60 * 1000)
+                else:
+                    await asyncio.sleep(5)
+                    continue
+            except Exception as e:
+                print(f"Wystąpił błąd podczas pobierania danych: {e}. Ponawianie próby...")
+                await asyncio.sleep(10)
     return all_data
 
 
@@ -69,13 +71,11 @@ async def fetch_data_for_trainer_async(ticker: str, start_date: str, end_date: s
     if os.path.exists(cache_filename):
         print(f"Znaleziono dane w cache. Wczytywanie z pliku: {cache_filename}")
         df = pd.read_csv(cache_filename, parse_dates=['timestamp'])
-
         df = _convert_dataframe_numeric(df)
         return df
 
     print("Brak danych w cache. Rozpoczynanie pobierania z API...")
     session = get_bybit_session()
-
     start_dt = datetime.strptime(start_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_dt = datetime.strptime(end_date.strip(), "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
@@ -87,7 +87,6 @@ async def fetch_data_for_trainer_async(ticker: str, start_date: str, end_date: s
         current_start = current_end
 
     print(f"Planowane pobranie {len(date_chunks)} fragmentów danych...")
-
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     tasks = [
         asyncio.create_task(_fetch_chunk(session, semaphore, ticker, start_ts, end_ts))
@@ -103,12 +102,9 @@ async def fetch_data_for_trainer_async(ticker: str, start_date: str, end_date: s
     df.sort_values(by='timestamp', inplace=True)
     df.drop_duplicates(subset='timestamp', keep='first', inplace=True)
 
-    # <<< POPRAWKA: Używamy funkcji pomocniczej dla nowych danych >>>
     df = _convert_dataframe_numeric(df)
 
     print(f"\nZakończono pobieranie. Pobrane {len(df)} unikalnych świec.")
-
-    # Zapisujemy do cache już przekonwertowane dane
     df.to_csv(cache_filename)
     print(f"Zapisano dane do cache: {cache_filename}")
 

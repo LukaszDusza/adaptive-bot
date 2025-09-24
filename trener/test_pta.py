@@ -1,6 +1,5 @@
 # test_pta.py
 import pandas as pd
-import pandas_ta as ta
 
 # Tworzymy małą, przykładową tabelę danych
 df = pd.DataFrame({

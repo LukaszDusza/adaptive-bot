@@ -1,4 +1,5 @@
 import asyncio
+
 import config
 from async_data_fetcher import fetch_data_for_trainer_async
 from data_preparer import prepare_feature_set_for_timeframe
@@ -12,30 +13,30 @@ async def check_class_balance():
     )
     df_features = prepare_feature_set_for_timeframe(df_raw, base_tf=config.BASE_TIMEFRAME)
 
-    # === EDYTUJ WARTOŚCI PONIŻEJ, ABY TESTOWAĆ RÓŻNE SCENARIUSZE ===
-    test_params = {
-        'PRICE_TARGET_PCT': 0.01,
-        'HORIZON_BARS': 32
-    }
-    # =================================================================
-
-    print(f"\nSprawdzanie rozkładu klas dla parametrów: {test_params}")
+    print(f"\nSprawdzanie rozkładu klas dla parametrów z config.py:")
+    print(f"TARGET_TYPE: {config.TARGET_TYPE}, HORIZON_BARS: {config.HORIZON_BARS}")
+    if config.TARGET_TYPE == 'DYNAMIC_ATR':
+        print(f"ATR_TP_MULTIPLIER: {config.ATR_TP_MULTIPLIER}, ATR_SL_MULTIPLIER: {config.ATR_SL_MULTIPLIER}")
+    else:
+        print(f"PRICE_TARGET_PCT: {config.PRICE_TARGET_PCT}")
 
     df = df_features.copy()
+
+    # Wywołanie funkcji jest teraz prostsze
     targets = calculate_multiclass_target(
         df,
-        target_pct=test_params['PRICE_TARGET_PCT'],
-        horizon=test_params['HORIZON_BARS']
+        horizon=config.HORIZON_BARS
     )
 
     df['target'] = targets.map({-1: 0, 0: 1, 1: 2})
-
     df.dropna(inplace=True)
 
     print("\n--- WYNIK DIAGNOZY ---")
-    print("Procentowy rozkład klas:")
+    print("Liczba etykiet w każdej klasie:")
+    print(df['target'].value_counts())
+    print("\nProcentowy rozkład klas:")
     print(df['target'].value_counts(normalize=True).map('{:.2%}'.format))
-    print("0 = RUCH W DÓŁ, 1 = BRAK RUCHU (SIDEWAYS), 2 = RUCH W GÓRĘ")
+    print("\n0 = RUCH W DÓŁ (SHORT), 1 = BRAK RUCHU (SIDEWAYS), 2 = RUCH W GÓRĘ (LONG)")
 
 
 if __name__ == "__main__":

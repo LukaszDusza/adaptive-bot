@@ -1,43 +1,49 @@
-import pandas as pd
-import numpy as np
-import joblib
-import json
 import asyncio
-from typing import Dict, Any, List
-from sklearn.metrics import f1_score
+import os
 
-from optuna import trial
-from sklearn.model_selection import TimeSeriesSplit
-from sklearn.metrics import accuracy_score
-from sklearn.base import clone
-from sklearn.preprocessing import StandardScaler
-from tqdm import tqdm
-
+import numpy as np
 import optuna
+import pandas as pd
 from lightgbm import LGBMClassifier
+from sklearn.base import clone
+from sklearn.metrics import f1_score
+from sklearn.model_selection import TimeSeriesSplit
+from tqdm import tqdm
 
 import config
 from async_data_fetcher import fetch_data_for_trainer_async
 from data_preparer import prepare_feature_set_for_timeframe
 
 
-def calculate_multiclass_target(df: pd.DataFrame, target_pct: float, horizon: int) -> pd.Series:
-    """Oblicza target dla klasyfikacji wieloklasowej (UP, DOWN, SIDEWAYS)."""
-    print(f"Obliczanie celu (target {target_pct * 100:.1f}%, horyzont {horizon} barów)...")
+def calculate_multiclass_target(df: pd.DataFrame, horizon: int) -> pd.Series:
+    print(f"Obliczanie celu (Typ: {config.TARGET_TYPE}, Horyzont: {horizon} barów)...")
+
     outcomes = pd.Series(0, index=df.index, dtype=int)
+
+    if config.TARGET_TYPE == 'DYNAMIC_ATR':
+        atr_col_name = f'ATRr_{config.FeatureConfig.ATR_LENGTH}_{config.BASE_TIMEFRAME}'
+        if atr_col_name not in df.columns:
+            raise ValueError(f"Brak kolumny ATR '{atr_col_name}' w DataFrame. Sprawdź konfigurację.")
 
     for i in tqdm(range(len(df) - horizon), desc="Obliczanie celu", leave=False, ncols=100):
         entry_price = df['close'].iloc[i]
-        upper_barrier = entry_price * (1 + target_pct)
-        lower_barrier = entry_price * (1 - target_pct)
+
+        if config.TARGET_TYPE == 'DYNAMIC_ATR':
+            current_atr = df[atr_col_name].iloc[i]
+            if pd.isna(current_atr) or current_atr == 0:
+                continue
+
+            upper_barrier = entry_price + (current_atr * config.ATR_TP_MULTIPLIER)
+            lower_barrier = entry_price - (current_atr * config.ATR_SL_MULTIPLIER)
+        else:
+            upper_barrier = entry_price * (1 + config.PRICE_TARGET_PCT)
+            lower_barrier = entry_price * (1 - config.PRICE_TARGET_PCT)
+
         future_window = df.iloc[i + 1: i + 1 + horizon]
         hit_tp_time = future_window[future_window['high'] >= upper_barrier].index.min()
         hit_sl_time = future_window[future_window['low'] <= lower_barrier].index.min()
         if pd.notna(hit_tp_time) and pd.notna(hit_sl_time):
-            if hit_tp_time < hit_sl_time:
-                outcomes.iloc[i] = 1
-            else:
-                outcomes.iloc[i] = -1
+            outcomes.iloc[i] = 1 if hit_tp_time < hit_sl_time else -1
         elif pd.notna(hit_tp_time):
             outcomes.iloc[i] = 1
         elif pd.notna(hit_sl_time):
@@ -45,11 +51,9 @@ def calculate_multiclass_target(df: pd.DataFrame, target_pct: float, horizon: in
     return outcomes
 
 
-# === ZMIANA 3: Funkcja przyjmuje model jako argument i ZWRACA wynik ===
-def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> float:
-    """Przeprowadza trening i walidację, a na końcu zwraca dokładność na zbiorze holdout."""
-
-    print(f"\n[KROK 3/4] Selekcja {config.TOP_N_FEATURES} najważniejszych cech...")
+def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier, full_run: bool = False):
+    if not full_run:
+        print(f"\n[KROK 3/4] Selekcja {config.TOP_N_FEATURES} najważniejszych cech...")
     df = df.loc[:, ~df.columns.duplicated()]
     all_features = [col for col in df.columns if
                     col not in ['open', 'high', 'low', 'close', 'volume', 'turnover', 'target']]
@@ -64,73 +68,60 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier) -> fl
     selector_model.fit(x_train_val_fs, y_train_val_fs)
 
     feature_importances = pd.DataFrame({
-        'feature': all_features,
-        'importance': selector_model.feature_importances_
+        'feature': all_features, 'importance': selector_model.feature_importances_
     }).sort_values('importance', ascending=False)
-
     best_features = feature_importances.head(config.TOP_N_FEATURES)['feature'].tolist()
 
-    # === NOWY BLOK KODU: Logowanie najważniejszych cech ===
-    print(f"-> Top 10 najważniejszych cech w tym trialu:")
-    print(feature_importances.head(10).to_string(index=False))
-    # =======================================================
+    if not full_run:
+        print(f"-> Top 10 najważniejszych cech w tym trialu:")
+        print(feature_importances.head(10).to_string(index=False))
+        print(f"[KROK 4/4] Walidacja krzyżowa...")
 
-    print(f"[KROK 4/4] Walidacja krzyżowa i finalny trening...")
     x_train_val = train_val_df[best_features]
     y_train_val = train_val_df['target']
+
+    # Walidacja krzyżowa
     tscv = TimeSeriesSplit(n_splits=config.CV_SPLITS, gap=5)
-    scores = []
+    cv_scores = []
 
-    for fold, (train_index, test_index) in enumerate(
-            tqdm(tscv.split(x_train_val), total=config.CV_SPLITS, desc="Walidacja krzyżowa", leave=False, ncols=100)):
-        x_train, x_test = x_train_val.iloc[train_index], x_train_val.iloc[test_index]
-        y_train, y_test = y_train_val.iloc[train_index], y_train_val.iloc[test_index]
+    if not full_run:
+        for fold, (train_index, test_index) in enumerate(tscv.split(x_train_val)):
+            x_train, x_test = x_train_val.iloc[train_index], x_train_val.iloc[test_index]
+            y_train, y_test = y_train_val.iloc[train_index], y_train_val.iloc[test_index]
+            scaler = clone(config.SCALER)
+            x_train_scaled = scaler.fit_transform(x_train)
+            x_test_scaled = scaler.transform(x_test)
+            model_for_cv = clone(model_for_trial)
+            model_for_cv.fit(x_train_scaled, y_train)
 
-        # Używamy asercji, aby pomóc edytorowi w inspekcji kodu
-        scaler = clone(config.SCALER)
-        assert isinstance(scaler, StandardScaler)
-        x_train_scaled = scaler.fit_transform(x_train)
-        x_test_scaled = scaler.transform(x_test)
+            y_pred = model_for_cv.predict(x_test_scaled)
+            f1 = f1_score(y_test, y_pred, average=None, labels=[0, 2])
+            score = np.mean(f1) if f1.size > 0 else 0.0
+            cv_scores.append(score)
 
-        model_for_cv = clone(model_for_trial)
-        model_for_cv.fit(x_train_scaled, y_train)
-        y_pred = model_for_cv.predict(x_test_scaled)
-        score = accuracy_score(y_test, y_pred)
-        scores.append(score)
-
-    print(f"-> Średnia dokładność CV: {np.mean(scores):.4f}")
-
-    x_holdout = holdout_df[best_features]
-    y_holdout = holdout_df['target']
+        print(f"-> Średni F1-score z walidacji krzyżowej: {np.mean(cv_scores):.4f}")
+    # ==========================================================
 
     final_scaler = clone(config.SCALER)
-    assert isinstance(final_scaler, StandardScaler)
     x_train_val_scaled = final_scaler.fit_transform(x_train_val)
-
     final_model = clone(model_for_trial)
     final_model.fit(x_train_val_scaled, y_train_val)
 
+    # Predykcja na zbiorze holdout (testowym)
+    x_holdout = holdout_df[best_features]
+    y_holdout = holdout_df['target']
     x_holdout_scaled = final_scaler.transform(x_holdout)
-    y_holdout_pred = final_model.predict(x_holdout_scaled)
+
+    y_holdout_proba = final_model.predict_proba(x_holdout_scaled)
+    y_holdout_pred = np.argmax(y_holdout_proba, axis=1)
 
     f1 = f1_score(y_holdout, y_holdout_pred, average=None, labels=[0, 2])
-    mean_f1_score = np.mean(f1)
+    mean_f1_score = np.mean(f1) if f1.size > 0 else 0.0
 
-    return mean_f1_score
+    return y_holdout_pred, y_holdout_proba, mean_f1_score, holdout_df, best_features
 
 
-def objective(trial: optuna.Trial, df_features: pd.DataFrame) -> float:
-    """
-    Pojedyncza iteracja (trial) procesu optymalizacji.
-    Optuna wywołuje tę funkcję wielokrotnie z różnymi parametrami.
-    """
-    # -- Krok 1: Optuna sugeruje hiperparametry do przetestowania w tej iteracji --
-    # target_pct = trial.suggest_float('PRICE_TARGET_PCT', 0.005, 0.015, step=0.005)
-    # horizon = trial.suggest_int('HORIZON_BARS', 6, 24, step=6)
-    target_pct = 0.01
-    horizon = 32
-
-    # Krok 2: Optuna sugeruje już tylko hiperparametry modelu --
+def objective(trial: optuna.Trial, df_with_target: pd.DataFrame) -> float:
     model_params = {
         'objective': 'multiclass',
         'n_estimators': trial.suggest_int('n_estimators', 200, 1200, step=100),
@@ -138,80 +129,69 @@ def objective(trial: optuna.Trial, df_features: pd.DataFrame) -> float:
         'max_depth': trial.suggest_int('max_depth', 3, 7),
         'num_leaves': trial.suggest_int('num_leaves', 20, 100),
         'random_state': config.RANDOM_STATE,
-        'n_jobs': -1,
-        'verbose': -1
+        'n_jobs': -1, 'verbose': -1
     }
     model_for_trial = LGBMClassifier(**model_params)
-
-    # Krok 3: Uruchomienie procesu z użyciem zadanych parametrów --
     print(f"\n--- Rozpoczynanie Trial #{trial.number} ---")
-
-    print(f"Parametry: Target={target_pct * 100:.1f}% (stały), Horyzont={horizon} (stały)")
-    print(f"Parametry modelu: n_est={model_params['n_estimators']}, lr={model_params['learning_rate']:.4f}, max_depth={model_params['max_depth']}")
-
-
-    df = df_features.copy()
-    targets = calculate_multiclass_target(df, target_pct, horizon)
-    df['target'] = targets.map({-1: 0, 0: 1, 1: 2})
-    df.dropna(inplace=True)
-
-    if len(df) < 500:
-        print("Zbyt mało danych po obróbce, pomijanie triala.")
-        return 0.0
-
-    # Zmieniliśmy metrykę na F1-score
-    f1_result = train_unified_model(df, model_for_trial)
-    print(f"--- Trial #{trial.number} Zakończony | Średni F1-score (UP/DOWN): {f1_result:.4f} ---")
+    _, _, f1_result, _, _ = train_unified_model(df_with_target.copy(), model_for_trial)
+    print(f"--- Trial #{trial.number} Zakończony | F1-score na Holdout: {f1_result:.4f} ---")
     return f1_result
 
+
 async def main() -> None:
-    # Krok 1: Pobranie i przygotowanie cech (bez zmian, wykonuje się raz na start workera)
-    print("--- Jednorazowe pobieranie i przygotowywanie cech ---")
     df_raw = await fetch_data_for_trainer_async(
         ticker=config.TICKER, start_date=config.TRAIN_START_DATE, end_date=config.TRAIN_END_DATE
     )
-    if df_raw.empty:
-        print("Nie pobrano danych, zakończono.")
-        return
+    if df_raw.empty: return
 
-    df_features = prepare_feature_set_for_timeframe(df_raw, base_tf=config.BASE_TIMEFRAME)
+    features_cache_filename = f"{config.FEATURES_CACHE_DIR}/features_{config.TICKER}_{config.TRAIN_START_DATE}_{config.TRAIN_END_DATE}_{config.BASE_TIMEFRAME}.parquet"
+    if os.path.exists(features_cache_filename):
+        df_features = pd.read_parquet(features_cache_filename)
+    else:
+        df_features = prepare_feature_set_for_timeframe(df_raw, base_tf=config.BASE_TIMEFRAME)
+        df_features.to_parquet(features_cache_filename)
 
-    # === KLUCZOWA ZMIANA DLA WSPÓŁBIEŻNOŚCI ===
-    # Definiujemy nazwę dla naszej optymalizacji i wskazujemy plik bazy danych
+    targets = calculate_multiclass_target(df_features, config.HORIZON_BARS)
+    df_features['target'] = targets.map({-1: 0, 0: 1, 1: 2})
+    df_features.dropna(inplace=True)
+
+    if len(df_features) < 1000: return
+
     study_name = f"optimization_{config.TICKER}_{config.BASE_TIMEFRAME}"
     storage_name = f"sqlite:///{study_name}.db"
+    study = optuna.create_study(study_name=study_name, storage=storage_name, direction='maximize', load_if_exists=True)
+    # study.optimize(lambda trial: objective(trial, df_features), n_trials=config.OPTUNA_TRIALS)
 
-    # Tworzymy 'study', która będzie zapisywana na dysku i współdzielona
-    study = optuna.create_study(
-        study_name=study_name,
-        storage=storage_name,
-        direction='maximize',
-        load_if_exists=True  # NAJWAŻNIEJSZE: jeśli study już istnieje, dołącz do niej
-    )
-    # ============================================
+    print("\n" + "=" * 50)
+    print("--- Optymalizacja Zakończona ---")
+    print(f"Najlepszy F1-score w study: {study.best_value:.4f}")
+    print("Najlepsze parametry:", study.best_params)
+    print("=" * 50 + "\n")
 
-    # Wyświetlamy informację, jeśli dołączamy do istniejącego study
-    if len(study.trials) > 0:
-        print(f"Dołączono do istniejącego study. Aktualna liczba prób: {len(study.trials)}")
+    # Finalny trening z najlepszymi parametrami i pokazanie wyników
+    print("--- Trenowanie finalnego modelu z najlepszymi parametrami... ---")
+    best_params = study.best_params
+    best_model = LGBMClassifier(objective='multiclass', random_state=config.RANDOM_STATE, n_jobs=-1, verbose=-1,
+                                **best_params)
 
+    # Uruchamiamy trening ostatni raz, aby uzyskać finalne predykcje i prawdopodobieństwa
+    preds, probas, f1, df_holdout, top_features = train_unified_model(df_features.copy(), best_model, full_run=True)
 
-    study.optimize(
-        lambda trial: objective(trial, df_features),
-        n_trials=50
-    )
+    results_df = df_holdout[['open', 'high', 'low', 'close', 'target']].copy()
+    results_df['prediction'] = preds
+    results_df['proba_DOWN(0)'] = probas[:, 0]
+    results_df['proba_SIDE(1)'] = probas[:, 1]
+    results_df['proba_UP(2)'] = probas[:, 2]
 
-    # Krok 3: Wyświetlenie wyników (wykona się w każdym workerze po zakończeniu jego pętli)
-    print("\n--- Optymalizacja zakończona! ---")
-    print(f"Najlepsza dokładność (holdout) w całym study: {study.best_value:.4f}")
-    print("Najlepsze znalezione parametry w całym study:")
-    for key, value in study.best_params.items():
-        print(f"  {key}: {value}")
+    print(f"\nWynik F1-score na zbiorze testowym (holdout): {f1:.4f}")
+    print("\nTop 10 cech użytych w finalnym modelu:")
+    print(top_features[:10])
 
-    print("\nGenerowanie wykresu historii optymalizacji...")
-    loaded_study = optuna.load_study(study_name=study_name, storage=storage_name)
-    fig = optuna.visualization.plot_optimization_history(loaded_study)
-    fig.show()
+    print("\n--- Przykładowe predykcje finalnego modelu na danych testowych: ---")
+    print(results_df.head(15).to_string())
+
+    # Możesz zapisać wyniki do pliku
+    results_df.to_csv("final_predictions.csv")
 
 if __name__ == "__main__":
     asyncio.run(main())
-
