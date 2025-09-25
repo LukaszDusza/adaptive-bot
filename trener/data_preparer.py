@@ -291,26 +291,38 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
     cfg = config.FeatureConfig
     for tf_name, df in all_dfs.items():
         print(f"Obliczanie wskaźników dla interwału {tf_name}...")
+
         df.ta.rsi(length=cfg.RSI_LENGTH, append=True)
+
         df.ta.atr(length=cfg.ATR_LENGTH, append=True)
-        df.ta.macd(fast=cfg.MACD_FAST, slow=cfg.MACD_SLOW, signal=cfg.MACD_SIGNAL, append=True)
+
+        macd = df.ta.macd(fast=cfg.MACD_FAST, slow=cfg.MACD_SLOW, signal=cfg.MACD_SIGNAL)
+        if macd is not None and not macd.empty:
+            df[f'MACDh_{cfg.MACD_FAST}_{cfg.MACD_SLOW}_{cfg.MACD_SIGNAL}'] = macd[
+                f'MACDh_{cfg.MACD_FAST}_{cfg.MACD_SLOW}_{cfg.MACD_SIGNAL}']
+
         df.ta.bbands(length=cfg.BBANDS_LENGTH, append=True)
-        df.ta.stoch(k=cfg.STOCH_K, append=True)
+
+        # df.ta.stoch(k=cfg.STOCH_K, append=True)
+
         df.ta.adx(length=cfg.ADX_LENGTH, append=True)
+
         df.ta.obv(append=True)
         df.ta.vwap(append=True)
-        df.ta.cci(length=cfg.CCI_LENGTH, append=True)
-        df.ta.mfi(length=cfg.MFI_LENGTH, append=True)
+
+        # df.ta.cci(length=cfg.CCI_LENGTH, append=True)
+        # df.ta.mfi(length=cfg.MFI_LENGTH, append=True)
+
         df.ta.aroon(length=cfg.AROON_LENGTH, append=True)
+
         df.ta.ema(length=cfg.EMA_FAST_LEN, append=True)
         df.ta.ema(length=cfg.EMA_SLOW_LEN, append=True)
         df.ta.ema(length=cfg.EMA_TREND_LEN, append=True)
+
         df.ta.ichimoku(append=True)
         df = add_ichimoku_relational_features(df)
-        df.ta.cdl_pattern(name="all", append=True)
 
-        if f'RSI_{cfg.RSI_LENGTH}' in df.columns:
-            df = add_divergence_feature(df, indicator_col=f'RSI_{cfg.RSI_LENGTH}')
+        # df.ta.cdl_pattern(name="all", append=True)
 
         print(f"Dodawanie cech Fibonacciego dla interwału {tf_name}...")
         df = add_fibonacci_features(df, window=cfg.FIBO_WINDOW)
@@ -319,18 +331,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
         df = add_hurst_exponent(df, window=100)
 
         print(f"Dodawanie cech stacjonarnych dla interwału {tf_name}...")
-        cols_map = {
-            'RSI': f'RSI_{cfg.RSI_LENGTH}',
-            'MFI': f'MFI_{cfg.MFI_LENGTH}',
-            'CCI': f'CCI_{cfg.CCI_LENGTH}',
-            'MACDh': f'MACDh_{cfg.MACD_FAST}_{cfg.MACD_SLOW}_{cfg.MACD_SIGNAL}',
-            'STOCHk': f'STOCHk_{cfg.STOCH_K}_3_3',
-            'STOCHd': f'STOCHd_{cfg.STOCH_K}_3_3',
-            'ADX': f'ADX_{cfg.ADX_LENGTH}'
-        }
-
-        cols_to_transform = [cols_map[ind] for ind in cfg.STATIONARITY_TARGET_INDICATORS if ind in cols_map]
-        df = _add_stationary_features(df, columns_to_transform=cols_to_transform, window=cfg.STATIONARY_WINDOW)
+        df = _add_stationary_features(df, window=cfg.STATIONARY_WINDOW, columns_to_transform=cfg.STATIONARITY_TARGET_INDICATORS)
 
         all_dfs[tf_name] = df
 
@@ -363,7 +364,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
                                          feature_to_orthogonalize=base_stoch_col,
                                          window=100)
 
-    # print("Obliczanie entropy...")
+    # print("Obliczanie entropy...") - cos nie dziala
     # final_df = add_sample_entropy(final_df, window=100)
 
     print("Dodawanie cech czasowych...")

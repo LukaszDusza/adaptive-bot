@@ -14,7 +14,7 @@ FEATURES_CACHE_DIR = "data_cache/features"
 # === ZMIANA 1: Rozbudowana konfiguracja celu ===
 # --- 2. Konfiguracja Celu (Target) ---
 TARGET_TYPE = 'DYNAMIC_ATR'  # Wybierz: 'FIXED' lub 'DYNAMIC_ATR'
-HORIZON_BARS = 32
+HORIZON_BARS = 20
 
 # Ustawienia dla TARGET_TYPE = 'FIXED'
 PRICE_TARGET_PCT = 0.01
@@ -22,11 +22,11 @@ PRICE_TARGET_PCT = 0.01
 # Ustawienia dla TARGET_TYPE = 'DYNAMIC_ATR'
 # Mnożniki określają, jak szerokie będą bariery w stosunku do ATR
 # Np. 2.0 / 1.0 oznacza celowanie w zysk 2x większy od ryzyka (Risk/Reward Ratio = 2)
-ATR_TP_MULTIPLIER = 2.0  # Mnożnik dla Take Profit
-ATR_SL_MULTIPLIER = 1.0  # Mnożnik dla Stop Loss
+ATR_TP_MULTIPLIER = 1.5  # Mnożnik dla Take Profit
+ATR_SL_MULTIPLIER = 1.5  # Mnożnik dla Stop Loss
 
 # --- 3. Konfiguracja Procesu Treningu i Walidacji ---
-TOP_N_FEATURES = 60
+TOP_N_FEATURES = 35
 CV_SPLITS = 5
 HOLDOUT_SIZE = 0.2
 RANDOM_STATE = 42
@@ -69,8 +69,7 @@ class FeatureConfig:
     # === NOWA SEKCJA: Konfiguracja cech stacjonarnych ===
     STATIONARY_WINDOW = 100
     # Lista "bazowych" nazw wskaźników do przekształcenia w wersje stacjonarne
-    STATIONARITY_TARGET_INDICATORS = ['RSI', 'MFI', 'CCI', 'MACDh', 'STOCHk', 'STOCHd', 'ADX']
-
+    STATIONARITY_TARGET_INDICATORS = ['RSI', 'MACDh', 'ADX']
 
 # --- 5. Konfiguracja Narzędzi ---
 SCALER = StandardScaler()
