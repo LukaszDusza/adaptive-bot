@@ -142,6 +142,7 @@ def objective(trial: optuna.Trial, df_with_target: pd.DataFrame) -> float:
         'random_state': config.RANDOM_STATE,
         'n_jobs': -1, 'verbose': -1
     }
+    model_params['class_weight'] = 'balanced'  # DODAJ TĘ LINIĘ
     model_for_trial = LGBMClassifier(**model_params)
     print(f"\n--- Rozpoczynanie Trial #{trial.number} ---")
     _, _, f1_result, _, _ = train_unified_model(df_with_target.copy(), model_for_trial)
