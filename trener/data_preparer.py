@@ -324,7 +324,18 @@ def add_ichimoku_relational_features(df: pd.DataFrame, tenkan_col='ITS_9', kijun
 
 def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = config.BASE_TIMEFRAME):
     print(f"Przygotowywanie zestawu cech dla interwału bazowego: {base_tf}...")
-    timeframes_map = {'5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h'}
+    timeframes_map = {
+        # Co minutę od 5m do 15m
+        '5m': '5min', '6m': '6min', '7m': '7min', '8m': '8min', '9m': '9min',
+        '10m': '10min', '11m': '11min', '12m': '12min', '13m': '13min',
+        '14m': '14min', '15m': '15min',
+        # Co 5 minut do 1h
+        '20m': '20min', '25m': '25min', '30m': '30min', '35m': '35min',
+        '40m': '40min', '45m': '45min', '50m': '50min', '55m': '55min',
+        # Co godzinę do 8h
+        '1h': '1h', '2h': '2h', '3h': '3h', '4h': '4h', '5h': '5h', '6h': '6h',
+        '7h': '7h', '8h': '8h'
+    }
     ohlc = {'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum', 'turnover': 'sum'}
     all_dfs = {}
     for tf_name in config.FEATURE_TIMEFRAMES:
@@ -427,9 +438,15 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
         f'MACDh_{cfg.MACD_FAST}_{cfg.MACD_SLOW}_{cfg.MACD_SIGNAL}_{base_tf}'
     ]
     final_df = _add_lagged_features(final_df, columns_to_lag=lag_target_columns, lag_steps=cfg.PA_LAG_STEPS)
-    print("OSTATECZNE CZYSZCZENIE DANYCH...")
 
-    print("Czyszczenie wartości nieskończonych ('inf')...")
+    print("Dodawanie cech kontekstu rynkowego (reżimu)...")
+    ema_trend_col = f'EMA_{cfg.EMA_TREND_LEN}_4h'
+    if ema_trend_col in final_df.columns:
+        final_df['MARKET_REGIME_TREND'] = np.where(final_df['close'] > final_df[ema_trend_col], 1, -1)
+    atr_col = f'ATRr_{cfg.ATR_LENGTH}_{base_tf}'
+    if atr_col in final_df.columns:
+        final_df['MARKET_REGIME_VOL_OF_VOL'] = final_df[atr_col].rolling(window=100).std()
+
     final_df = final_df.replace([np.inf, -np.inf], np.nan)
 
     final_df = optimize_df_memory(final_df)

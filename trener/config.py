@@ -6,8 +6,14 @@ TICKER = "DOGEUSDT"
 TRAIN_START_DATE = "2022-01-01"
 TRAIN_END_DATE = "2025-04-30"
 BASE_TIMEFRAME = '5m'
-FEATURE_TIMEFRAMES = ['5m', '15m', '1h', '4h']
-
+FEATURE_TIMEFRAMES = [
+    # Co minutę od 5m do 15m
+    '5m', '6m', '7m', '8m', '9m', '10m', '11m', '12m', '13m', '14m', '15m',
+    # Co 5 minut do 1h
+    '20m', '25m', '30m', '35m', '40m', '45m', '50m', '55m',
+    # Co godzinę do 8h
+    '1h', '2h', '3h', '4h', '5h', '6h', '7h', '8h'
+]
 RAW_DATA_CACHE_DIR = "data_cache/raw"
 FEATURES_CACHE_DIR = "data_cache/features"
 
@@ -26,7 +32,7 @@ ATR_TP_MULTIPLIER = 1.5  # Mnożnik dla Take Profit
 ATR_SL_MULTIPLIER = 1.5  # Mnożnik dla Stop Loss
 
 # --- 3. Konfiguracja Procesu Treningu i Walidacji ---
-TOP_N_FEATURES = 35
+TOP_N_FEATURES = 25
 CV_SPLITS = 5
 HOLDOUT_SIZE = 0.2
 RANDOM_STATE = 42
