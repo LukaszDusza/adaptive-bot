@@ -31,32 +31,43 @@ def analyze_performance(df_preds):
     """Orkiestruje wszystkie analizy związane z wydajnością predykcji."""
     print("\n--- Rozpoczynanie Analizy Wydajności Modelu ---")
 
-    # Przygotowanie danych
     df_preds['timestamp'] = pd.to_datetime(df_preds['timestamp'])
 
-    # Dla problemu binarnego, mapujemy target/prediction z powrotem do 0 (DOWN) i 2 (UP) dla spójności
+    # --- ZMIANA: Uproszczona i poprawiona logika normalizacji ---
+    # Sprawdzamy, czy dane pochodzą z modelu binarnego (targety 0 i 1)
     if set(df_preds['target'].unique()) <= {0, 1}:
+        print("Wykryto wyniki z modelu binarnego. Normalizowanie etykiet do 0 (SPADEK) i 2 (WZROST)...")
+        # Mapujemy etykiety i predykcje z (0, 1) na (0, 2)
         df_preds['target'] = df_preds['target'].map({0: 0, 1: 2})
         df_preds['prediction'] = df_preds['prediction'].map({0: 0, 1: 2})
-        proba_cols = [col for col in ['proba_DOWN(0)', 'proba_UP(1)'] if col in df_preds.columns]
+        # Zmieniamy nazwę kolumny z prawdopodobieństwem, aby była spójna
         df_preds.rename(columns={'proba_UP(1)': 'proba_UP(2)'}, inplace=True)
-    else:  # Dla problemu 3-klasowego
-        proba_cols = [col for col in ['proba_DOWN(0)', 'proba_UP(2)'] if col in df_preds.columns]
 
+    # Przygotowujemy dane do analizy transakcji (po normalizacji)
     df_trades = df_preds[df_preds['prediction'] != 1].copy()
     df_trades['is_correct'] = (df_trades['target'] == df_trades['prediction'])
 
+    # Definiujemy kolumny z prawdopodobieństwami, których będziemy używać
+    # Ta definicja jest teraz *po* zmianie nazwy, więc zawsze będzie poprawna
+    proba_cols = [col for col in ['proba_DOWN(0)', 'proba_UP(2)'] if col in df_trades.columns]
+
     if df_trades.empty:
-        print("Nie znaleziono sygnałów transakcyjnych (WZROST/SPADEK). Pomijanie analiz wydajności.")
+        print("W pliku nie znaleziono żadnych sygnałów transakcyjnych (WZROST/SPADEK). Pomijanie analiz wydajności.")
         return
 
+    # Obliczamy `proba_max` tylko jeśli kolumny istnieją
     if proba_cols:
         df_trades['proba_max'] = df_trades[proba_cols].max(axis=1)
+    else:
+        print("OSTRZEŻENIE: Brak kolumn z prawdopodobieństwami. Niektóre analizy zostaną pominięte.")
+        # Zapewniamy istnienie kolumny, aby uniknąć błędów w kolejnych funkcjach
+        df_trades['proba_max'] = 0.5
+        # --- KONIEC ZMIANY ---
 
-    # Uruchomienie analiz
+    # Uruchomienie analiz (reszta bez zmian)
     analyze_accuracy_vs_confidence(df_trades.copy())
     analyze_equity_and_drawdowns(df_trades.copy())
-    analyze_confusion_matrix(df_preds)  # Używamy pełnego df do macierzy pomyłek
+    analyze_confusion_matrix(df_preds)
     analyze_performance_by_time(df_trades.copy())
     analyze_long_vs_short(df_trades.copy())
     analyze_performance_vs_volatility(df_trades.copy())

@@ -10,6 +10,16 @@ import nolds
 import warnings
 
 
+
+def _add_lagged_features(df: pd.DataFrame, columns_to_lag: list, lag_steps: list) -> pd.DataFrame:
+    """Tworzy cechy opóźnione dla podanych kolumn."""
+    print(f"Tworzenie cech opóźnionych dla: {columns_to_lag}...")
+    for col in columns_to_lag:
+        if col in df.columns:
+            for step in lag_steps:
+                df[f'{col}_lag_{step}'] = df[col].shift(step)
+    return df
+
 def add_sample_entropy(df: pd.DataFrame, window: int = 100) -> pd.DataFrame:
     """
     Oblicza Entropię Próbkową (Sample Entropy) w ruchomym oknie.
@@ -376,6 +386,15 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
     final_df['day_cos'] = np.cos(2 * np.pi * day_of_week / 7)
 
     print(f"Zakończono przygotowywanie cech. Finalny kształt danych: {final_df.shape}")
+    lag_target_columns = [
+        f'RSI_{cfg.RSI_LENGTH}_{base_tf}',
+        f'WAVELET_NRG_2_8',
+        f'FIBO_relative_position_{base_tf}',
+        f'HURST_100_{base_tf}',
+        f'MACDh_{cfg.MACD_FAST}_{cfg.MACD_SLOW}_{cfg.MACD_SIGNAL}_{base_tf}'
+    ]
+    final_df = _add_lagged_features(final_df, columns_to_lag=lag_target_columns, lag_steps=cfg.PA_LAG_STEPS)
+    print("OSTATECZNE CZYSZCZENIE DANYCH...")
 
     print("Czyszczenie wartości nieskończonych ('inf')...")
     final_df = final_df.replace([np.inf, -np.inf], np.nan)
