@@ -388,28 +388,93 @@ def analyze_features():
     # 1. Analiza ważności cech
     try:
         df_imp = pd.read_csv("feature_importances.csv")
+        analyze_feature_importance(df_imp)
     except FileNotFoundError:
         print("OSTRZEŻENIE: Nie znaleziono pliku 'feature_importances.csv'. Pomijanie analizy ważności cech.")
-        return
-
-    analyze_feature_importance(df_imp)
 
     # 2. Analiza jakości danych (korelacja, dystrybucja, PCA)
     try:
         list_of_files = glob.glob(f'{FEATURES_CACHE_DIR}/*.parquet')
+        if not list_of_files: raise FileNotFoundError
         latest_file = max(list_of_files, key=lambda p: os.path.getmtime(p) if os.path.exists(p) else 0)
         df_full_features = pd.read_parquet(latest_file)
-        df_full_features.dropna(inplace=True)
-        feature_cols = [col for col in df_full_features.columns if
-                        col not in ['open', 'high', 'low', 'close', 'volume', 'turnover', 'target']]
+
+        # ZMIANA: Usuwamy globalne .dropna()
+        # df_full_features.dropna(inplace=True)
+
+        feature_cols = [col for col in df_full_features.columns if col not in ['open', 'high', 'low', 'close', 'volume', 'turnover', 'target']]
         df_features_only = df_full_features[feature_cols]
+
+        # Wywołujemy analizy na ramce danych, która może zawierać NaN
+        analyze_correlation(df_features_only)
+        analyze_feature_distribution(df_features_only)
+        analyze_pca_redundancy(df_features_only)
+
     except (ValueError, FileNotFoundError):
         print("OSTRZEŻENIE: Nie znaleziono plików cache z cechami. Pomijanie analiz jakości danych.")
         return
 
-    analyze_correlation(df_features_only)
-    analyze_feature_distribution(df_features_only)
-    analyze_pca_redundancy(df_features_only)
+def analyze_feature_importance(df_imp):
+    print("\n[Analiza 8/10] Ważność Cech...")
+    zero_importance_features = df_imp[df_imp['importance'] == 0]
+    print(f"  > Znaleziono {len(zero_importance_features)} cech o zerowej ważności (szum).")
+    df_plot = df_imp[df_imp['importance'] > 0]
+    plt.figure(figsize=(12, 10)); sns.barplot(x="importance", y="feature", data=df_plot.head(30), palette="viridis", hue="feature", legend=False)
+    plt.title('Top 30 najważniejszych cech'); plt.tight_layout(); plt.savefig(os.path.join(OUTPUT_DIR, "8a_top_30_cech.png")); plt.close()
+    plt.figure(figsize=(12, 10)); sns.barplot(x="importance", y="feature", data=df_plot.tail(30), palette="rocket_r", hue="feature", legend=False)
+    plt.title('30 cech o najniższej (ale niezerowej) ważności'); plt.tight_layout(); plt.savefig(os.path.join(OUTPUT_DIR, "8b_ostatnie_30_cech.png")); plt.close()
+    print("-> Pliki PNG zostały zapisane.")
+
+def analyze_correlation(df_features, top_n=30):
+    print("\n[Analiza 9/10] Korelacja Cech...")
+    # ZMIANA: Lokalna obsługa NaN
+    df_subset = df_features.iloc[:, :top_n].dropna()
+
+    if df_subset.empty:
+        print("  > OSTRZEŻENIE: Po usunięciu NaN nie ma danych do analizy korelacji. Pomijanie.")
+        return
+
+    correlation_matrix = df_subset.corr()
+    correlation_matrix.to_csv(os.path.join(OUTPUT_DIR, "9_dane_korelacja.csv"))
+    plt.figure(figsize=(18, 15)); sns.heatmap(correlation_matrix, cmap='coolwarm')
+    plt.title(f'Macierz Korelacji dla Top {top_n} Cech'); plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "9_macierz_korelacji.png")); plt.close()
+    print("-> Pliki PNG i CSV zostały zapisane.")
+
+def analyze_feature_distribution(df_features, top_n=12):
+    print("\n[Analiza 10/10] Dystrybucja Cech...")
+    # ZMIANA: Lokalna obsługa NaN
+    df_subset = df_features.iloc[:, :top_n].dropna()
+
+    if df_subset.empty:
+        print("  > OSTRZEŻENIE: Po usunięciu NaN nie ma danych do analizy dystrybucji. Pomijanie.")
+        return
+
+    fig, axes = plt.subplots(int(np.ceil(top_n / 4)), 4, figsize=(20, 5 * int(np.ceil(top_n / 4))))
+    axes = axes.flatten()
+    for i, col in enumerate(df_subset.columns):
+        sns.histplot(df_subset[col], kde=True, ax=axes[i], bins=50); axes[i].set_title(col, fontsize=10)
+    for j in range(i + 1, len(axes)): axes[j].set_visible(False)
+    fig.suptitle(f'Dystrybucja Wartości dla Top {top_n} Cech'); plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "10_dystrybucja_cech.png")); plt.close()
+    print("-> Plik PNG został zapisany.")
+
+def analyze_pca_redundancy(df_features):
+    print("\n[Dodatkowe] Redundancja Cech (PCA)...")
+    # ZMIANA: Lokalna obsługa NaN
+    df_ready = df_features.dropna()
+
+    if df_ready.empty:
+        print("  > OSTRZEŻENIE: Po usunięciu NaN nie ma danych do analizy PCA. Pomijanie.")
+        return
+
+    scaler = StandardScaler(); scaled_features = scaler.fit_transform(df_ready); pca = PCA(); pca.fit(scaled_features)
+    cumulative_variance = np.cumsum(pca.explained_variance_ratio_)
+    plt.figure(figsize=(12, 7)); plt.plot(range(1, len(cumulative_variance) + 1), cumulative_variance, marker='.', linestyle='--')
+    plt.title('Skumulowana Wyjaśniona Wariancja (Analiza PCA)'); plt.xlabel('Liczba Składowych Głównych'); plt.ylabel('Procent Wyjaśnionej Wariancji')
+    plt.axhline(y=0.95, color='r', linestyle=':', label='95% progu'); plt.axhline(y=0.90, color='g', linestyle=':', label='90% progu'); plt.legend()
+    plt.savefig(os.path.join(OUTPUT_DIR, "11_analiza_pca.png")); plt.close()
+    print("-> Plik PNG został zapisany.")
 
 
 def analyze_feature_importance(df_imp):

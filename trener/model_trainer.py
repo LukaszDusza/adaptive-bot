@@ -255,7 +255,7 @@ async def main() -> None:
     storage_name = f"sqlite:///{study_name}.db"
     study = optuna.create_study(study_name=study_name, storage=storage_name, direction='maximize', load_if_exists=True)
 
-    study.optimize(lambda trial: objective(trial, df_features_selected), n_trials=config.OPTUNA_TRIALS, n_jobs=-1)
+    # study.optimize(lambda trial: objective(trial, df_features_selected), n_trials=config.OPTUNA_TRIALS)
 
     try:
         best_params = study.best_params
@@ -271,16 +271,29 @@ async def main() -> None:
     preds, probas, f1, df_holdout, top_features_final = train_unified_model(df_features_selected.copy(), best_model,
                                                                             full_run=True)
 
-    results_df = df_holdout[['open', 'high', 'low', 'close', 'target']].copy()
-    results_df['prediction'] = preds
-    results_df['proba_DOWN(0)'] = probas[:, 0]
-    results_df['proba_UP(1)'] = probas[:, 1]
+    # 1. Stwórz bazową ramkę danych z tego, co mamy: target, prediction, probas
+    results_df = pd.DataFrame({
+        'target': df_holdout['target'],
+        'prediction': preds,
+        'proba_DOWN(0)': probas[:, 0],
+        'proba_UP(1)': probas[:, 1]
+    }, index=df_holdout.index)
+
+    # 2. Dołącz brakujące kolumny OHLC z pełnego zbioru `df_features`
+    ohlc_cols = ['open', 'high', 'low', 'close']
+    results_df = results_df.join(df_features[ohlc_cols])
+
+    # 3. Ustaw pożądaną kolejność kolumn
+    final_cols_order = ohlc_cols + ['target', 'prediction', 'proba_DOWN(0)', 'proba_UP(1)']
+    results_df = results_df[final_cols_order]
+    # =================================================================
 
     print(f"\nWynik F1-score na zbiorze testowym (holdout): {f1:.4f}")
     print("\n" + "=" * 50)
     print("Pełny Raport Klasyfikacji na Zbiorze Holdout:")
     print(classification_report(y_true=df_holdout['target'], y_pred=preds, target_names=['SPADEK (0)', 'WZROST (1)']))
     print("=" * 50)
+
     print("\nTop 10 cech użytych w finalnym modelu:")
     print(top_features_final[:10])
 
