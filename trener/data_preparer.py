@@ -8,8 +8,17 @@ import statsmodels.api as sm
 from tqdm import tqdm
 import nolds
 import warnings
+from numba import jit
 
-
+def optimize_df_memory(df: pd.DataFrame) -> pd.DataFrame:
+    """Automatycznie optymalizuje typy danych w DataFrame, aby zredukować zużycie pamięci."""
+    print("Optymalizacja zużycia pamięci przez DataFrame...")
+    for col in df.columns:
+        if df[col].dtype == 'float64':
+            df[col] = pd.to_numeric(df[col], downcast='float')
+        elif df[col].dtype == 'int64':
+            df[col] = pd.to_numeric(df[col], downcast='integer')
+    return df
 
 def _add_lagged_features(df: pd.DataFrame, columns_to_lag: list, lag_steps: list) -> pd.DataFrame:
     """Tworzy cechy opóźnione dla podanych kolumn."""
@@ -137,15 +146,48 @@ def add_wavelet_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
+@jit(nopython=True, cache=True)
+def _hurst_rs_numba(x):
+    n = len(x)
+    if n < 20:
+        return np.nan
+
+    lags = np.arange(2, n // 2)
+    tau = np.empty(len(lags), dtype=np.float64)
+    for i, lag in enumerate(lags):
+        tau[i] = np.sqrt(np.mean((x[lag:] - x[:-lag]) ** 2))
+
+    log_lags = np.log(lags)
+    log_tau = np.log(tau)
+
+    N = len(log_lags)
+    sum_x = np.sum(log_lags)
+    sum_y = np.sum(log_tau)
+    sum_xy = np.sum(log_lags * log_tau)
+    sum_x2 = np.sum(log_lags ** 2)
+
+    denominator = (N * sum_x2 - sum_x ** 2)
+    if denominator == 0:
+        return np.nan
+
+    m = (N * sum_xy - sum_x * sum_y) / denominator
+    return m
+    # =======================================================================
+
+@jit(nopython=True, cache=True)
+def _rolling_hurst_numba(data, window):
+    n = len(data)
+    result = np.full(n, np.nan)
+    for i in range(window, n + 1):
+        window_slice = data[i - window:i]
+        result[i - 1] = _hurst_rs_numba(window_slice)
+    return result
+
 def add_hurst_exponent(df: pd.DataFrame, window: int = 100) -> pd.DataFrame:
-    """
-    Oblicza Wykładnik Hursta w ruchomym oknie.
-    """
-    hurst_series = df['close'].rolling(window=window).apply(
-        lambda x: compute_Hc(x, kind='price')[0],
-        raw=True
-    )
-    df[f'HURST_{window}'] = hurst_series
+    """Oblicza Wykładnik Hursta w ruchomym oknie z użyciem Numba."""
+    print(f"Obliczanie Wykładnika Hursta dla interwału (Numba)...")
+    hurst_values = _rolling_hurst_numba(df['close'].values, window)
+    df[f'HURST_{window}'] = hurst_values
     return df
 
 def _add_stationary_features(df: pd.DataFrame, columns_to_transform: list, window: int) -> pd.DataFrame:
@@ -217,19 +259,13 @@ def add_fibonacci_features(df, window=config.FeatureConfig.FIBO_WINDOW):
     df['FIBO_relative_position'] = (df['close'] - swing_low) / swing_range
     distances = fibo_df.sub(df['close'], axis=0).abs()
 
-    # === POPRAWIONY FRAGMENT KODU ===
-    # Krok 1: Zidentyfikuj wiersze, w których wszystkie odległości to NaN
     all_na_rows = distances.isnull().all(axis=1)
 
-    # Krok 2: Zainicjuj serię z wartością domyślną
     nearest_level_series = pd.Series('FIBO_100.0', index=df.index)
 
-    # Krok 3: Oblicz idxmin() tylko dla prawidłowych wierszy i nadpisz domyślne wartości
-    # Używamy `loc`, aby uniknąć ostrzeżeń o przypisywaniu do kopii
     nearest_level_series.loc[~all_na_rows] = distances[~all_na_rows].idxmin(axis=1)
 
     df['FIBO_nearest_level'] = nearest_level_series
-    # =================================
 
     df['FIBO_distance_to_nearest'] = distances.min(axis=1) / swing_range
     df['FIBO_nearest_level'] = df['FIBO_nearest_level'].str.replace('FIBO_', '').astype(float)
@@ -262,7 +298,6 @@ def add_ichimoku_relational_features(df: pd.DataFrame, tenkan_col='ITS_9', kijun
         return df
 
     # 1. Pozycja ceny względem Chmury (Kumo)
-    # ZMIANA: Użycie operatora & zamiast 'and' i dodanie nawiasów
     conditions = [
         (df['close'] > df[span_a_col]) & (df['close'] > df[span_b_col]),
         (df['close'] < df[span_a_col]) & (df['close'] < df[span_b_col])
@@ -272,6 +307,7 @@ def add_ichimoku_relational_features(df: pd.DataFrame, tenkan_col='ITS_9', kijun
 
     # 2. Kolor i grubość chmury (znormalizowana przez cenę)
     df['ICHIMOKU_cloud_color'] = np.where(df[span_a_col] > df[span_b_col], 1, -1)
+
     # Zabezpieczenie przed dzieleniem przez zero, jeśli cena byłaby zerem
     df['ICHIMOKU_cloud_thickness'] = (df[span_a_col] - df[span_b_col]).abs() / df['close'].replace(0, np.nan)
 
@@ -282,9 +318,6 @@ def add_ichimoku_relational_features(df: pd.DataFrame, tenkan_col='ITS_9', kijun
     df['ICHIMOKU_dist_price_tenkan'] = (df['close'] - df[tenkan_col]) / df['close'].replace(0, np.nan)
     df['ICHIMOKU_dist_price_kijun'] = (df['close'] - df[kijun_col]) / df['close'].replace(0, np.nan)
 
-    # Usuwamy oryginalne, przesunięte w przyszłość kolumny
-    # UWAGA: W Twojej wersji pandas-ta kolumny ISA i ISB nie są przesunięte,
-    # więc ich usunięcie jest opcjonalne, ale utrzymuje kod w czystości.
     df.drop(columns=[span_a_col, span_b_col], inplace=True, errors='ignore')
 
     return df
@@ -399,4 +432,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
     print("Czyszczenie wartości nieskończonych ('inf')...")
     final_df = final_df.replace([np.inf, -np.inf], np.nan)
 
+    final_df = optimize_df_memory(final_df)
+
+    print(f"Zakończono przygotowywanie cech. Finalny kształt danych: {final_df.shape}")
     return final_df

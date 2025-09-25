@@ -30,7 +30,7 @@ TOP_N_FEATURES = 35
 CV_SPLITS = 5
 HOLDOUT_SIZE = 0.2
 RANDOM_STATE = 42
-OPTUNA_TRIALS = 50
+OPTUNA_TRIALS = 80
 
 
 # --- 4. Konfiguracja Inżynierii Cech (Feature Engineering) ---

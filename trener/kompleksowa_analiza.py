@@ -27,6 +27,98 @@ FEATURES_CACHE_DIR = "data_cache/features"
 
 # --- Definicje Funkcji Analitycznych ---
 
+# W pliku kompleksowa_analiza.py
+
+def analyze_returns_distribution(df_trades):
+    """Analizuje rozkład zwrotów z pojedynczych transakcji."""
+    print("\n[Nowa Analiza] Rozkład Zwrotów i Ryzyko Tłustych Ogonów...")
+
+    if 'pnl' not in df_trades.columns:
+        df_trades['pnl'] = df_trades['is_correct'].apply(lambda x: 2 if x else -1)
+
+    # Obliczenia statystyczne
+    skewness = df_trades['pnl'].skew()
+    kurtosis = df_trades['pnl'].kurtosis()
+
+    print(f"  > Skośność (Skewness) rozkładu zwrotów: {skewness:.3f}")
+    print(f"  > Kurtoza (Kurtosis) rozkładu zwrotów: {kurtosis:.3f}")
+
+    # Zapis statystyk do pliku
+    pd.DataFrame({'metryka': ['skewness', 'kurtosis'], 'wartosc': [skewness, kurtosis]}).to_csv(
+        os.path.join(OUTPUT_DIR, "9_dane_statystyki_zwrotow.csv"), index=False
+    )
+
+    # Wizualizacja
+    plt.figure(figsize=(12, 7))
+    # W naszym przypadku mamy tylko dwie wartości, więc barplot będzie lepszy niż histogram
+    pnl_counts = df_trades['pnl'].value_counts().sort_index()
+    pnl_counts.plot(kind='bar', color=['crimson', 'forestgreen'], alpha=0.8)
+
+    plt.title('Rozkład Zysków i Strat z Pojedynczych Transakcji', fontsize=16)
+    plt.xlabel('Wynik Transakcji (w "R")', fontsize=12)
+    plt.ylabel('Liczba Transakcji', fontsize=12)
+    plt.xticks(ticks=[0, 1], labels=['Strata (-1R)', 'Zysk (+2R)'], rotation=0)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "9_rozkład_zwrotow.png"));
+    plt.close()
+    print("-> Pliki PNG i CSV zostały zapisane.")
+
+def analyze_rolling_performance(df_trades, window=252):
+    """Oblicza i wizualizuje kluczowe metryki wydajności w oknie kroczącym."""
+    print(f"\n[Nowa Analiza] Wydajność w Oknie Kroczącym (okno={window} transakcji)...")
+
+    # Upewniamy się, że mamy kolumnę pnl
+    if 'pnl' not in df_trades.columns:
+        df_trades['pnl'] = df_trades['is_correct'].apply(lambda x: 2 if x else -1)
+
+    # Obliczanie kroczącej skuteczności
+    df_trades['rolling_accuracy'] = df_trades['is_correct'].rolling(window=window).mean()
+
+    # Obliczanie kroczącego współczynnika Sortino
+    rolling_mean_return = df_trades['pnl'].rolling(window=window).mean()
+    # Obliczamy odchylenie standardowe tylko dla negatywnych zwrotów
+    downside_diff = df_trades['pnl'].rolling(window=window).apply(
+        lambda x: x[x < 0].std(ddof=0), raw=True
+    ).fillna(0)
+
+    # Wygładzamy, aby uniknąć gwałtownych skoków
+    downside_diff = downside_diff.ewm(span=window // 4).mean()
+
+    # Dzienny bezryzykowny zwrot dla krypto jest bliski zeru
+    risk_free_rate = 0
+
+    # Obliczamy Sortino Ratio, z zabezpieczeniem przed dzieleniem przez zero
+    df_trades['rolling_sortino'] = (rolling_mean_return - risk_free_rate) / downside_diff.replace(0, np.nan)
+
+    # Zapis danych do CSV
+    df_trades[['timestamp', 'rolling_accuracy', 'rolling_sortino']].to_csv(
+        os.path.join(OUTPUT_DIR, "8_dane_analiza_kroczaca.csv"), index=False
+    )
+
+    # Wizualizacja
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
+
+    ax1.plot(df_trades['timestamp'], df_trades['rolling_accuracy'], color='darkcyan', label='Krocząca Skuteczność')
+    ax1.axhline(df_trades['is_correct'].mean(), color='gray', linestyle='--', label='Średnia Skuteczność Całkowita')
+    ax1.set_title(f'Krocząca Skuteczność (okno = {window} transakcji)', fontsize=14)
+    ax1.set_ylabel('Skuteczność');
+    ax1.legend();
+    ax1.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+
+    ax2.plot(df_trades['timestamp'], df_trades['rolling_sortino'], color='indigo',
+             label='Kroczący Współczynnik Sortino')
+    ax2.axhline(0, color='gray', linestyle='--')
+    ax2.set_title(f'Kroczący Współczynnik Sortino (okno = {window} transakcji)', fontsize=14)
+    ax2.set_ylabel('Sortino Ratio');
+    ax2.set_xlabel('Data');
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTPUT_DIR, "8_analiza_kroczaca.png"));
+    plt.close()
+    print("-> Pliki PNG i CSV zostały zapisane.")
+
 def analyze_performance(df_preds):
     """Orkiestruje wszystkie analizy związane z wydajnością predykcji."""
     print("\n--- Rozpoczynanie Analizy Wydajności Modelu ---")
@@ -47,24 +139,19 @@ def analyze_performance(df_preds):
     df_trades = df_preds[df_preds['prediction'] != 1].copy()
     df_trades['is_correct'] = (df_trades['target'] == df_trades['prediction'])
 
-    # Definiujemy kolumny z prawdopodobieństwami, których będziemy używać
-    # Ta definicja jest teraz *po* zmianie nazwy, więc zawsze będzie poprawna
     proba_cols = [col for col in ['proba_DOWN(0)', 'proba_UP(2)'] if col in df_trades.columns]
 
     if df_trades.empty:
         print("W pliku nie znaleziono żadnych sygnałów transakcyjnych (WZROST/SPADEK). Pomijanie analiz wydajności.")
         return
 
-    # Obliczamy `proba_max` tylko jeśli kolumny istnieją
     if proba_cols:
         df_trades['proba_max'] = df_trades[proba_cols].max(axis=1)
     else:
         print("OSTRZEŻENIE: Brak kolumn z prawdopodobieństwami. Niektóre analizy zostaną pominięte.")
         # Zapewniamy istnienie kolumny, aby uniknąć błędów w kolejnych funkcjach
         df_trades['proba_max'] = 0.5
-        # --- KONIEC ZMIANY ---
 
-    # Uruchomienie analiz (reszta bez zmian)
     analyze_accuracy_vs_confidence(df_trades.copy())
     analyze_equity_and_drawdowns(df_trades.copy())
     analyze_confusion_matrix(df_preds)
@@ -72,6 +159,8 @@ def analyze_performance(df_preds):
     analyze_long_vs_short(df_trades.copy())
     analyze_performance_vs_volatility(df_trades.copy())
     analyze_probability_distribution(df_trades.copy())
+    analyze_rolling_performance(df_trades.copy())
+    analyze_returns_distribution(df_trades.copy())
 
 
 def analyze_accuracy_vs_confidence(df_trades):
