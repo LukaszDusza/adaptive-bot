@@ -75,6 +75,12 @@ def train_unified_model(df: pd.DataFrame, model_for_trial: LGBMClassifier, full_
     feature_importances = pd.DataFrame({
         'feature': all_features, 'importance': selector_model.feature_importances_
     }).sort_values('importance', ascending=False)
+
+    if full_run:
+        output_filename = "feature_importances.csv"
+        feature_importances.to_csv(output_filename, index=False)
+        print(f"\nWażność wszystkich cech została zapisana do pliku: {output_filename}")
+
     best_features = feature_importances.head(config.TOP_N_FEATURES)['feature'].tolist()
 
     if not full_run:
