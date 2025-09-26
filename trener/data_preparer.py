@@ -447,6 +447,19 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
     if atr_col in final_df.columns:
         final_df['MARKET_REGIME_VOL_OF_VOL'] = final_df[atr_col].rolling(window=100).std()
 
+    print("Dodawanie cech interakcji...")
+    rsi_col = f'RSI_{cfg.RSI_LENGTH}_{base_tf}'
+    adx_col = f'ADX_{cfg.ADX_LENGTH}_{base_tf}'
+
+    # Ta cecha będzie wysoka tylko, gdy pęd (RSI) i siła trendu (ADX) są jednocześnie wysokie
+    if rsi_col in final_df.columns and adx_col in final_df.columns:
+        final_df['INTERACTION_RSI_ADX'] = final_df[rsi_col] * final_df[adx_col]
+
+    # Ta cecha będzie wysoka, gdy cena jest daleko od chmury Ichimoku w warunkach silnego trendu
+    ichimoku_dist_col = f'ICHIMOKU_dist_price_kijun_1h'  # Przykład z 1h
+    if ichimoku_dist_col in final_df.columns and adx_col in final_df.columns:
+        final_df['INTERACTION_ICHIMOKU_ADX'] = final_df[ichimoku_dist_col] * final_df[adx_col]
+
     final_df = final_df.replace([np.inf, -np.inf], np.nan)
 
     final_df = optimize_df_memory(final_df)

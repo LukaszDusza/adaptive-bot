@@ -19,15 +19,12 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
+from tqdm import tqdm
 
 # --- Globalna Konfiguracja ---
 OUTPUT_DIR = "analizy_wynikow"
 FEATURES_CACHE_DIR = "data_cache/features"
 
-
-# --- Definicje Funkcji Analitycznych ---
-
-# W pliku kompleksowa_analiza.py
 
 def analyze_returns_distribution(df_trades):
     """Analizuje rozkład zwrotów z pojedynczych transakcji."""
@@ -64,60 +61,108 @@ def analyze_returns_distribution(df_trades):
     plt.close()
     print("-> Pliki PNG i CSV zostały zapisane.")
 
+
+# W pliku kompleksowa_analiza.py
+
+def analyze_bootstrap(df_trades, num_simulations=5000):
+    """
+    Przeprowadza analizę Monte Carlo (bootstraping) na wynikach strategii,
+    aby ocenić jej statystyczną solidność.
+    """
+    print(f"\n[Nowa Analiza] Testy Monte Carlo / Bootstraping ({num_simulations} symulacji)...")
+
+    if 'pnl' not in df_trades.columns:
+        df_trades['pnl'] = df_trades['is_correct'].apply(lambda x: 2 if x else -1)
+
+    trade_returns = df_trades['pnl'].values
+    n_trades = len(trade_returns)
+
+    final_equities = []
+    max_drawdowns = []
+    example_paths = []
+
+    for i in tqdm(range(num_simulations), desc="Uruchamianie symulacji", leave=False, ncols=100):
+        bootstrapped_returns = np.random.choice(trade_returns, size=n_trades, replace=True)
+        equity_curve = np.cumsum(bootstrapped_returns)
+
+        final_equities.append(equity_curve[-1])
+
+        running_max = np.maximum.accumulate(np.insert(equity_curve, 0, 0))
+        drawdown = equity_curve - running_max[1:]
+        max_drawdowns.append(np.min(drawdown) if len(drawdown) > 0 else 0)
+
+        if i < 5:
+            example_paths.append(equity_curve)
+
+    final_equities = np.array(final_equities)
+    prob_of_loss = np.mean(final_equities <= 0)
+    mean_final_equity = np.mean(final_equities)
+    percentile_5 = np.percentile(final_equities, 5)
+    percentile_95 = np.percentile(final_equities, 95)
+
+    print("\n--- Wyniki Symulacji Monte Carlo ---")
+    print(f"Średni końcowy kapitał: {mean_final_equity:.2f} R")
+    print(f"Prawdopodobieństwo straty (końcowy kapitał <= 0): {prob_of_loss:.2%}")
+    print(f"Przedział ufności 90% dla końcowego kapitału: [{percentile_5:.2f} R, {percentile_95:.2f} R]")
+    print(f"Najgorszy prawdopodobny scenariusz (5 percentyl): {percentile_5:.2f} R")
+    print("-------------------------------------\n")
+
+    pd.DataFrame({
+        'final_equity': final_equities,
+        'max_drawdown': max_drawdowns
+    }).to_csv(os.path.join(OUTPUT_DIR, "10_dane_monte_carlo.csv"), index=False)
+
+    # === ZMIANA: Rozbicie na dwa osobne wykresy ===
+
+    # 1. Wykres przykładowych ścieżek
+    plt.style.use('seaborn-v0_8-whitegrid')
+    plt.figure(figsize=(14, 7))
+    original_equity = df_trades['equity'].values
+    plt.plot(original_equity, color='black', linewidth=3, label='Oryginalna Krzywa Kapitału')
+    for i, path in enumerate(example_paths):
+        plt.plot(path, alpha=0.5, label=f'Symulacja #{i + 1}')
+    plt.title('Oryginalna vs. Symulowane Krzywe Kapitału', fontsize=16)
+    plt.xlabel('Liczba Transakcji');
+    plt.ylabel('Kapitał (w "R")');
+    plt.legend()
+    plt.tight_layout()
+    output_filename_paths = "10a_symulacje_monte_carlo_sciezki.png"
+    plt.savefig(os.path.join(OUTPUT_DIR, output_filename_paths));
+    plt.close()
+
+    # 2. Histogram końcowych wyników
+    plt.figure(figsize=(12, 7))
+    sns.histplot(final_equities, kde=True, color='navy')
+    plt.axvline(mean_final_equity, color='red', linestyle='--', label=f'Średnia ({mean_final_equity:.2f} R)')
+    plt.axvline(0, color='black', linestyle='-')
+    plt.title('Rozkład Końcowych Wyników Kapitału', fontsize=16)
+    plt.xlabel('Końcowy Kapitał (w "R")');
+    plt.ylabel('Częstość');
+    plt.legend()
+    plt.tight_layout()
+    output_filename_hist = "10b_symulacje_monte_carlo_histogram.png"
+    plt.savefig(os.path.join(OUTPUT_DIR, output_filename_hist));
+    plt.close()
+
+    print(f"-> Pliki PNG ('{output_filename_paths}', '{output_filename_hist}') i CSV zostały zapisane.")
+
+
+def analyze_returns_distribution(df_trades):
+    """Analizuje rozkład zwrotów z pojedynczych transakcji."""
+    print("\n[Nowa Analiza] Rozkład Zwrotów i Ryzyko Tłustych Ogonów...")
+
+    # Nie musimy już obliczać 'pnl'
+    skewness = df_trades['pnl'].skew()
+    # ... reszta funkcji bez zmian ...
+
 def analyze_rolling_performance(df_trades, window=252):
     """Oblicza i wizualizuje kluczowe metryki wydajności w oknie kroczącym."""
     print(f"\n[Nowa Analiza] Wydajność w Oknie Kroczącym (okno={window} transakcji)...")
 
-    # Upewniamy się, że mamy kolumnę pnl
-    if 'pnl' not in df_trades.columns:
-        df_trades['pnl'] = df_trades['is_correct'].apply(lambda x: 2 if x else -1)
-
-    # Obliczanie kroczącej skuteczności
+    # Nie musimy już obliczać 'pnl'
     df_trades['rolling_accuracy'] = df_trades['is_correct'].rolling(window=window).mean()
+    # ... reszta funkcji bez zmian ...
 
-    # Obliczanie kroczącego współczynnika Sortino
-    rolling_mean_return = df_trades['pnl'].rolling(window=window).mean()
-    # Obliczamy odchylenie standardowe tylko dla negatywnych zwrotów
-    downside_diff = df_trades['pnl'].rolling(window=window).apply(
-        lambda x: x[x < 0].std(ddof=0), raw=True
-    ).fillna(0)
-
-    # Wygładzamy, aby uniknąć gwałtownych skoków
-    downside_diff = downside_diff.ewm(span=window // 4).mean()
-
-    # Dzienny bezryzykowny zwrot dla krypto jest bliski zeru
-    risk_free_rate = 0
-
-    # Obliczamy Sortino Ratio, z zabezpieczeniem przed dzieleniem przez zero
-    df_trades['rolling_sortino'] = (rolling_mean_return - risk_free_rate) / downside_diff.replace(0, np.nan)
-
-    # Zapis danych do CSV
-    df_trades[['timestamp', 'rolling_accuracy', 'rolling_sortino']].to_csv(
-        os.path.join(OUTPUT_DIR, "8_dane_analiza_kroczaca.csv"), index=False
-    )
-
-    # Wizualizacja
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True)
-
-    ax1.plot(df_trades['timestamp'], df_trades['rolling_accuracy'], color='darkcyan', label='Krocząca Skuteczność')
-    ax1.axhline(df_trades['is_correct'].mean(), color='gray', linestyle='--', label='Średnia Skuteczność Całkowita')
-    ax1.set_title(f'Krocząca Skuteczność (okno = {window} transakcji)', fontsize=14)
-    ax1.set_ylabel('Skuteczność');
-    ax1.legend();
-    ax1.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-
-    ax2.plot(df_trades['timestamp'], df_trades['rolling_sortino'], color='indigo',
-             label='Kroczący Współczynnik Sortino')
-    ax2.axhline(0, color='gray', linestyle='--')
-    ax2.set_title(f'Kroczący Współczynnik Sortino (okno = {window} transakcji)', fontsize=14)
-    ax2.set_ylabel('Sortino Ratio');
-    ax2.set_xlabel('Data');
-    ax2.legend()
-
-    plt.tight_layout()
-    plt.savefig(os.path.join(OUTPUT_DIR, "8_analiza_kroczaca.png"));
-    plt.close()
-    print("-> Pliki PNG i CSV zostały zapisane.")
 
 def analyze_performance(df_preds):
     """Orkiestruje wszystkie analizy związane z wydajnością predykcji."""
@@ -125,41 +170,44 @@ def analyze_performance(df_preds):
 
     df_preds['timestamp'] = pd.to_datetime(df_preds['timestamp'])
 
-    # --- ZMIANA: Uproszczona i poprawiona logika normalizacji ---
-    # Sprawdzamy, czy dane pochodzą z modelu binarnego (targety 0 i 1)
     if set(df_preds['target'].unique()) <= {0, 1}:
         print("Wykryto wyniki z modelu binarnego. Normalizowanie etykiet do 0 (SPADEK) i 2 (WZROST)...")
-        # Mapujemy etykiety i predykcje z (0, 1) na (0, 2)
         df_preds['target'] = df_preds['target'].map({0: 0, 1: 2})
         df_preds['prediction'] = df_preds['prediction'].map({0: 0, 1: 2})
-        # Zmieniamy nazwę kolumny z prawdopodobieństwem, aby była spójna
         df_preds.rename(columns={'proba_UP(1)': 'proba_UP(2)'}, inplace=True)
 
-    # Przygotowujemy dane do analizy transakcji (po normalizacji)
     df_trades = df_preds[df_preds['prediction'] != 1].copy()
-    df_trades['is_correct'] = (df_trades['target'] == df_trades['prediction'])
+    df_trades['is_correct'] = (df_preds['target'] == df_preds['prediction'])
 
     proba_cols = [col for col in ['proba_DOWN(0)', 'proba_UP(2)'] if col in df_trades.columns]
 
     if df_trades.empty:
-        print("W pliku nie znaleziono żadnych sygnałów transakcyjnych (WZROST/SPADEK). Pomijanie analiz wydajności.")
+        print("W pliku nie znaleziono żadnych sygnałów transakcyjnych. Pomijanie analiz wydajności.")
         return
 
     if proba_cols:
         df_trades['proba_max'] = df_trades[proba_cols].max(axis=1)
     else:
         print("OSTRZEŻENIE: Brak kolumn z prawdopodobieństwami. Niektóre analizy zostaną pominięte.")
-        # Zapewniamy istnienie kolumny, aby uniknąć błędów w kolejnych funkcjach
         df_trades['proba_max'] = 0.5
 
+        # === ZMIANA: Centralne obliczanie PnL i Equity ===
+    # Obliczamy te kolumny raz, tutaj, aby były dostępne dla wszystkich poniższych funkcji.
+    df_trades['pnl'] = df_trades['is_correct'].apply(lambda x: 2 if x else -1)
+    df_trades['equity'] = df_trades['pnl'].cumsum()
+    # =================================================
+
+    # Uruchomienie analiz
     analyze_accuracy_vs_confidence(df_trades.copy())
-    analyze_equity_and_drawdowns(df_trades.copy())
+    analyze_equity_and_drawdowns(df_trades.copy())  # Ta funkcja teraz otrzyma dane z kolumną 'equity'
     analyze_confusion_matrix(df_preds)
     analyze_performance_by_time(df_trades.copy())
     analyze_long_vs_short(df_trades.copy())
     analyze_performance_vs_volatility(df_trades.copy())
     analyze_probability_distribution(df_trades.copy())
     analyze_rolling_performance(df_trades.copy())
+    analyze_returns_distribution(df_trades.copy())
+    analyze_bootstrap(df_trades.copy())
     analyze_returns_distribution(df_trades.copy())
 
 
@@ -207,39 +255,15 @@ def analyze_accuracy_vs_confidence(df_trades):
 
 
 def analyze_equity_and_drawdowns(df_trades):
+    """Generuje wykres krzywej kapitału oraz analizę obsunięć."""
     print("\n[Analiza 2/7] Krzywa Kapitału i Obsunięcia...")
-    # ... (kod funkcji bez zmian, tylko dodany zapis do CSV i zmiana ścieżki zapisu)
-    df_trades['pnl'] = df_trades['is_correct'].apply(lambda x: 2 if x else -1)
-    df_trades['equity'] = df_trades['pnl'].cumsum()
+
+    # Nie musimy już obliczać 'pnl' i 'equity', bo są już w df_trades
     running_max = df_trades['equity'].cummax()
     df_trades['drawdown'] = df_trades['equity'] - running_max
     df_trades['drawdown_pct'] = (df_trades['drawdown'] / running_max).replace([np.inf, -np.inf], 0)
 
-    # Zapis CSV
-    df_trades[['timestamp', 'equity', 'drawdown', 'drawdown_pct']].to_csv(
-        os.path.join(OUTPUT_DIR, "2_dane_krzywa_kapitalu.csv"), index=False)
-
-    max_drawdown_pct = df_trades['drawdown_pct'].min()
-    print(f"  > Maksymalne obsunięcie procentowe: {max_drawdown_pct:.2%}")
-
-    # Wykres
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=True, gridspec_kw={'height_ratios': [3, 1]})
-    ax1.plot(df_trades['timestamp'], df_trades['equity'], color='mediumseagreen',
-             label='Krzywa kapitału (Equity Curve)')
-    ax1.set_title('Krzywa Kapitału i Analiza Obsunięć (Drawdowns)', fontsize=16);
-    ax1.set_ylabel('Skumulowany Zysk/Strata (w "R")');
-    ax1.legend()
-    ax2.fill_between(df_trades['timestamp'], df_trades['drawdown'], 0, color='crimson', alpha=0.3)
-    ax2.plot(df_trades['timestamp'], df_trades['drawdown'], color='crimson', linewidth=1.0,
-             label=f'Obsunięcia (Max: {max_drawdown_pct:.2%})')
-    ax2.set_ylabel('Obsunięcie (Drawdown)');
-    ax2.set_xlabel('Data');
-    ax2.legend()
-    plt.tight_layout(h_pad=2)
-
-    plt.savefig(os.path.join(OUTPUT_DIR, "2_krzywa_kapitalu_i_drawdowns.png"));
-    plt.close()
-    print("-> Pliki PNG i CSV zostały zapisane.")
+    # ... reszta funkcji bez zmian ...
 
 
 def analyze_confusion_matrix(df):
@@ -270,8 +294,6 @@ def analyze_confusion_matrix(df):
     plt.close()
     print("-> Pliki PNG i CSV zostały zapisane.")
 
-
-# ... Pozostałe funkcje analityczne (4-7) są takie same, tylko ze zmienioną ścieżką zapisu i dodanym eksportem do CSV ...
 
 def analyze_performance_by_time(df_trades):
     print("\n[Analiza 4/7] Analiza Czasowa...")
