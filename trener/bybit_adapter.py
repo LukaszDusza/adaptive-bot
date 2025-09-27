@@ -1,334 +1,344 @@
 # bybit_adapter.py
-# Adapter Bybit V5 (Unified Trading) z obsługą:
-# - TRYB "demo": natywne REST na https://api-demo.bybit.com (własny HTTP + podpisy)
-# - TRYB "pybit": fallback na pybit (mainnet/testnet)
-# Funkcje: get_kline, get_instruments_info, set_leverage, place_order (market), wallet_balance (Unified)
-
+# -*- coding: utf-8 -*-
 from __future__ import annotations
+
 import time
-import hmac
-import hashlib
-import json
 import math
-from typing import Any, Dict, List, Optional, Iterable
+from typing import Any, Dict, List, Optional
 
-import requests
+import logging
 
-# Pybit jest opcjonalny (używany tylko w trybie "pybit")
-try:
-    from pybit.unified_trading import HTTP as PYBIT_HTTP
-except Exception:
-    PYBIT_HTTP = None
+from pybit.unified_trading import HTTP
+from pybit.exceptions import InvalidRequestError
+
+log = logging.getLogger("bybit")
+
+
+# ---- HTTP z możliwością wstrzyknięcia niestandardowego endpointu (np. DEMO) ----
+class _DemoHTTP(HTTP):
+    def __init__(self, api_key: str, api_secret: str, base_url: str, recv_window: int = 20000):
+        super().__init__(api_key=api_key, api_secret=api_secret, testnet=False, recv_window=recv_window)
+        base_url = base_url.rstrip("/")
+        # W pybit 5.11.0 URL jest w atrybucie 'endpoint'
+        if hasattr(self, "endpoint"):
+            self.endpoint = base_url
+        # Niektóre wewnętrzne metody korzystają też z '_domain' – ustawiamy obie na wszelki wypadek
+        try:
+            setattr(self, "_domain", base_url)
+        except Exception:
+            pass
+        log.info(f"Bybit HTTP endpoint ustawiony na: {base_url}")
+
+
+def _norm_symbol(symbol: str) -> str:
+    """
+    'DOGE/USDT:USDT' -> 'DOGEUSDT'
+    'DOGEUSDT'       -> 'DOGEUSDT'
+    """
+    if ":" in symbol:
+        symbol = symbol.split(":")[0]
+    symbol = symbol.replace("/", "")
+    return symbol
+
+
+def _tf_to_interval(tf: str) -> str:
+    """
+    Mapowanie timeframe na format v5:
+      5m -> '5', 15m -> '15', 1h -> '60', 2h -> '120', 4h->'240', 1d->'D', 1w->'W', 1M->'M'
+    """
+    tf = tf.strip().lower()
+    if tf.endswith("m"):
+        return str(int(tf[:-1]))
+    if tf.endswith("h"):
+        return str(int(tf[:-1]) * 60)
+    if tf in ("1d", "d", "1day", "day"):
+        return "D"
+    if tf in ("1w", "w", "1week", "week"):
+        return "W"
+    if tf in ("1mo", "1mth", "month", "mth"):
+        return "M"
+    # fallback: spróbuj minutes
+    try:
+        _ = int(tf)
+        return tf
+    except Exception:
+        raise ValueError(f"Nieznany timeframe: {tf}")
+
+
+def _bar_ms(interval: str) -> int:
+    if interval == "D":
+        return 24 * 60 * 60 * 1000
+    if interval == "W":
+        return 7 * 24 * 60 * 60 * 1000
+    if interval == "M":
+        return 30 * 24 * 60 * 60 * 1000  # przybliżenie
+    return int(interval) * 60 * 1000  # minutes
 
 
 class BybitAPIError(RuntimeError):
     pass
 
 
-def _ensure_ok(resp: Dict[str, Any], ctx: str = "", extra_ok: Optional[Iterable[str]] = None) -> Dict[str, Any]:
-    """
-    Sprawdza retCode. Domyślnie akceptuje '0'.
-    Można przekazać extra_ok, np. {'110043'} dla 'leverage not modified'.
-    """
-    if not isinstance(resp, dict):
-        raise BybitAPIError(f"{ctx} -> invalid response type: {type(resp)}")
-    code = str(resp.get("retCode"))
-    if code != "0":
-        if extra_ok and code in set(extra_ok):
-            return resp
-        raise BybitAPIError(f"{ctx} -> retCode={resp.get('retCode')} retMsg={resp.get('retMsg')} resp={resp}")
-    return resp
-
-
-def _round_step(x: float, step: float) -> float:
-    if step <= 0:
-        return float(x)
-    # floor do siatki kroku
-    return math.floor(float(x) / step + 1e-12) * step
-
-
-# ----------------------------- DEMO HTTP (api-demo.bybit.com) -----------------------------
-
-class _DemoHTTP:
-    """
-    Minimalny klient Bybit V5 dla api-demo.bybit.com z podpisem HMAC (SIGN-TYPE=2).
-    Dokumentacja: https://bybit-exchange.github.io/docs/v5/intro
-    """
-    def __init__(self, api_key: str, api_secret: str, base_url: str, recv_window: int = 5000, timeout: int = 15):
-        self.api_key = api_key
-        self.api_secret = api_secret.encode()
-        self.base_url = base_url.rstrip("/")
-        self.recv_window = recv_window
-        self.timeout = timeout
-        self.sess = requests.Session()
-
-    def _ts(self) -> str:
-        return str(int(time.time() * 1000))
-
-    def _sign(self, ts: str, query_or_body: str) -> str:
-        # SIGN-TYPE=2: sign = HMAC_SHA256(secret, ts + api_key + recv_window + query/body)
-        payload = ts + self.api_key + str(self.recv_window) + query_or_body
-        return hmac.new(self.api_secret, payload.encode(), hashlib.sha256).hexdigest()
-
-    def _headers(self, ts: str, sign: str) -> Dict[str, str]:
-        return {
-            "X-BAPI-API-KEY": self.api_key,
-            "X-BAPI-TIMESTAMP": ts,
-            "X-BAPI-RECV-WINDOW": str(self.recv_window),
-            "X-BAPI-SIGN": sign,
-            "X-BAPI-SIGN-TYPE": "2",
-            "Content-Type": "application/json",
-        }
-
-    def get(self, path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        # query string według Bybit: klucze sortowane alfabetycznie
-        items = []
-        for k in sorted(params.keys()):
-            v = params[k]
-            if v is None:
-                continue
-            items.append(f"{k}={v}")
-        query = "&".join(items)
-        ts = self._ts()
-        sign = self._sign(ts, query)
-        headers = self._headers(ts, sign)
-        resp = self.sess.get(url, params=params, headers=headers, timeout=self.timeout)
-        return resp.json()
-
-    def post(self, path: str, data: Dict[str, Any]) -> Dict[str, Any]:
-        url = f"{self.base_url}{path}"
-        body_str = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-        ts = self._ts()
-        sign = self._sign(ts, body_str)
-        headers = self._headers(ts, sign)
-        resp = self.sess.post(url, data=body_str.encode("utf-8"), headers=headers, timeout=self.timeout)
-        return resp.json()
-
-
-# ----------------------------- ADAPTER -----------------------------
-
 class BybitAdapter:
     """
-    Jeden wspólny adapter. Sam wybierze tryb:
-      - jeśli base_url zawiera 'api-demo' => 'demo' (własny HTTP)
-      - inaczej => 'pybit' (wymaga pybit)
-    Publiczne metody:
-      fetch_ohlcv(symbol, interval, limit)
-      set_leverage(symbol, leverage)
-      market_entry(symbol, side, qty, reduce_only=False)
-      market_close(symbol, side, qty)
-      fetch_balance_usdt()
+    Cienka warstwa nad pybit v5.
+
+    Używane w live_trader.py:
+      - fetch_ohlcv(symbol, timeframe, limit)
+      - round_qty(symbol, qty)
+      - get_balance(use_available: bool)
+      - set_leverage(symbol_u, leverage)
+      - get_position(symbol_u)
+      - latest_price(symbol_u)
+      - market_open(symbol_u, side, qty)
+      - set_stop_loss(symbol_u, price, side)
+      - set_take_profit(symbol_u, price, side)
+      - cancel_tpsl(symbol_u)
+      - close_position(symbol_u)
     """
+
     def __init__(
         self,
         api_key: str,
         api_secret: str,
-        base_url: str = "https://api.bybit.com",
+        base_url: Optional[str] = None,
         category: str = "linear",
-        recv_window: int = 5000,
-    ):
-        self.api_key = api_key
-        self.api_secret = api_secret
-        self.base_url = base_url.rstrip("/")
+        recv_window: int = 20000,
+    ) -> None:
         self.category = category
         self.recv_window = recv_window
 
-        if "api-demo" in self.base_url.lower():
-            # DEMO: natywny klient
-            self.mode = "demo"
-            self.client = _DemoHTTP(api_key, api_secret, self.base_url, recv_window=self.recv_window)
+        if not api_key or not api_secret:
+            raise ValueError("Brak kluczy API (BYBIT_API_KEY / BYBIT_API_SECRET).")
+
+        if base_url:
+            # DEMO / custom endpoint
+            self.client = _DemoHTTP(api_key, api_secret, base_url, recv_window=recv_window)
+            self.base_url = base_url.rstrip("/")
         else:
-            # PYBIT: testnet/mainnet rozpoznawany przez flagę testnet
-            if PYBIT_HTTP is None:
-                raise BybitAPIError("pybit nie jest zainstalowany, a base_url nie wygląda na demo.")
-            self.mode = "pybit"
-            testnet = ("testnet" in self.base_url.lower())
-            self.client = PYBIT_HTTP(api_key=api_key, api_secret=api_secret, testnet=testnet, recv_window=recv_window)
+            # standardowy endpoint pybit (prod/testnet wg flagi testnet – tutaj False)
+            self.client = HTTP(api_key=api_key, api_secret=api_secret, testnet=False, recv_window=recv_window)
+            self.base_url = "https://api.bybit.com"
 
-        # cache specyfikacji
-        self._markets: Dict[str, Dict[str, Any]] = {}
+        self._lot_step: Dict[str, float] = {}
+        self._tick_size: Dict[str, float] = {}
 
-    # ---------- Market meta ----------
+        try:
+            self._prime_instrument_cache()
+        except Exception as e:
+            log.warning(f"Nie udało się wczytać specyfikacji instrumentów: {e}")
 
-    def _load_symbol_specs(self, symbol: str) -> Dict[str, Any]:
-        if symbol in self._markets:
-            return self._markets[symbol]
+    # ---------- Narzędzia ----------
+    def _prime_instrument_cache(self):
+        """Opcjonalne: wypełnij cache kroków ilości/ceny. Na razie pomijamy (on-demand)."""
+        pass
 
-        if self.mode == "demo":
-            r = self.client.get("/v5/market/instruments-info", {"category": self.category, "symbol": symbol})
-        else:  # pybit
-            r = self.client.get_instruments_info(category=self.category, symbol=symbol)
+    def round_qty(self, symbol: str, qty: float) -> float:
+        s = _norm_symbol(symbol)
+        step = self._lot_step.get(s, 0.0)
+        if step and step > 0:
+            return max(step, math.floor(qty / step) * step)
+        return float(f"{qty:.6f}")  # bezpieczny fallback
 
-        data = _ensure_ok(r, "get_instruments_info")["result"]
-        lst = data.get("list") or []
-        if not lst:
-            raise BybitAPIError(f"Instrument {symbol} nie znaleziony (category={self.category})")
-        info = lst[0]
-
-        lot = info.get("lotSizeFilter", {}) or {}
-        price = info.get("priceFilter", {}) or {}
-        specs = {
-            "qtyStep": float(lot.get("qtyStep", 0) or 0),
-            "minOrderQty": float(lot.get("minOrderQty", 0) or 0),
-            "maxOrderQty": float(lot.get("maxOrderQty", 0) or 0),
-            "tickSize": float(price.get("tickSize", 0) or 0),
-            "minPrice": float(price.get("minPrice", 0) or 0),
-            "maxPrice": float(price.get("maxPrice", 0) or 0),
-        }
-        self._markets[symbol] = specs
-        return specs
-
-    def _round_qty_for(self, symbol: str, qty: float) -> float:
-        specs = self._load_symbol_specs(symbol)
-        step = specs.get("qtyStep", 0.0) or 0.0
-        q = _round_step(float(qty), step) if step > 0 else float(qty)
-        min_q = specs.get("minOrderQty") or 0.0
-        if min_q and q < min_q:
-            q = 0.0
-        return q
-
-    def _round_price_for(self, symbol: str, price: float) -> float:
-        specs = self._load_symbol_specs(symbol)
-        tick = specs.get("tickSize", 0.0) or 0.0
-        p = _round_step(float(price), tick) if tick > 0 else float(price)
-        return p
-
-    # ---------- OHLCV ----------
-
-    def fetch_ohlcv(self, symbol: str, interval: str, limit: int = 1000) -> List[List[Any]]:
+    # ---------- Market data ----------
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> List[List[Any]]:
         """
-        Zwraca listę świec: [ts_ms, open, high, low, close, volume, turnover]
-        interval: '1','3','5','15','60','240','D','W', ...
+        Zwraca listę list: [start, open, high, low, close, volume, turnover] (stringi – jak w v5).
+        Paginacja chunkami do 1000, od najnowszej świecy wstecz.
         """
-        if self.mode == "demo":
-            r = self.client.get("/v5/market/kline", {"category": self.category, "symbol": symbol, "interval": interval, "limit": limit})
-        else:
-            r = self.client.get_kline(category=self.category, symbol=symbol, interval=interval, limit=limit)
-
-        data = _ensure_ok(r, "get_kline")["result"]
-        kl = data.get("list") or []
+        sym = _norm_symbol(symbol)
+        interval = _tf_to_interval(timeframe)
+        step = _bar_ms(interval)
         out: List[List[Any]] = []
-        for k in reversed(kl):  # Bybit daje od najnowszej
-            ts = int(k[0])
-            o = float(k[1]); h = float(k[2]); l = float(k[3]); c = float(k[4])
-            v = float(k[5]); to = float(k[6]) if len(k) > 6 else 0.0
-            out.append([ts, o, h, l, c, v, to])
+
+        # Zbieramy wstecz od teraz. Niektóre rynki DEMO mają mniejsze okna dostępności – pętla to uwzględnia.
+        end = int(time.time() * 1000)
+        tries = 0
+
+        while len(out) < limit and tries < 20:
+            need = min(1000, limit - len(out))
+            start = end - need * step
+            try:
+                resp = self.client.get_kline(
+                    category=self.category,
+                    symbol=sym,
+                    interval=interval,
+                    start=start,
+                    end=end,
+                    limit=need,
+                )
+            except InvalidRequestError as e:
+                raise BybitAPIError(f"fetch_ohlcv get_kline request error: {e}")
+
+            if not isinstance(resp, dict) or str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"fetch_ohlcv -> ret={resp}")
+
+            data = (((resp.get("result") or {}).get("list")) or [])
+            if not data:
+                # W DEMO często trzeba „kawałkować” okno. Cofamy end i próbujemy dalej.
+                tries += 1
+                end = start
+                continue
+
+            try:
+                data_sorted = sorted(data, key=lambda r: int(r[0]))
+            except Exception:
+                data_sorted = sorted(data, key=lambda r: int(r.get("start", 0)))
+
+            out.extend(data_sorted)
+            end = start
+            tries = 0  # reset, skoro dostaliśmy dane
+
+        if len(out) > limit:
+            out = out[-limit:]
+
+        if not out:
+            log.warning(
+                f"fetch_ohlcv: pusta odpowiedź. symbol={sym}, interval={interval}, limit={limit}, base={self.base_url}"
+            )
         return out
 
-    # ---------- Dźwignia ----------
-
-    def set_leverage(self, symbol: str, leverage: float) -> None:
-        if self.mode == "demo":
-            r = self.client.post("/v5/position/set-leverage", {
-                "category": self.category,
-                "symbol": symbol,
-                "buyLeverage": str(leverage),
-                "sellLeverage": str(leverage),
-            })
-        else:
-            r = self.client.set_leverage(category=self.category, symbol=symbol, buyLeverage=str(leverage), sellLeverage=str(leverage))
-        # Akceptuj także 110043: "leverage not modified"
-        _ensure_ok(r, "set_leverage", extra_ok={"110043"})
-
-    # ---------- Zlecenia ----------
-
-    def market_entry(self, symbol: str, side: str, qty: float, reduce_only: bool = False) -> str:
+    # ---------- Account / risk ----------
+    def get_balance(self, use_available: bool = False) -> float:
         """
-        side: 'Buy' (long) albo 'Sell' (short)
+        Zwraca totalEquity lub availableToWithdraw dla USDT na Unified Account.
         """
-        q = self._round_qty_for(symbol, float(qty))
-        if q <= 0:
-            raise BybitAPIError(f"Qty po zaokrągleniu = 0 (qtyStep/minOrderQty). Symbol={symbol}, qty_in={qty}")
+        try:
+            resp = self.client.get_wallet_balance(accountType="UNIFIED", coin="USDT")
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"get_wallet_balance -> {resp}")
+            rows = (resp.get("result") or {}).get("list") or []
+            if not rows:
+                return 0.0
+            coins = rows[0].get("coin") or []
+            for c in coins:
+                if c.get("coin") == "USDT":
+                    return float(c.get("availableToWithdraw" if use_available else "equity", 0.0))
+            return 0.0
+        except Exception as e:
+            log.warning(f"get_balance fail: {e}")
+            return 0.0
 
-        payload = {
-            "category": self.category,
-            "symbol": symbol,
-            "side": side,
-            "orderType": "Market",
-            "qty": str(q),
-            "reduceOnly": reduce_only,
-            "timeInForce": "IOC",
-        }
+    def set_leverage(self, symbol_u: str, leverage: float) -> None:
+        try:
+            r = self.client.set_leverage(
+                category=self.category,
+                symbol=symbol_u,
+                buyLeverage=str(leverage),
+                sellLeverage=str(leverage),
+            )
+            rc = str(r.get("retCode"))
+            if rc == "110043":
+                log.info("Leverage already set (110043).")
+            elif rc != "0":
+                raise BybitAPIError(f"set_leverage -> {r}")
+        except InvalidRequestError as e:
+            msg = str(e)
+            if "110043" in msg and "not modified" in msg:
+                log.info("Leverage already set.")
+            else:
+                raise
 
-        if self.mode == "demo":
-            r = self.client.post("/v5/order/create", payload)
-        else:
-            r = self.client.place_order(**payload)
+    # ---------- Pozycje / zlecenia ----------
+    def get_position(self, symbol_u: str) -> Dict[str, Any]:
+        resp = self.client.get_positions(category=self.category, symbol=symbol_u)
+        if str(resp.get("retCode")) not in ("0",):
+            raise BybitAPIError(f"get_positions -> {resp}")
+        arr = (resp.get("result") or {}).get("list") or []
+        for p in arr:
+            sz = float(p.get("size", 0) or 0)
+            if abs(sz) > 0:
+                side = p.get("side")  # Buy/Sell
+                entry = float(p.get("avgPrice", 0) or 0)
+                return {
+                    "side": "Long" if side == "Buy" else "Short",
+                    "size": sz,
+                    "entryPrice": entry,
+                }
+        return {}
 
-        data = _ensure_ok(r, "place_order")["result"]
-        return data.get("orderId", "")
+    def latest_price(self, symbol_u: str) -> float:
+        resp = self.client.get_tickers(category=self.category, symbol=symbol_u)
+        if str(resp.get("retCode")) not in ("0",):
+            raise BybitAPIError(f"get_tickers -> {resp}")
+        arr = (resp.get("result") or {}).get("list") or []
+        if not arr:
+            return 0.0
+        return float(arr[0].get("lastPrice", 0) or 0)
 
-    def market_close(self, symbol: str, side: str, qty: float) -> str:
+    def market_open(self, symbol_u: str, side: str, qty: float):
         """
-        Zamknięcie pozycji: przeciwna strona z reduceOnly=True.
-        side: 'Buy' zamyka shorta, 'Sell' zamyka longa.
+        side: 'Buy' dla long, 'Sell' dla short
         """
-        q = self._round_qty_for(symbol, float(qty))
-        if q <= 0:
-            raise BybitAPIError(f"Qty po zaokrągleniu = 0 (qtyStep/minOrderQty). Symbol={symbol}, qty_in={qty}")
+        resp = self.client.place_order(
+            category=self.category,
+            symbol=symbol_u,
+            side=side,
+            orderType="Market",
+            qty=str(qty),
+            timeInForce="IOC",
+            reduceOnly=False,
+        )
+        if str(resp.get("retCode")) not in ("0",):
+            raise BybitAPIError(f"place_order -> {resp}")
+        return resp
 
-        payload = {
-            "category": self.category,
-            "symbol": symbol,
-            "side": side,
-            "orderType": "Market",
-            "qty": str(q),
-            "reduceOnly": True,
-            "timeInForce": "IOC",
-        }
+    def set_stop_loss(self, symbol_u: str, price: float, side: str):
+        """
+        side: 'Sell' gdy mamy long (SL sprzedaje), 'Buy' gdy short
+        """
+        resp = self.client.set_trading_stop(
+            category=self.category,
+            symbol=symbol_u,
+            stopLoss=str(price),
+            positionIdx=0,  # net
+        )
+        if str(resp.get("retCode")) not in ("0",):
+            raise BybitAPIError(f"set_trading_stop (SL) -> {resp}")
+        return resp
 
-        if self.mode == "demo":
-            r = self.client.post("/v5/order/create", payload)
-        else:
-            r = self.client.place_order(**payload)
+    def set_take_profit(self, symbol_u: str, price: float, side: str):
+        resp = self.client.set_trading_stop(
+            category=self.category,
+            symbol=symbol_u,
+            takeProfit=str(price),
+            positionIdx=0,
+        )
+        if str(resp.get("retCode")) not in ("0",):
+            raise BybitAPIError(f"set_trading_stop (TP) -> {resp}")
+        return resp
 
-        data = _ensure_ok(r, "place_order(close)")["result"]
-        return data.get("orderId", "")
+    def cancel_tpsl(self, symbol_u: str):
+        # Na v5 TP/SL podpięte do pozycji – nadpisujemy pustymi parametrami
+        resp = self.client.set_trading_stop(
+            category=self.category,
+            symbol=symbol_u,
+            takeProfit="",
+            stopLoss="",
+            positionIdx=0,
+        )
+        if str(resp.get("retCode")) not in ("0",):
+            raise BybitAPIError(f"cancel_tpsl -> {resp}")
+        return resp
 
-    # ---------- Balance (Unified) ----------
-
-    def fetch_balance_usdt(self) -> Dict[str, float]:
-        if self.mode == "demo":
-            r = self.client.get("/v5/account/wallet-balance", {"accountType": "UNIFIED", "coin": "USDT"})
-        else:
-            r = self.client.get_wallet_balance(accountType="UNIFIED", coin="USDT")
-
-        data = _ensure_ok(r, "get_wallet_balance")["result"]
-        lst = data.get("list") or []
-        if not lst:
-            return {
-                "total_equity": 0.0,
-                "total_available": 0.0,
-                "coin_equity": 0.0,
-                "coin_wallet": 0.0,
-                "coin_available": 0.0,
-            }
-        acct = lst[0]
-        total_equity = float(acct.get("totalEquity", 0) or 0)
-        total_avail = float(acct.get("totalAvailableBalance", 0) or 0)
-
-        usdt_info: Optional[Dict[str, Any]] = None
-        for c in acct.get("coin", []) or []:
-            if str(c.get("coin")).upper() == "USDT":
-                usdt_info = c
-                break
-        if not usdt_info:
-            usdt_info = {}
-
-        coin_equity = float(usdt_info.get("equity", 0) or 0)
-        coin_wallet = float(usdt_info.get("walletBalance", 0) or 0)
-        coin_available = float(usdt_info.get("availableToWithdraw", 0) or 0)
-
-        return {
-            "total_equity": total_equity,
-            "total_available": total_avail,
-            "coin_equity": coin_equity,
-            "coin_wallet": coin_wallet,
-            "coin_available": coin_available,
-        }
-
-    # ---------- Utility ----------
-
-    def sleep(self, sec: float):
-        time.sleep(sec)
+    def close_position(self, symbol_u: str):
+        # zlecenie odwrotne na cały wolumen (reduceOnly)
+        pos = self.get_position(symbol_u)
+        if not pos:
+            return
+        side = "Sell" if pos["side"] == "Long" else "Buy"
+        qty = abs(float(pos.get("size", 0)))
+        if qty <= 0:
+            return
+        resp = self.client.place_order(
+            category=self.category,
+            symbol=symbol_u,
+            side=side,
+            orderType="Market",
+            qty=str(qty),
+            reduceOnly=True,
+            timeInForce="IOC",
+        )
+        if str(resp.get("retCode")) not in ("0",):
+            raise BybitAPIError(f"close_position -> {resp}")
+        return resp

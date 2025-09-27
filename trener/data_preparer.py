@@ -12,7 +12,7 @@ from numba import jit
 
 def optimize_df_memory(df: pd.DataFrame) -> pd.DataFrame:
     """Automatycznie optymalizuje typy danych w DataFrame, aby zredukować zużycie pamięci."""
-    print("Optymalizacja zużycia pamięci przez DataFrame...")
+    # print("Optymalizacja zużycia pamięci przez DataFrame...")
     for col in df.columns:
         if df[col].dtype == 'float64':
             df[col] = pd.to_numeric(df[col], downcast='float')
@@ -22,7 +22,7 @@ def optimize_df_memory(df: pd.DataFrame) -> pd.DataFrame:
 
 def _add_lagged_features(df: pd.DataFrame, columns_to_lag: list, lag_steps: list) -> pd.DataFrame:
     """Tworzy cechy opóźnione dla podanych kolumn."""
-    print(f"Tworzenie cech opóźnionych dla: {columns_to_lag}...")
+    # print(f"Tworzenie cech opóźnionych dla: {columns_to_lag}...")
     for col in columns_to_lag:
         if col in df.columns:
             for step in lag_steps:
@@ -54,10 +54,9 @@ def add_sample_entropy(df: pd.DataFrame, window: int = 100) -> pd.DataFrame:
 
     df[new_col_name] = entropy_series
 
-    # ZMIANA: Usunięcie `inplace=True` i jawne przypisanie wyniku
     df[new_col_name] = df[new_col_name].replace([np.inf, -np.inf], np.nan)
 
-    print(f"-> Cecha Entropii Próbkowej '{new_col_name}' została dodana.")
+    # print(f"-> Cecha Entropii Próbkowej '{new_col_name}' została dodana.")
     return df
 
 
@@ -78,7 +77,7 @@ def orthogonalize_feature(df: pd.DataFrame, base_feature: str, feature_to_orthog
 
     # Iterujemy przez dane, zaczynając od pierwszego pełnego okna
     # Używamy tqdm dla paska postępu, bo to może chwilę potrwać
-    print(f"Obliczanie cechy ortogonalnej: {new_col_name}...")
+    # print(f"Obliczanie cechy ortogonalnej: {new_col_name}...")
     for i in tqdm(range(window, len(df)), leave=False, ncols=100):
         # Wycinamy okno z danych
         window_y = feature_y[i - window:i]
@@ -98,7 +97,7 @@ def orthogonalize_feature(df: pd.DataFrame, base_feature: str, feature_to_orthog
         # .iloc[] jest potrzebne, aby przypisać wartość do właściwego indeksu w DataFrame
         df.iloc[i, df.columns.get_loc(new_col_name)] = model.resid[-1]
 
-    print(f"-> Cecha ortogonalna '{new_col_name}' została dodana.")
+    # print(f"-> Cecha ortogonalna '{new_col_name}' została dodana.")
     return df
 
 def add_wavelet_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -139,7 +138,7 @@ def add_wavelet_features(df: pd.DataFrame) -> pd.DataFrame:
             # Sumujemy energię w danym pasmie dla każdego punktu w czasie
             df[band_name] = np.sum(energy[band_indices, :], axis=0)
 
-        print("-> Cechy oparte na Analizie Falkowej (CWT) zostały dodane.")
+        # print("-> Cechy oparte na Analizie Falkowej (CWT) zostały dodane.")
 
     except Exception as e:
         print(f"Błąd podczas obliczania cech falkowych: {e}")
@@ -185,7 +184,7 @@ def _rolling_hurst_numba(data, window):
 
 def add_hurst_exponent(df: pd.DataFrame, window: int = 100) -> pd.DataFrame:
     """Oblicza Wykładnik Hursta w ruchomym oknie z użyciem Numba."""
-    print(f"Obliczanie Wykładnika Hursta dla interwału (Numba)...")
+    # print(f"Obliczanie Wykładnika Hursta dla interwału (Numba)...")
     hurst_values = _rolling_hurst_numba(df['close'].values, window)
     df[f'HURST_{window}'] = hurst_values
     return df
@@ -211,7 +210,7 @@ def _add_stationary_features(df: pd.DataFrame, columns_to_transform: list, windo
     return df
 
 def add_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
-    print("Obliczanie dziennych Pivot Points...")
+    # print("Obliczanie dziennych Pivot Points...")
     df_copy = df.copy()
     if not pd.api.types.is_datetime64_any_dtype(df_copy.index):
         df_copy.index = pd.to_datetime(df_copy.index)
@@ -240,7 +239,7 @@ def add_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
         df_copy[f'dist_to_{level_name}'] = (df_copy['close'] - pivot_values) / pivot_values.replace(0, np.nan)
 
     df_copy.drop(columns=['date_map', 'date_for_grouping'], inplace=True, errors='ignore')
-    print("-> Cechy oparte na Pivot Points zostały dodane.")
+    # print("-> Cechy oparte na Pivot Points zostały dodane.")
     return df_copy
 
 def add_fibonacci_features(df, window=config.FeatureConfig.FIBO_WINDOW):
@@ -336,8 +335,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
 
     cfg = config.FeatureConfig
     for tf_name, df in all_dfs.items():
-        print(f"Obliczanie wskaźników dla interwału {tf_name}...")
-
+        # print(f"Obliczanie wskaźników dla interwału {tf_name}...")
         df.ta.rsi(length=cfg.RSI_LENGTH, append=True)
 
         df.ta.atr(length=cfg.ATR_LENGTH, append=True)
@@ -368,15 +366,13 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
         df.ta.ichimoku(append=True)
         df = add_ichimoku_relational_features(df)
 
-        # df.ta.cdl_pattern(name="all", append=True)
-
-        print(f"Dodawanie cech Fibonacciego dla interwału {tf_name}...")
+        # print(f"Dodawanie cech Fibonacciego dla interwału {tf_name}...")
         df = add_fibonacci_features(df, window=cfg.FIBO_WINDOW)
 
-        print(f"Obliczanie Wykładnika Hursta dla interwału {tf_name}...")
+        # print(f"Obliczanie Wykładnika Hursta dla interwału {tf_name}...")
         df = add_hurst_exponent(df, window=100)
 
-        print(f"Dodawanie cech stacjonarnych dla interwału {tf_name}...")
+        # print(f"Dodawanie cech stacjonarnych dla interwału {tf_name}...")
         df = _add_stationary_features(df, window=cfg.STATIONARY_WINDOW, columns_to_transform=cfg.STATIONARITY_TARGET_INDICATORS)
 
         all_dfs[tf_name] = df
