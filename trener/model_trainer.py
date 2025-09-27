@@ -11,7 +11,7 @@ from sklearn.base import clone
 from sklearn.metrics import f1_score, classification_report
 from sklearn.model_selection import TimeSeriesSplit
 from tqdm import tqdm
-
+from sklearn.feature_selection import RFE
 import hashlib
 import inspect
 from numba import jit
@@ -230,23 +230,41 @@ async def main() -> None:
     df_features.dropna(inplace=True)
     if len(df_features) < 1000: return
 
-    print("\n--- Uruchamianie jednorazowej selekcji cech ---")
+    # --- Uruchamianie jednorazowej, BARDZO DOKŁADNEJ selekcji cech (RFE) ---
+    from sklearn.feature_selection import RFE
+    print("\n--- Uruchamianie jednorazowej selekcji cech (RFE) ---")
+
     all_features = [col for col in df_features.columns if
                     col not in ['open', 'high', 'low', 'close', 'volume', 'turnover', 'target']]
+
     holdout_split_idx_fs = int(len(df_features) * (1 - config.HOLDOUT_SIZE))
     train_val_df_fs = df_features.iloc[:holdout_split_idx_fs]
 
-    selector_model_fs = LGBMClassifier(random_state=config.RANDOM_STATE, objective='binary')
-    selector_model_fs.fit(train_val_df_fs[all_features], train_val_df_fs['target'])
+    # Inicjalizujemy model, który będzie używany wewnątrz RFE
+    # Używamy prostszych parametrów, bo będzie trenowany wielokrotnie
+    selector_model_for_rfe = LGBMClassifier(n_estimators=100, random_state=config.RANDOM_STATE, objective='binary')
 
-    feature_importances_fs = pd.DataFrame(
-        {'feature': all_features, 'importance': selector_model_fs.feature_importances_}).sort_values('importance',
-                                                                                                     ascending=False)
-    best_features_fs = feature_importances_fs.head(config.TOP_N_FEATURES)['feature'].tolist()
+    print(f"Uruchamianie RFE w celu wybrania {config.TOP_N_FEATURES} cech... (to będzie długo trwało!)")
+    # "step=0.1" oznacza, że w każdym kroku będziemy usuwać 10% najgorszych cech
+    selector = RFE(estimator=selector_model_for_rfe, n_features_to_select=config.TOP_N_FEATURES, step=0.1, verbose=1)
+    selector.fit(train_val_df_fs[all_features], train_val_df_fs['target'])
+
+    # Pobieramy listę wybranych cech
+    best_features_fs = [feature for feature, selected in zip(all_features, selector.support_) if selected]
+
+    # Możemy też zobaczyć ranking wszystkich cech (1 - najlepsza)
+    feature_ranking = pd.DataFrame({
+        'feature': all_features,
+        'ranking': selector.ranking_
+    }).sort_values('ranking')
 
     print(f"Wybrano {len(best_features_fs)} najlepszych cech do optymalizacji.")
-    feature_importances_fs.to_csv("feature_importances.csv", index=False)
-    print("> Pełna lista ważności cech zapisana do 'feature_importances.csv'")
+    feature_ranking.to_csv("feature_ranking_rfe.csv", index=False)
+    print("> Pełen ranking cech (RFE) zapisany do 'feature_ranking_rfe.csv'")
+
+    # Dalsza część kodu pozostaje bez zmian
+    final_columns_to_keep = best_features_fs + ['target']
+    df_features_selected = df_features[final_columns_to_keep]
 
     final_columns_to_keep = best_features_fs + ['target']
     df_features_selected = df_features[final_columns_to_keep]

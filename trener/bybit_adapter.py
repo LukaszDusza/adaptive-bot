@@ -309,12 +309,12 @@ class BybitAdapter:
         return resp
 
     def cancel_tpsl(self, symbol_u: str):
-        # Na v5 TP/SL podpięte do pozycji – nadpisujemy pustymi parametrami
+        # === POPRAWKA: Aby anulować SL/TP w API v5, należy wysłać "0" ===
         resp = self.client.set_trading_stop(
             category=self.category,
             symbol=symbol_u,
-            takeProfit="",
-            stopLoss="",
+            takeProfit="0",
+            stopLoss="0",
             positionIdx=0,
         )
         if str(resp.get("retCode")) not in ("0",):

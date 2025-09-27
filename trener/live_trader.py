@@ -3,14 +3,12 @@
 """
 live_trader.py
 --------------
-Ostateczna wersja live-runnera. W trybie "paper trading" wszystkie zlecenia
-(otwarcie, zamknięcie, SL/TP) są faktycznie wysyłane do API demo Bybit,
-zapewniając pełną synchronizację i realistyczne testowanie.
+Ostateczna wersja live-runnera. Wprowadzono ustrukturyzowane logowanie
+do pliku CSV z dedykowanymi kolumnami w celu łatwej analizy danych.
 
 - Wykorzystuje BybitAdapter do wszystkich interakcji z API.
 - Każda pozycja otrzymuje unikalne ID dodawane do logów w celu łatwego filtrowania.
 - Logika handlowa jest w pełni spójna z pro_backtester.py.
-- Dodano zapisywanie logów do pliku CSV.
 """
 
 import os
@@ -19,7 +17,8 @@ import json
 import math
 import argparse
 import logging
-from dataclasses import dataclass
+import csv
+from dataclasses import dataclass, asdict
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -30,7 +29,7 @@ import joblib
 try:
     from data_preparer import prepare_feature_set_for_timeframe as PREPARE_FEATS
     from bybit_adapter import BybitAdapter, BybitAPIError
-    from pybit.exceptions import InvalidRequestError # POPRAWKA: Import wyjątku z biblioteki pybit
+    from pybit.exceptions import InvalidRequestError
 except ImportError as e:
     raise RuntimeError(f"Nie udało się zaimportować wymaganych modułów: {e}")
 
@@ -43,7 +42,40 @@ def _norm_symbol(symbol: str) -> str:
     return symbol
 
 
-# === 2) Konwersja Klines na DataFrame ===
+# === 2) Dedykowany Logger do pliku CSV ===
+class CsvLogger:
+    def __init__(self, filepath: str, columns: List[str]):
+        self.filepath = filepath
+        self.columns = columns
+
+        is_new_file = not os.path.exists(self.filepath) or os.path.getsize(self.filepath) == 0
+
+        self.file = open(self.filepath, 'a', newline='', encoding='utf-8')
+        self.writer = csv.DictWriter(self.file, fieldnames=self.columns)
+
+        if is_new_file:
+            self.writer.writeheader()
+            self.file.flush()
+
+    def log(self, data: dict):
+        log_row = {}
+        for col in self.columns:
+            val = data.get(col, '')
+            if isinstance(val, (np.float32, np.float64, float)):
+                log_row[col] = f"{val:.8f}" if val != 0 else "0"
+            elif isinstance(val, pd.Timestamp):
+                log_row[col] = val.isoformat()
+            else:
+                log_row[col] = val
+
+        self.writer.writerow(log_row)
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
+
+
+# === 3) Konwersja Klines na DataFrame ===
 class _Klines:
     COLS = ["timestamp", "open", "high", "low", "close", "volume", "turnover"]
 
@@ -70,22 +102,17 @@ class _Klines:
         return df
 
 
-# === 3) Helper: Wybierz ostatni kompletny wiersz cech ===
+# === 4) Helper: Wybierz ostatni kompletny wiersz cech ===
 def _pick_last_complete_row(df: pd.DataFrame, required_cols: List[str], lookback: int = 50) -> Optional[pd.DataFrame]:
-    if df is None or df.empty:
-        return None
+    if df is None or df.empty: return None
     tail = df.tail(lookback)
     missing = [c for c in required_cols if c not in tail.columns]
-    if missing:
-        raise ValueError(f"[LIVE] Brak kolumn cech: {missing[:10]}")
-    view = tail[required_cols]
-    complete = view.dropna(how="any")
-    if complete.empty:
-        return None
-    return complete.tail(1)
+    if missing: raise ValueError(f"[LIVE] Brak kolumn cech: {missing[:10]}")
+    complete = tail[required_cols].dropna(how="any")
+    return complete if not complete.empty else None
 
 
-# === 4) Wrapper modelu ===
+# === 5) Wrapper modelu ===
 class _Model:
     def __init__(self, model, scaler, best_features: List[str]):
         self.model = model
@@ -94,14 +121,13 @@ class _Model:
 
     def proba(self, feats_df: pd.DataFrame) -> Optional[Tuple[float, float]]:
         row = _pick_last_complete_row(feats_df, self.feature_order)
-        if row is None:
-            return None
+        if row is None: return None
         Xs = self.scaler.transform(row[self.feature_order])
         proba = self.model.predict_proba(Xs)[0]
         return float(proba[0]), float(proba[1])
 
 
-# === 5) Zarządzanie stanem pozycji ===
+# === 6) Zarządzanie stanem pozycji ===
 @dataclass
 class Position:
     position_id: str
@@ -118,19 +144,22 @@ class Position:
         delta = (last_price - self.entry_price) if self.side == "long" else (self.entry_price - last_price)
         return delta * self.qty
 
+    def to_dict(self):
+        return asdict(self)
 
-# === 6) Główna klasa logiki handlowej ===
+
+# === 7) Główna klasa logiki handlowej ===
 class LiveTrader:
-    def __init__(self, cfg, model: _Model, adapter: BybitAdapter):
+    def __init__(self, cfg, model: _Model, adapter: BybitAdapter, csv_logger: CsvLogger):
         self.cfg = cfg
         self.model = model
         self.adapter = adapter
+        self.csv_logger = csv_logger
         self.position: Optional[Position] = None
         self.symbol_u = _norm_symbol(cfg.symbol)
 
     def run(self):
-        logging.info(
-            f"Start LiveTrader dla {self.cfg.symbol} @ {self.cfg.timeframe} | Paper Mode: {self.cfg.use_paper}")
+        logging.info(f"Start LiveTrader dla {self.cfg.symbol} @ {self.cfg.timeframe}")
         self._sync_position_from_exchange()
 
         while True:
@@ -164,6 +193,7 @@ class LiveTrader:
 
             except KeyboardInterrupt:
                 logging.info("Trader zatrzymany przez użytkownika.")
+                self.csv_logger.close()
                 break
             except Exception as e:
                 logging.error(f"Wystąpił błąd w głównej pętli: {e}", exc_info=True)
@@ -178,6 +208,11 @@ class LiveTrader:
         elif p_short >= self.cfg.min_conf_short:
             signal = -1
 
+        log_data = {
+            "timestamp": pd.Timestamp.utcnow(), "log_type": "STATUS", "current_price": current_price,
+            "atr": atr_val, "p_long": p_long, "p_short": p_short
+        }
+
         if self.position:
             self._update_tsl(last_close, atr_val)
             exit_reason = self._check_for_exit(current_price)
@@ -185,23 +220,27 @@ class LiveTrader:
                 self._execute_close(current_price, reason=exit_reason)
                 return
 
+            pnl = self.position.unrealized_pnl(current_price)
+            logging.info(
+                f"[{self.position.position_id}] [W POZYCJI] Strona: {self.position.side.upper()}, Ilość: {self.position.qty}, "
+                f"Wejście: {self.position.entry_price:.6f}, TSL: {self.position.tsl_price:.6f}, Niezreal. PnL: {pnl:.4f}")
+
+            log_data.update(self.position.to_dict())
+            log_data.update({"message": "W pozycji", "pnl": pnl})
+
             if signal == 0 and self.cfg.flat_on_low_conf != "off":
                 self._handle_flat_on_low_conf(current_price)
             elif (signal == 1 and self.position.side == "short") or (signal == -1 and self.position.side == "long"):
                 self._execute_close(current_price, reason="reverse")
                 self._execute_open("long" if signal == 1 else "short", current_price, atr_val, last_ts)
-            else:
-                pnl = self.position.unrealized_pnl(current_price)
-                logging.info(
-                    f"[{self.position.position_id}] [W POZYCJI] Strona: {self.position.side.upper()}, Wejście: {self.position.entry_price:.6f}, "
-                    f"TSL: {self.position.tsl_price:.6f}, TP: {self.position.tp_price}, Niezreal. PnL: {pnl:.4f}")
         else:
+            log_data["message"] = "Oczekiwanie na sygnał"
             if signal == 1:
                 self._execute_open("long", current_price, atr_val, last_ts)
             elif signal == -1:
                 self._execute_open("short", current_price, atr_val, last_ts)
-            else:
-                logging.info("[HOLD] Brak pozycji i sygnału wejścia.")
+
+        self.csv_logger.log(log_data)
 
     def _execute_open(self, side: str, price: float, atr_val: float, timestamp: pd.Timestamp):
         qty, stop_price, tp_price = self._calculate_position_size(price, atr_val, side)
@@ -210,6 +249,12 @@ class LiveTrader:
             return
 
         position_id = f"{self.symbol_u}-{timestamp.strftime('%Y%m%d-%H%M%S')}"
+
+        self.csv_logger.log({
+            "timestamp": timestamp, "position_id": position_id, "log_type": "OPEN_ATTEMPT",
+            "message": "Próba otwarcia pozycji", "side": side, "qty": qty,
+            "tsl_price": stop_price, "tp_price": tp_price, "current_price": price
+        })
 
         try:
             logging.info(f"[{position_id}] Wysyłanie zlecenia otwarcia: {side.upper()} {qty} {self.symbol_u} @ Market")
@@ -222,41 +267,63 @@ class LiveTrader:
                 self.adapter.set_take_profit(self.symbol_u, tp_price, "Sell" if side == "long" else "Buy")
 
             self.position = Position(
-                position_id=position_id,
-                side=side, entry_price=price, qty=qty,
-                tsl_price=stop_price, tp_price=tp_price,
-                open_time=timestamp,
+                position_id=position_id, side=side, entry_price=price, qty=qty,
+                tsl_price=stop_price, tp_price=tp_price, open_time=timestamp,
                 highest_close_since_entry=price if side == "long" else None,
                 lowest_close_since_entry=price if side == "short" else None
             )
             logging.info(
-                f"[{self.position.position_id}] [OTWARCIE POTWIERDZONE] {side.upper()} | Ilość: {qty} | Cena: {price:.6f} | TSL: {stop_price:.6f} | TP: {tp_price}")
+                f"[{self.position.position_id}] [OTWARCIE POTWIERDZONE] {side.upper()} | Ilość: {qty} | Cena: {price:.6f}")
+            self.csv_logger.log({
+                "timestamp": pd.Timestamp.utcnow(), "log_type": "OPEN_CONFIRMED",
+                "message": "Pozycja otwarta pomyślnie",
+                **self.position.to_dict()
+            })
 
         except (BybitAPIError, InvalidRequestError) as e:
             logging.error(f"[{position_id}] Błąd API podczas otwierania pozycji: {e}")
+            self.csv_logger.log({
+                "timestamp": pd.Timestamp.utcnow(), "position_id": position_id, "log_type": "ERROR",
+                "message": f"Błąd API przy otwieraniu: {e}"
+            })
             self.position = None
 
     def _execute_close(self, price: float, reason: str):
         if not self.position: return
 
-        log_prefix = f"[{self.position.position_id}]"
+        pos_data = self.position.to_dict()
         pnl = self.position.unrealized_pnl(price)
 
-        try:
-            logging.info(
-                f"{log_prefix} Wysyłanie zlecenia zamknięcia dla pozycji {self.position.side.upper()} z powodu: {reason}")
-            self.adapter.close_position(self.symbol_u)
-            self.adapter.cancel_tpsl(self.symbol_u)
+        self.csv_logger.log({
+            "timestamp": pd.Timestamp.utcnow(), "log_type": "CLOSE_ATTEMPT",
+            "message": f"Próba zamknięcia pozycji. Powód: {reason}", "current_price": price, "pnl": pnl,
+            **pos_data
+        })
 
-            log_msg = f"{log_prefix} [ZAMKNIĘCIE POTWIERDZONE] Powód: {reason} | Cena: {price:.6f} | PnL: {pnl:.4f}"
+        try:
+            logging.info(f"[{self.position.position_id}] Wysyłanie zlecenia zamknięcia z powodu: {reason}")
+            self.adapter.close_position(self.symbol_u)
+
+            log_msg = f"[{self.position.position_id}] [ZAMKNIĘCIE POTWIERDZONE] Powód: {reason} | PnL: {pnl:.4f}"
             balance = self.adapter.get_balance()
             log_msg += f" | Aktualne saldo: {balance:.2f}"
             logging.info(log_msg)
 
-            self.position = None
+            self.csv_logger.log({
+                "timestamp": pd.Timestamp.utcnow(), "log_type": "CLOSE_CONFIRMED",
+                "message": f"Pozycja zamknięta. Powód: {reason}", "current_price": price, "pnl": pnl,
+                **pos_data
+            })
 
         except (BybitAPIError, InvalidRequestError) as e:
-            logging.error(f"{log_prefix} Błąd API podczas zamykania pozycji: {e}")
+            logging.error(f"[{self.position.position_id}] Błąd API podczas zamykania pozycji: {e}")
+            self.csv_logger.log({
+                "timestamp": pd.Timestamp.utcnow(), "log_type": "ERROR", "message": f"Błąd API przy zamykaniu: {e}",
+                **pos_data
+            })
+        finally:
+            # Zawsze resetuj stan wewnętrzny, aby przerwać pętlę
+            self.position = None
 
     def _calculate_position_size(self, price: float, atr: float, side: str) -> Tuple[float, float, Optional[float]]:
         stop_dist = max(1e-9, self.cfg.atr_mult_stop * atr)
@@ -317,6 +384,10 @@ class LiveTrader:
 
         if new_stop:
             logging.info(f"{log_prefix} Aktualizacja TSL dla {self.position.side.upper()} do {new_stop:.6f}")
+            self.csv_logger.log({
+                "timestamp": pd.Timestamp.utcnow(), "log_type": "TSL_UPDATE",
+                "message": "Aktualizacja TSL", "tsl_price": new_stop, **self.position.to_dict()
+            })
             try:
                 self.adapter.set_stop_loss(self.symbol_u, new_stop, side_to_update)
             except (BybitAPIError, InvalidRequestError) as e:
@@ -381,6 +452,10 @@ class LiveTrader:
                 )
                 logging.info(
                     f"[{self.position.position_id}] Znaleziono i zsynchronizowano istniejącą pozycję: {self.position}")
+                self.csv_logger.log({
+                    "timestamp": sync_time, "position_id": position_id, "log_type": "SYNC",
+                    "message": "Zsynchronizowano istniejącą pozycję", **self.position.to_dict()
+                })
             else:
                 self.position = None
                 logging.info("Brak aktywnej pozycji na giełdzie.")
@@ -389,7 +464,7 @@ class LiveTrader:
             self.position = None
 
 
-# === 7) Konfiguracja CLI i główne wykonanie ===
+# === 8) Konfiguracja CLI i główne wykonanie ===
 @dataclass
 class Cfg:
     api_base: Optional[str]
@@ -412,11 +487,11 @@ class Cfg:
     poll_sec: float
     flat_on_low_conf: str
     use_paper: bool
-    log_file: Optional[str]
+    csv_log_file: Optional[str]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Live Trader z pełną synchronizacją API i zapisem logów do CSV")
+    parser = argparse.ArgumentParser(description="Live Trader z ustrukturyzowanym logowaniem do CSV")
     parser.add_argument("--api_base", default=os.getenv("BYBIT_API_BASE", "https://api-demo.bybit.com"))
     parser.add_argument("--api_key", default=os.getenv("BYBIT_API_KEY"))
     parser.add_argument("--api_secret", default=os.getenv("BYBIT_API_SECRET"))
@@ -440,8 +515,8 @@ def main():
                         help="Włącz tryb handlu papierowego (na koncie demo)")
     parser.add_argument("--live", dest="use_paper", action="store_false", help="Włącz tryb handlu na żywo")
     parser.set_defaults(use_paper=True)
-    parser.add_argument("--log_file", type=str, default="live_trader_log.csv",
-                        help="Ścieżka do pliku CSV, w którym zapisywane będą logi.")
+    parser.add_argument("--csv_log_file", type=str, default="live_trader_data.csv",
+                        help="Ścieżka do pliku CSV z danymi logów.")
     args = parser.parse_args()
 
     if (not args.use_paper or args.api_base == "https://api.bybit.com") and (not args.api_key or not args.api_secret):
@@ -450,26 +525,13 @@ def main():
 
     atr_tp = None if str(args.atr_mult_tp).lower() in ("none", "null") else float(args.atr_mult_tp)
 
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-    console_handler = logging.StreamHandler()
-    console_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-    console_handler.setFormatter(console_formatter)
-    logger.addHandler(console_handler)
-
-    if args.log_file:
-        is_new_file = not os.path.exists(args.log_file)
-        file_handler = logging.FileHandler(args.log_file, mode='a')
-        csv_formatter = logging.Formatter('%(asctime)s,%(levelname)s,"%(message)s"')
-        file_handler.setFormatter(csv_formatter)
-        logger.addHandler(file_handler)
-
-        if is_new_file:
-            with open(args.log_file, 'w') as f:
-                f.write("timestamp,level,message\n")
-
-        logging.info(f"Logowanie do pliku CSV włączone: {args.log_file}")
+    csv_columns = [
+        "timestamp", "position_id", "log_type", "message", "side", "entry_price", "qty",
+        "tsl_price", "tp_price", "current_price", "atr", "p_long", "p_short", "pnl"
+    ]
+    csv_logger = CsvLogger(filepath=args.csv_log_file, columns=csv_columns)
 
     cfg = Cfg(
         api_base=args.api_base, api_key=args.api_key, api_secret=args.api_secret,
@@ -481,7 +543,7 @@ def main():
         max_notional_frac=args.max_notional_frac,
         poll_sec=args.poll_sec, flat_on_low_conf=args.flat_on_low_conf,
         use_paper=args.use_paper,
-        log_file=args.log_file
+        csv_log_file=args.csv_log_file
     )
 
     adapter = BybitAdapter(api_key=cfg.api_key, api_secret=cfg.api_secret, base_url=cfg.api_base)
@@ -491,7 +553,7 @@ def main():
         best_features = json.load(f)
     model = _Model(model_sk, scaler, best_features)
 
-    trader = LiveTrader(cfg, model, adapter)
+    trader = LiveTrader(cfg, model, adapter, csv_logger)
     trader.run()
 
 
