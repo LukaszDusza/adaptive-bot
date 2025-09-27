@@ -30,6 +30,7 @@ import joblib
 try:
     from data_preparer import prepare_feature_set_for_timeframe as PREPARE_FEATS
     from bybit_adapter import BybitAdapter, BybitAPIError
+    from pybit.exceptions import InvalidRequestError # POPRAWKA: Import wyjątku z biblioteki pybit
 except ImportError as e:
     raise RuntimeError(f"Nie udało się zaimportować wymaganych modułów: {e}")
 
@@ -231,7 +232,7 @@ class LiveTrader:
             logging.info(
                 f"[{self.position.position_id}] [OTWARCIE POTWIERDZONE] {side.upper()} | Ilość: {qty} | Cena: {price:.6f} | TSL: {stop_price:.6f} | TP: {tp_price}")
 
-        except BybitAPIError as e:
+        except (BybitAPIError, InvalidRequestError) as e:
             logging.error(f"[{position_id}] Błąd API podczas otwierania pozycji: {e}")
             self.position = None
 
@@ -254,7 +255,7 @@ class LiveTrader:
 
             self.position = None
 
-        except BybitAPIError as e:
+        except (BybitAPIError, InvalidRequestError) as e:
             logging.error(f"{log_prefix} Błąd API podczas zamykania pozycji: {e}")
 
     def _calculate_position_size(self, price: float, atr: float, side: str) -> Tuple[float, float, Optional[float]]:
@@ -267,7 +268,7 @@ class LiveTrader:
             if base_equity <= 0:
                 logging.warning("Saldo <= 0. Używam domyślnej wartości 10000.")
                 base_equity = 10000.0
-        except BybitAPIError as e:
+        except (BybitAPIError, InvalidRequestError) as e:
             logging.error(f"Nie udało się pobrać salda: {e}. Używam domyślnej wartości 10000.")
             base_equity = 10000.0
 
@@ -318,7 +319,7 @@ class LiveTrader:
             logging.info(f"{log_prefix} Aktualizacja TSL dla {self.position.side.upper()} do {new_stop:.6f}")
             try:
                 self.adapter.set_stop_loss(self.symbol_u, new_stop, side_to_update)
-            except BybitAPIError as e:
+            except (BybitAPIError, InvalidRequestError) as e:
                 if "not modified" in str(e) or "34040" in str(e):
                     logging.info(
                         f"{log_prefix} TSL nie został zmodyfikowany (prawdopodobnie ta sama cena po zaokrągleniu).")
@@ -383,7 +384,7 @@ class LiveTrader:
             else:
                 self.position = None
                 logging.info("Brak aktywnej pozycji na giełdzie.")
-        except BybitAPIError as e:
+        except (BybitAPIError, InvalidRequestError) as e:
             logging.error(f"Nie udało się zsynchronizować pozycji: {e}")
             self.position = None
 
