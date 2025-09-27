@@ -8,8 +8,9 @@ Ostateczna wersja live-runnera. W trybie "paper trading" wszystkie zlecenia
 zapewniając pełną synchronizację i realistyczne testowanie.
 
 - Wykorzystuje BybitAdapter do wszystkich interakcji z API.
-- Usunięto logikę, która uniemożliwiała wysyłanie zleceń w trybie papierowym.
+- Każda pozycja otrzymuje unikalne ID dodawane do logów w celu łatwego filtrowania.
 - Logika handlowa jest w pełni spójna z pro_backtester.py.
+- Dodano zapisywanie logów do pliku CSV.
 """
 
 import os
@@ -102,6 +103,7 @@ class _Model:
 # === 5) Zarządzanie stanem pozycji ===
 @dataclass
 class Position:
+    position_id: str
     side: str
     entry_price: float
     qty: float
@@ -190,7 +192,7 @@ class LiveTrader:
             else:
                 pnl = self.position.unrealized_pnl(current_price)
                 logging.info(
-                    f"[W POZYCJI] Strona: {self.position.side.upper()}, Wejście: {self.position.entry_price:.6f}, "
+                    f"[{self.position.position_id}] [W POZYCJI] Strona: {self.position.side.upper()}, Wejście: {self.position.entry_price:.6f}, "
                     f"TSL: {self.position.tsl_price:.6f}, TP: {self.position.tp_price}, Niezreal. PnL: {pnl:.4f}")
         else:
             if signal == 1:
@@ -206,8 +208,10 @@ class LiveTrader:
             logging.warning("Obliczona wielkość pozycji <= 0. Pomijam wejście.")
             return
 
+        position_id = f"{self.symbol_u}-{timestamp.strftime('%Y%m%d-%H%M%S')}"
+
         try:
-            logging.info(f"Wysyłanie zlecenia otwarcia: {side.upper()} {qty} {self.symbol_u} @ Market")
+            logging.info(f"[{position_id}] Wysyłanie zlecenia otwarcia: {side.upper()} {qty} {self.symbol_u} @ Market")
             self.adapter.set_leverage(self.symbol_u, self.cfg.leverage)
             order_side = "Buy" if side == "long" else "Sell"
             self.adapter.market_open(self.symbol_u, order_side, qty)
@@ -217,6 +221,7 @@ class LiveTrader:
                 self.adapter.set_take_profit(self.symbol_u, tp_price, "Sell" if side == "long" else "Buy")
 
             self.position = Position(
+                position_id=position_id,
                 side=side, entry_price=price, qty=qty,
                 tsl_price=stop_price, tp_price=tp_price,
                 open_time=timestamp,
@@ -224,22 +229,25 @@ class LiveTrader:
                 lowest_close_since_entry=price if side == "short" else None
             )
             logging.info(
-                f"[OTWARCIE POTWIERDZONE] {side.upper()} | Ilość: {qty} | Cena: {price:.6f} | TSL: {stop_price:.6f} | TP: {tp_price}")
+                f"[{self.position.position_id}] [OTWARCIE POTWIERDZONE] {side.upper()} | Ilość: {qty} | Cena: {price:.6f} | TSL: {stop_price:.6f} | TP: {tp_price}")
 
         except BybitAPIError as e:
-            logging.error(f"Błąd API podczas otwierania pozycji: {e}")
+            logging.error(f"[{position_id}] Błąd API podczas otwierania pozycji: {e}")
             self.position = None
 
     def _execute_close(self, price: float, reason: str):
         if not self.position: return
+
+        log_prefix = f"[{self.position.position_id}]"
         pnl = self.position.unrealized_pnl(price)
 
         try:
-            logging.info(f"Wysyłanie zlecenia zamknięcia dla pozycji {self.position.side.upper()} z powodu: {reason}")
+            logging.info(
+                f"{log_prefix} Wysyłanie zlecenia zamknięcia dla pozycji {self.position.side.upper()} z powodu: {reason}")
             self.adapter.close_position(self.symbol_u)
             self.adapter.cancel_tpsl(self.symbol_u)
 
-            log_msg = f"[ZAMKNIĘCIE POTWIERDZONE] Powód: {reason} | Cena: {price:.6f} | PnL: {pnl:.4f}"
+            log_msg = f"{log_prefix} [ZAMKNIĘCIE POTWIERDZONE] Powód: {reason} | Cena: {price:.6f} | PnL: {pnl:.4f}"
             balance = self.adapter.get_balance()
             log_msg += f" | Aktualne saldo: {balance:.2f}"
             logging.info(log_msg)
@@ -247,7 +255,7 @@ class LiveTrader:
             self.position = None
 
         except BybitAPIError as e:
-            logging.error(f"Błąd API podczas zamykania pozycji: {e}")
+            logging.error(f"{log_prefix} Błąd API podczas zamykania pozycji: {e}")
 
     def _calculate_position_size(self, price: float, atr: float, side: str) -> Tuple[float, float, Optional[float]]:
         stop_dist = max(1e-9, self.cfg.atr_mult_stop * atr)
@@ -284,12 +292,13 @@ class LiveTrader:
     def _update_tsl(self, last_close: float, atr_val: float):
         if not self.position: return
 
+        log_prefix = f"[{self.position.position_id}]"
         new_stop, side_to_update = None, None
+
         if self.position.side == "long":
             self.position.highest_close_since_entry = max(self.position.highest_close_since_entry or last_close,
                                                           last_close)
             candidate = self.position.highest_close_since_entry - self.cfg.atr_mult_stop * atr_val
-
             candidate = round(candidate, 6)
 
             if candidate > self.position.tsl_price:
@@ -299,8 +308,6 @@ class LiveTrader:
             self.position.lowest_close_since_entry = min(self.position.lowest_close_since_entry or last_close,
                                                          last_close)
             candidate = self.position.lowest_close_since_entry + self.cfg.atr_mult_stop * atr_val
-
-            # === POPRAWKA: Zaokrąglanie kandydata na nowy stop loss ===
             candidate = round(candidate, 6)
 
             if candidate < self.position.tsl_price:
@@ -308,15 +315,15 @@ class LiveTrader:
                 new_stop, side_to_update = candidate, "Buy"
 
         if new_stop:
-            logging.info(f"Aktualizacja TSL dla {self.position.side.upper()} do {new_stop:.6f}")
+            logging.info(f"{log_prefix} Aktualizacja TSL dla {self.position.side.upper()} do {new_stop:.6f}")
             try:
                 self.adapter.set_stop_loss(self.symbol_u, new_stop, side_to_update)
             except BybitAPIError as e:
-                # === POPRAWKA: Lepsza obsługa błędu "not modified" ===
                 if "not modified" in str(e) or "34040" in str(e):
-                    logging.info(f"TSL nie został zmodyfikowany (prawdopodobnie ta sama cena po zaokrągleniu).")
+                    logging.info(
+                        f"{log_prefix} TSL nie został zmodyfikowany (prawdopodobnie ta sama cena po zaokrągleniu).")
                 else:
-                    logging.warning(f"Błąd API podczas aktualizacji TSL: {e}")
+                    logging.warning(f"{log_prefix} Błąd API podczas aktualizacji TSL: {e}")
 
     def _check_for_exit(self, price: float) -> Optional[str]:
         if not self.position: return None
@@ -330,6 +337,8 @@ class LiveTrader:
 
     def _handle_flat_on_low_conf(self, price: float):
         if not self.position or self.cfg.flat_on_low_conf == "off": return
+
+        log_prefix = f"[{self.position.position_id}]"
         pnl = self.position.unrealized_pnl(price)
         do_flat = False
         if self.cfg.flat_on_low_conf == "always":
@@ -340,7 +349,10 @@ class LiveTrader:
             is_protected = (self.position.side == "long" and self.position.tsl_price > self.position.entry_price) or \
                            (self.position.side == "short" and self.position.tsl_price < self.position.entry_price)
             if not is_protected: do_flat = True
-        if do_flat: self._execute_close(price, reason="flat_on_low_conf")
+
+        if do_flat:
+            logging.info(f"{log_prefix} Zamykanie pozycji z powodu polityki 'flat_on_low_conf'.")
+            self._execute_close(price, reason="flat_on_low_conf")
 
     def _calculate_atr(self, df_ohlc: pd.DataFrame, length: int = 14) -> Optional[float]:
         try:
@@ -356,13 +368,18 @@ class LiveTrader:
         try:
             pos_data = self.adapter.get_position(self.symbol_u)
             if pos_data and float(pos_data.get('size', 0)) > 0:
+                sync_time = pd.Timestamp.utcnow()
+                position_id = f"{self.symbol_u}-SYNC-{sync_time.strftime('%Y%m%d-%H%M%S')}"
                 side = "long" if pos_data['side'] == 'Long' else "short"
+
                 self.position = Position(
+                    position_id=position_id,
                     side=side, entry_price=float(pos_data['entryPrice']),
                     qty=float(pos_data['size']), tsl_price=0, tp_price=None,
-                    open_time=pd.Timestamp.utcnow(),
+                    open_time=sync_time
                 )
-                logging.info(f"Znaleziono istniejącą pozycję na giełdzie: {self.position}")
+                logging.info(
+                    f"[{self.position.position_id}] Znaleziono i zsynchronizowano istniejącą pozycję: {self.position}")
             else:
                 self.position = None
                 logging.info("Brak aktywnej pozycji na giełdzie.")
@@ -394,10 +411,11 @@ class Cfg:
     poll_sec: float
     flat_on_low_conf: str
     use_paper: bool
+    log_file: Optional[str]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Live Trader z pełną synchronizacją API w trybie papierowym")
+    parser = argparse.ArgumentParser(description="Live Trader z pełną synchronizacją API i zapisem logów do CSV")
     parser.add_argument("--api_base", default=os.getenv("BYBIT_API_BASE", "https://api-demo.bybit.com"))
     parser.add_argument("--api_key", default=os.getenv("BYBIT_API_KEY"))
     parser.add_argument("--api_secret", default=os.getenv("BYBIT_API_SECRET"))
@@ -421,6 +439,8 @@ def main():
                         help="Włącz tryb handlu papierowego (na koncie demo)")
     parser.add_argument("--live", dest="use_paper", action="store_false", help="Włącz tryb handlu na żywo")
     parser.set_defaults(use_paper=True)
+    parser.add_argument("--log_file", type=str, default="live_trader_log.csv",
+                        help="Ścieżka do pliku CSV, w którym zapisywane będą logi.")
     args = parser.parse_args()
 
     if (not args.use_paper or args.api_base == "https://api.bybit.com") and (not args.api_key or not args.api_secret):
@@ -428,7 +448,27 @@ def main():
             "Klucze API są wymagane w trybie live. Użyj --api_key i --api_secret lub ustaw zmienne środowiskowe.")
 
     atr_tp = None if str(args.atr_mult_tp).lower() in ("none", "null") else float(args.atr_mult_tp)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    console_handler = logging.StreamHandler()
+    console_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    if args.log_file:
+        is_new_file = not os.path.exists(args.log_file)
+        file_handler = logging.FileHandler(args.log_file, mode='a')
+        csv_formatter = logging.Formatter('%(asctime)s,%(levelname)s,"%(message)s"')
+        file_handler.setFormatter(csv_formatter)
+        logger.addHandler(file_handler)
+
+        if is_new_file:
+            with open(args.log_file, 'w') as f:
+                f.write("timestamp,level,message\n")
+
+        logging.info(f"Logowanie do pliku CSV włączone: {args.log_file}")
 
     cfg = Cfg(
         api_base=args.api_base, api_key=args.api_key, api_secret=args.api_secret,
@@ -439,7 +479,8 @@ def main():
         min_stop_pct_of_price=args.min_stop_pct_of_price, leverage=args.leverage,
         max_notional_frac=args.max_notional_frac,
         poll_sec=args.poll_sec, flat_on_low_conf=args.flat_on_low_conf,
-        use_paper=args.use_paper
+        use_paper=args.use_paper,
+        log_file=args.log_file
     )
 
     adapter = BybitAdapter(api_key=cfg.api_key, api_secret=cfg.api_secret, base_url=cfg.api_base)
