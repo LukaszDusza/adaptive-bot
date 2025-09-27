@@ -1,18 +1,13 @@
-# config.py
 from sklearn.preprocessing import StandardScaler
 
 # --- 1. Konfiguracja Danych i Cache ---
 TICKER = "DOGEUSDT"
 TRAIN_START_DATE = "2022-01-01"
-TRAIN_END_DATE = "2025-04-30"
+TRAIN_END_DATE = "2025-09-24"
 BASE_TIMEFRAME = '5m'
 FEATURE_TIMEFRAMES = [
-    # Co minutę od 5m do 15m
-    '5m', '6m', '7m', '8m', '9m', '10m', '11m', '12m', '13m', '14m', '15m',
-    # Co 5 minut do 1h
-    '20m', '25m', '30m', '35m', '40m', '45m', '50m', '55m',
-    # Co godzinę do 8h
-    '1h', '2h', '3h', '4h', '5h', '6h', '7h', '8h'
+    '5m', '10m', '14m', '15m', '20m', '25m', '30m', '35m', '40m',
+    '45m', '50m', '55m', '1h', '2h', '3h', '4h'
 ]
 RAW_DATA_CACHE_DIR = "data_cache/raw"
 FEATURES_CACHE_DIR = "data_cache/features"

@@ -1,0 +1,35 @@
+# === CORE ===
+numpy==1.26.4
+pandas==2.0.3
+pandas-ta==0.3.14b0
+
+# === ML / FE ===
+scikit-learn==1.7.2
+joblib==1.5.2
+lightgbm==4.6.0
+xgboost==3.0.5
+statsmodels==0.14.5
+PyWavelets==1.9.0
+nolds==0.6.2
+numba==0.61.2
+llvmlite==0.44.0
+optuna==4.5.0
+tqdm==4.67.1
+empyrical-reloaded==0.5.12
+
+# === TRADING / LIVE ===
+pybit==5.11.0
+ccxt==4.5.4
+python-dotenv==1.1.1
+# TA-Lib (opcjonalnie, jeśli używasz w treningu): wymaga systemowej biblioteki.
+# TA-Lib==0.6.7
+
+# === WYKRESY (opcjonalnie do raportów) ===
+matplotlib==3.10.6
+seaborn==0.13.2
+plotly==6.3.0
+mplfinance==0.12.10b0
+
+# === PINY DLA ZGODNOŚCI CZASOWEJ ===
+pytz==2025.2
+python-dateutil==2.9.0.post0
