@@ -18,7 +18,7 @@ _here = os.path.dirname(os.path.abspath(__file__))
 if _here not in sys.path:
     sys.path.insert(0, _here)
 try:
-    from bybit_adapter import BybitPybitAdapter
+    from bybit_adapter import BybitAdapter
 except ModuleNotFoundError as e:
     raise SystemExit("Brak pliku bybit_pybit_adapter.py w katalogu z live_trader.py") from e
 
@@ -305,7 +305,7 @@ class LiveTrader:
 
         self._ensure_hist_limit()
 
-        self.bybit = BybitPybitAdapter(
+        self.bybit = BybitAdapter(
             api_key=api_key, api_secret=api_secret, base_url=cfg.api_base, category="linear"
         )
         self.bybit.set_leverage(self.symbol_u, cfg.leverage)
