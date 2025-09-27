@@ -390,17 +390,17 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
                                           errors='ignore').add_suffix(f'_{tf_name}')
         final_df = pd.merge_asof(final_df, df_with_suffix, left_index=True, right_index=True, direction='backward')
 
-    print("Obliczanie pivot_points...")
+    # print("Obliczanie pivot_points...")
     final_df = add_pivot_points(final_df)
 
-    print("Obliczanie wavelet...")
+    # print("Obliczanie wavelet...")
     final_df = add_wavelet_features(final_df)
 
     base_rsi_col = f'RSI_{cfg.RSI_LENGTH}_{base_tf}'
     base_stoch_col = f'STOCHk_{cfg.STOCH_K}_3_3_{base_tf}'
 
     if base_rsi_col in final_df.columns and base_stoch_col in final_df.columns:
-        print("Obliczanie orthogonalize...")
+        # print("Obliczanie orthogonalize...")
         final_df = orthogonalize_feature(final_df,
                                          base_feature=base_rsi_col,
                                          feature_to_orthogonalize=base_stoch_col,
@@ -427,7 +427,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
     ]
     final_df = _add_lagged_features(final_df, columns_to_lag=lag_target_columns, lag_steps=cfg.PA_LAG_STEPS)
 
-    print("Dodawanie cech kontekstu rynkowego (reżimu)...")
+    # print("Dodawanie cech kontekstu rynkowego (reżimu)...")
     ema_trend_col = f'EMA_{cfg.EMA_TREND_LEN}_4h'
     if ema_trend_col in final_df.columns:
         final_df['MARKET_REGIME_TREND'] = np.where(final_df['close'] > final_df[ema_trend_col], 1, -1)
@@ -435,7 +435,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
     if atr_col in final_df.columns:
         final_df['MARKET_REGIME_VOL_OF_VOL'] = final_df[atr_col].rolling(window=100).std()
 
-    print("Dodawanie cech interakcji...")
+    # print("Dodawanie cech interakcji...")
     rsi_col = f'RSI_{cfg.RSI_LENGTH}_{base_tf}'
     adx_col = f'ADX_{cfg.ADX_LENGTH}_{base_tf}'
 

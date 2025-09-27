@@ -269,12 +269,15 @@ class LiveTrader:
         if qty * price > cap:
             qty = cap / price
 
-        # === POPRAWKA: Ilość dla instrumentów typu DOGEUSDT musi być liczbą całkowitą (qtyStep=1) ===
         qty = round(qty)
 
         stop_price = price - stop_dist if side == "long" else price + stop_dist
         tp_price = price + self.cfg.atr_mult_tp * atr if self.cfg.atr_mult_tp and side == "long" else \
             price - self.cfg.atr_mult_tp * atr if self.cfg.atr_mult_tp and side == "short" else None
+
+        stop_price = round(stop_price, 6)
+        if tp_price is not None:
+            tp_price = round(tp_price, 6)
 
         return qty, stop_price, tp_price
 
@@ -286,6 +289,9 @@ class LiveTrader:
             self.position.highest_close_since_entry = max(self.position.highest_close_since_entry or last_close,
                                                           last_close)
             candidate = self.position.highest_close_since_entry - self.cfg.atr_mult_stop * atr_val
+
+            candidate = round(candidate, 6)
+
             if candidate > self.position.tsl_price:
                 self.position.tsl_price = candidate
                 new_stop, side_to_update = candidate, "Sell"
@@ -293,6 +299,10 @@ class LiveTrader:
             self.position.lowest_close_since_entry = min(self.position.lowest_close_since_entry or last_close,
                                                          last_close)
             candidate = self.position.lowest_close_since_entry + self.cfg.atr_mult_stop * atr_val
+
+            # === POPRAWKA: Zaokrąglanie kandydata na nowy stop loss ===
+            candidate = round(candidate, 6)
+
             if candidate < self.position.tsl_price:
                 self.position.tsl_price = candidate
                 new_stop, side_to_update = candidate, "Buy"
@@ -302,7 +312,11 @@ class LiveTrader:
             try:
                 self.adapter.set_stop_loss(self.symbol_u, new_stop, side_to_update)
             except BybitAPIError as e:
-                logging.warning(f"Błąd API podczas aktualizacji TSL: {e}")
+                # === POPRAWKA: Lepsza obsługa błędu "not modified" ===
+                if "not modified" in str(e) or "34040" in str(e):
+                    logging.info(f"TSL nie został zmodyfikowany (prawdopodobnie ta sama cena po zaokrągleniu).")
+                else:
+                    logging.warning(f"Błąd API podczas aktualizacji TSL: {e}")
 
     def _check_for_exit(self, price: float) -> Optional[str]:
         if not self.position: return None
