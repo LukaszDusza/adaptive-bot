@@ -15,10 +15,9 @@ from sklearn.feature_selection import RFE
 import hashlib
 import inspect
 from numba import jit
-
 import config
-from data_preparer import prepare_feature_set_for_timeframe
-from async_data_fetcher import fetch_data_for_trainer_async
+from data_preparer import prepare_feature_set_for_timeframe, add_liquidation_features
+from async_data_fetcher import fetch_data_for_trainer_async, fetch_open_interest_async, fetch_funding_rate_async, fetch_liquidations_async
 
 def get_cache_hash() -> str:
     """
@@ -206,6 +205,63 @@ async def main() -> None:
         print(f"Brak cache dla bieżącej konfiguracji (hash: {cache_hash}). Uruchamianie przygotowania cech...")
         os.makedirs(config.FEATURES_CACHE_DIR, exist_ok=True)
         df_features = prepare_feature_set_for_timeframe(df_raw, base_tf=config.BASE_TIMEFRAME)
+
+        print("\n--- Rozpoczynanie pobierania danych Open Interest ---")
+        # Uwaga: symbol musi być w formacie akceptowanym przez giełdę, np. 'BTC/USDT'
+        df_oi = await fetch_open_interest_async(
+            ticker=config.TICKER,
+            timeframe=config.BASE_TIMEFRAME,
+            start_date=config.TRAIN_START_DATE,
+            end_date=config.TRAIN_END_DATE
+        )
+
+        if df_oi is not None and not df_oi.empty:
+            print("Łączenie danych OHLCV z danymi Open Interest...")
+            # Używamy merge_asof, aby bezpiecznie połączyć dane, nawet jeśli timestampy
+            # nie są idealnie zsynchronizowane. Wypełnia dane OI dla każdego bara OHLCV.
+            df_features = pd.merge_asof(
+                df_features.sort_index(),
+                df_oi.sort_index(),
+                left_index=True,
+                right_index=True,
+                direction='backward'  # Użyj ostatniej znanej wartości OI
+            )
+            print("Dane Open Interest zostały pomyślnie dołączone.")
+
+        print("\n--- Rozpoczynanie pobierania danych Funding Rate ---")
+        df_funding = await fetch_funding_rate_async(
+            ticker=config.TICKER,
+            start_date=config.TRAIN_START_DATE,
+            end_date=config.TRAIN_END_DATE
+        )
+
+        if df_funding is not None and not df_funding.empty:
+            print("Łączenie cech z danymi Funding Rate...")
+            df_features = pd.merge_asof(
+                df_features.sort_index(),
+                df_funding.sort_index(),
+                left_index=True,
+                right_index=True,
+                direction='backward'
+            )
+            print("Dane Funding Rate zostały pomyślnie dołączone.")
+
+        print("\n--- Rozpoczynanie pobierania danych o likwidacjach ---")
+        df_liq_raw = await fetch_liquidations_async(
+            ticker=config.TICKER,
+            start_date=config.TRAIN_START_DATE,
+            end_date=config.TRAIN_END_DATE
+        )
+
+        if df_liq_raw is not None and not df_liq_raw.empty:
+            # Przekazujemy df_features i surowe dane o likwidacjach do funkcji przetwarzającej
+            df_features = add_liquidation_features(
+                df=df_features,
+                df_liq_raw=df_liq_raw,
+                timeframe=config.BASE_TIMEFRAME
+            )
+            print("Cechy oparte na likwidacjach zostały pomyślnie dodane.")
+
         df_features.to_parquet(features_cache_filepath)
         print(f"Przetworzone cechy zostały zapisane do cache.")
 
@@ -273,7 +329,7 @@ async def main() -> None:
     storage_name = f"sqlite:///{study_name}.db"
     study = optuna.create_study(study_name=study_name, storage=storage_name, direction='maximize', load_if_exists=True)
 
-    # study.optimize(lambda trial: objective(trial, df_features_selected), n_trials=config.OPTUNA_TRIALS)
+    study.optimize(lambda trial: objective(trial, df_features_selected), n_trials=config.OPTUNA_TRIALS, n_jobs=-1)
 
     try:
         best_params = study.best_params

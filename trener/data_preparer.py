@@ -59,7 +59,6 @@ def add_sample_entropy(df: pd.DataFrame, window: int = 100) -> pd.DataFrame:
     # print(f"-> Cecha Entropii Próbkowej '{new_col_name}' została dodana.")
     return df
 
-
 def orthogonalize_feature(df: pd.DataFrame, base_feature: str, feature_to_orthogonalize: str,
                           window: int = 100) -> pd.DataFrame:
     """
@@ -242,6 +241,35 @@ def add_pivot_points(df: pd.DataFrame) -> pd.DataFrame:
     # print("-> Cechy oparte na Pivot Points zostały dodane.")
     return df_copy
 
+def add_open_interest_features(df: pd.DataFrame, window: int = 24) -> pd.DataFrame:
+    """
+    Tworzy cechy pochodne na podstawie kolumny 'open_interest'.
+    """
+    if 'open_interest' not in df.columns:
+        print("Ostrzeżenie: Brak kolumny 'open_interest'. Pomijanie tworzenia cech OI.")
+        return df
+
+    print("Tworzenie cech pochodnych z Open Interest...")
+    oi = df['open_interest']
+
+    # 1. Zmiana OI (momentum)
+    df['OI_change_1'] = oi.diff(1)
+    df['OI_roc_12'] = oi.pct_change(12) * 100 # Procentowa zmiana w ciągu 12 barów
+
+    # 2. Z-Score OI (jak bardzo obecne OI odbiega od średniej?)
+    oi_mean = oi.rolling(window=window).mean()
+    oi_std = oi.rolling(window=window).std()
+    df[f'OI_zscore_{window}'] = (oi - oi_mean) / oi_std.replace(0, np.nan)
+
+    # 3. Cecha interakcji: Zmiana OI * Zmiana Ceny (kluczowa dla siły trendu)
+    price_change = df['close'].diff(1)
+    df['OI_price_interaction'] = df['OI_change_1'] * price_change
+
+    # 4. Stosunek OI do jego średniej kroczącej (czy OI jest w trendzie?)
+    df[f'OI_vs_EMA_{window}'] = oi / df.ta.ema(close=oi, length=window, append=False).replace(0, np.nan)
+
+    return df
+
 def add_fibonacci_features(df, window=config.FeatureConfig.FIBO_WINDOW):
     swing_high = df['high'].rolling(window=window).max()
     swing_low = df['low'].rolling(window=window).min()
@@ -321,6 +349,56 @@ def add_ichimoku_relational_features(df: pd.DataFrame, tenkan_col='ITS_9', kijun
 
     return df
 
+def add_funding_rate_features(df: pd.DataFrame, window: int = 24) -> pd.DataFrame:
+    if 'funding_rate' not in df.columns:
+        return df
+
+    print("Tworzenie cech pochodnych z Funding Rate...")
+    fr = df['funding_rate']
+
+    # 1. Wygładzona wartość funding rate
+    df['funding_rate_ema'] = fr.ewm(span=window, adjust=False).mean()
+
+    # 2. Zmiana w czasie
+    df['funding_rate_diff'] = fr.diff(3)  # Różnica co 3 okresy (zwykle 3*8h=24h)
+
+    # 3. Interakcja z pędem (RSI) - bardzo silny sygnał!
+    # Szukamy sytuacji, gdzie rynek jest wykupiony (wysokie RSI) i panuje chciwość (wysoki funding)
+    rsi_col = [col for col in df.columns if 'RSI' in col and '15m' in col]  # Znajdź kolumnę RSI
+    if rsi_col:
+        df['interaction_rsi_funding'] = df[rsi_col[0]] * fr
+
+    return df
+
+def add_liquidation_features(df: pd.DataFrame, df_liq_raw: pd.DataFrame, timeframe: str = '5min') -> pd.DataFrame:
+    """
+    Agreguje surowe dane o likwidacjach i tworzy z nich cechy.
+    """
+    if df_liq_raw is None or df_liq_raw.empty:
+        return df
+
+    print(f"Agregowanie i tworzenie cech z danych o likwidacjach (interwał: {timeframe})...")
+
+    # Rozdzielenie likwidacji long i short
+    long_liq = df_liq_raw[df_liq_raw['side'] == 'Buy']['liquidated_usd']
+    short_liq = df_liq_raw[df_liq_raw['side'] == 'Sell']['liquidated_usd']
+
+    # Agregacja do interwału świec
+    long_liq_sum = long_liq.resample(timeframe).sum().rename('long_liquidations')
+    short_liq_sum = short_liq.resample(timeframe).sum().rename('short_liquidations')
+
+    # Łączenie z głównym DataFrame
+    df = df.join(long_liq_sum, how='left').join(short_liq_sum, how='left').fillna(0)
+
+    # Tworzenie cech
+    df['total_liquidations'] = df['long_liquidations'] + df['short_liquidations']
+    df['liquidation_imbalance'] = df['long_liquidations'] - df['short_liquidations']
+
+    # Wygładzone wartości
+    df['total_liquidations_ema'] = df['total_liquidations'].ewm(span=12, adjust=False).mean()
+
+    return df
+
 def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = config.BASE_TIMEFRAME):
     print(f"Przygotowywanie zestawu cech dla interwału bazowego: {base_tf}...")
     timeframes_map = {
@@ -347,7 +425,7 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
 
         df.ta.bbands(length=cfg.BBANDS_LENGTH, append=True)
 
-        # df.ta.stoch(k=cfg.STOCH_K, append=True)
+        df.ta.stoch(k=cfg.STOCH_K, append=True)
 
         df.ta.adx(length=cfg.ADX_LENGTH, append=True)
 
@@ -389,6 +467,10 @@ def prepare_feature_set_for_timeframe(df_5m_raw: pd.DataFrame, base_tf: str = co
         df_with_suffix = df_to_merge.drop(columns=['open', 'high', 'low', 'close', 'volume', 'turnover'],
                                           errors='ignore').add_suffix(f'_{tf_name}')
         final_df = pd.merge_asof(final_df, df_with_suffix, left_index=True, right_index=True, direction='backward')
+
+    # Ta funkcja zadziała tylko, jeśli dane OI zostały wcześniej dołączone w model_trainer.py
+    if 'open_interest' in final_df.columns:
+        final_df = add_open_interest_features(final_df, window=cfg.STATIONARY_WINDOW)
 
     # print("Obliczanie pivot_points...")
     final_df = add_pivot_points(final_df)
