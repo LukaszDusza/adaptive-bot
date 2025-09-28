@@ -202,18 +202,33 @@ class LiveTrader:
 
     def _process_cycle(self, p_long: float, p_short: float, current_price: float, atr_val: float, last_ts: pd.Timestamp,
                        last_close: float):
+
+        if self.position:
+            position_size_on_exchange = self.adapter.get_position_size(self.symbol_u)
+
+            if position_size_on_exchange == 0.0:
+                logging.info(
+                    f"[{self.position.position_id}] Pozycja została zamknięta na giełdzie (TSL/TP). Resetuję stan.")
+                self.csv_logger.log({
+                    "timestamp": pd.Timestamp.utcnow(), "log_type": "SYNC_CLOSE",
+                    "message": "Wykryto zamknięcie pozycji na giełdzie", **self.position.to_dict()
+                })
+                self.position = None
+                return
+
         signal = 0
         if p_long >= self.cfg.min_conf_long:
             signal = 1
         elif p_short >= self.cfg.min_conf_short:
             signal = -1
 
-        log_data = {
-            "timestamp": pd.Timestamp.utcnow(), "log_type": "STATUS", "current_price": current_price,
-            "atr": atr_val, "p_long": p_long, "p_short": p_short
-        }
-
         if self.position:
+            # Tworzymy słownik log_data tylko wtedy, gdy jesteśmy w pozycji
+            log_data = {
+                "timestamp": pd.Timestamp.utcnow(), "log_type": "STATUS", "current_price": current_price,
+                "atr": atr_val, "p_long": p_long, "p_short": p_short
+            }
+
             self._update_tsl(last_close, atr_val)
             exit_reason = self._check_for_exit(current_price)
             if exit_reason:
@@ -233,14 +248,25 @@ class LiveTrader:
             elif (signal == 1 and self.position.side == "short") or (signal == -1 and self.position.side == "long"):
                 self._execute_close(current_price, reason="reverse")
                 self._execute_open("long" if signal == 1 else "short", current_price, atr_val, last_ts)
-        else:
-            log_data["message"] = "Oczekiwanie na sygnał"
+
+            # Wywołanie logowania PRZENIESIONE do wnętrza tego bloku warunkowego
+            self.csv_logger.log(log_data)
+
+        else:  # Bot nie jest w pozycji - sprawdzamy sygnał i logujemy stan
+            self.csv_logger.log({
+                "timestamp": pd.Timestamp.utcnow(),
+                "log_type": "POLL",
+                "message": "Oczekiwanie na sygnał, brak pozycji",
+                "current_price": current_price,
+                "atr": atr_val,
+                "p_long": p_long,
+                "p_short": p_short
+            })
+
             if signal == 1:
                 self._execute_open("long", current_price, atr_val, last_ts)
             elif signal == -1:
                 self._execute_open("short", current_price, atr_val, last_ts)
-
-        self.csv_logger.log(log_data)
 
     def _execute_open(self, side: str, price: float, atr_val: float, timestamp: pd.Timestamp):
         qty, stop_price, tp_price = self._calculate_position_size(price, atr_val, side)
@@ -510,7 +536,8 @@ def main():
     parser.add_argument("--leverage", type=float, default=5.0)
     parser.add_argument("--max_notional_frac", type=float, default=1.0)
     parser.add_argument("--flat_on_low_conf", choices=["off", "always", "loss_only", "not_protected"], default="off")
-    parser.add_argument("--poll_sec", type=float, default=10.0)
+    ### ZMIANA ###: Zmieniono domyślny interwał na 30 sekund.
+    parser.add_argument("--poll_sec", type=float, default=30.0)
     parser.add_argument("--paper", dest="use_paper", action="store_true",
                         help="Włącz tryb handlu papierowego (na koncie demo)")
     parser.add_argument("--live", dest="use_paper", action="store_false", help="Włącz tryb handlu na żywo")

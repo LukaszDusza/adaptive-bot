@@ -128,6 +128,13 @@ class BybitAdapter:
         except Exception as e:
             log.warning(f"Nie udało się wczytać specyfikacji instrumentów: {e}")
 
+    def get_position_size(self, symbol: str) -> float:
+        """Szybko zwraca wielkość otwartej pozycji dla symbolu, lub 0.0, jeśli jej nie ma."""
+        try:
+            pos_data = self.get_position(symbol)
+            return float(pos_data.get('size', 0.0)) if pos_data else 0.0
+        except (BybitAPIError, InvalidRequestError):
+            return -1.0  # Zwracamy -1, aby zasygnalizować błąd API
     # ---------- Narzędzia ----------
     def _prime_instrument_cache(self):
         """Opcjonalne: wypełnij cache kroków ilości/ceny. Na razie pomijamy (on-demand)."""
