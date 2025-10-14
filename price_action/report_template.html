@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Raport Backtestu - {{ strategy_id }}</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 20px;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 15px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+        
+        .header .subtitle {
+            font-size: 1.2em;
+            opacity: 0.9;
+        }
+        
+        .header .timestamp {
+            margin-top: 15px;
+            font-size: 0.9em;
+            opacity: 0.8;
+        }
+        
+        .content {
+            padding: 40px;
+        }
+        
+        .section {
+            margin-bottom: 50px;
+        }
+        
+        .section-title {
+            font-size: 2em;
+            color: #667eea;
+            margin-bottom: 25px;
+            padding-bottom: 10px;
+            border-bottom: 3px solid #667eea;
+        }
+        
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .metric-card {
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+        
+        .metric-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 12px rgba(0,0,0,0.15);
+        }
+        
+        .metric-label {
+            font-size: 0.9em;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 10px;
+        }
+        
+        .metric-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #333;
+        }
+        
+        .metric-value.positive {
+            color: #27ae60;
+        }
+        
+        .metric-value.negative {
+            color: #c0392b;
+        }
+        
+        .chart-container {
+            background: #f8f9fa;
+            padding: 25px;
+            border-radius: 10px;
+            margin-bottom: 30px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        
+        .chart-container h3 {
+            font-size: 1.5em;
+            color: #667eea;
+            margin-bottom: 20px;
+        }
+        
+        .chart-container img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 5px;
+        }
+        
+        .stats-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 30px;
+            background: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .stats-table thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        
+        .stats-table th {
+            padding: 15px;
+            text-align: left;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-size: 0.9em;
+        }
+        
+        .stats-table td {
+            padding: 12px 15px;
+            border-bottom: 1px solid #e0e0e0;
+        }
+        
+        .stats-table tbody tr:hover {
+            background: #f5f7fa;
+        }
+        
+        .stats-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+        
+        .trade-card {
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 25px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            transition: transform 0.3s ease;
+        }
+        
+        .trade-card:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+        }
+        
+        .trade-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        
+        .trade-side {
+            font-size: 1.2em;
+            font-weight: bold;
+            padding: 5px 15px;
+            border-radius: 5px;
+        }
+        
+        .trade-side.long {
+            background: #27ae60;
+            color: white;
+        }
+        
+        .trade-side.short {
+            background: #c0392b;
+            color: white;
+        }
+        
+        .trade-pnl {
+            font-size: 1.3em;
+            font-weight: bold;
+        }
+        
+        .trade-pnl.positive {
+            color: #27ae60;
+        }
+        
+        .trade-pnl.negative {
+            color: #c0392b;
+        }
+        
+        .trade-details {
+            font-size: 0.9em;
+            color: #666;
+            margin-bottom: 15px;
+        }
+        
+        .trade-chart {
+            text-align: center;
+        }
+        
+        .trade-chart img {
+            max-width: 100%;
+            height: auto;
+            border-radius: 8px;
+            border: 1px solid #e0e0e0;
+        }
+        
+        .footer {
+            background: #2c3e50;
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .footer p {
+            margin: 5px 0;
+            opacity: 0.8;
+        }
+        
+        @media print {
+            body {
+                background: white;
+                padding: 0;
+            }
+            
+            .container {
+                box-shadow: none;
+            }
+            
+            .metric-card, .trade-card {
+                break-inside: avoid;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>📊 Raport Backtestu</h1>
+            <div class="subtitle">{{ strategy_id }}</div>
+            <div class="timestamp">Wygenerowano: {{ generation_time }}</div>
+        </div>
+        
+        <!-- Content -->
+        <div class="content">
+            
+            <!-- Key Metrics Section -->
+            <div class="section">
+                <h2 class="section-title">📈 Kluczowe Metryki</h2>
+                <div class="metrics-grid">
+                    <div class="metric-card">
+                        <div class="metric-label">Total PnL</div>
+                        <div class="metric-value {% if total_pnl > 0 %}positive{% else %}negative{% endif %}">
+                            ${{ "%.2f"|format(total_pnl) }}
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">Profit Factor</div>
+                        <div class="metric-value {% if profit_factor > 1 %}positive{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(profit_factor) }}
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">Total Trades</div>
+                        <div class="metric-value">{{ total_trades }}</div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">Win Rate</div>
+                        <div class="metric-value {% if win_rate > 50 %}positive{% else %}negative{% endif %}">
+                            {{ "%.2f"|format(win_rate) }}%
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card">
+                        <div class="metric-label">Max Drawdown</div>
+                        <div class="metric-value negative">
+                            ${{ "%.2f"|format(max_drawdown_usd) }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Charts Section -->
+            <div class="section">
+                <h2 class="section-title">📊 Wykresy Wydajności</h2>
+                
+                <div class="chart-container">
+                    <h3>Krzywa Kapitału i Drawdown</h3>
+                    <img src="data:image/png;base64,{{ equity_chart }}" alt="Equity & Drawdown Chart">
+                </div>
+                
+                <div class="chart-container">
+                    <h3>Dystrybucja PnL</h3>
+                    <img src="data:image/png;base64,{{ pnl_dist_chart }}" alt="PnL Distribution Chart">
+                </div>
+                
+                <div class="chart-container">
+                    <h3>Miesięczny PnL</h3>
+                    <img src="data:image/png;base64,{{ monthly_pnl_chart }}" alt="Monthly PnL Chart">
+                </div>
+            </div>
+            
+            <!-- Analysis Tables Section -->
+            <div class="section">
+                <h2 class="section-title">📋 Analiza Szczegółowa</h2>
+                
+                <h3 style="color: #667eea; margin-bottom: 15px;">Analiza według strony (Long/Short)</h3>
+                {{ side_analysis_html|safe }}
+                
+                <h3 style="color: #667eea; margin: 30px 0 15px 0;">Analiza według godziny</h3>
+                {{ hourly_analysis_html|safe }}
+                
+                <h3 style="color: #667eea; margin: 30px 0 15px 0;">Analiza według dnia tygodnia</h3>
+                {{ weekday_analysis_html|safe }}
+                
+                <h3 style="color: #667eea; margin: 30px 0 15px 0;">Analiza Drawdown</h3>
+                {{ drawdown_analysis_html|safe }}
+            </div>
+            
+            <!-- Individual Trades Section -->
+            {% if trade_visuals %}
+            <div class="section">
+                <h2 class="section-title">💹 Szczegóły Transakcji</h2>
+                
+                {% for trade in trade_visuals %}
+                <div class="trade-card">
+                    <div class="trade-header">
+                        <span class="trade-side {{ trade.side|lower }}">{{ trade.side }}</span>
+                        <span class="trade-pnl {% if trade.pnl_usd > 0 %}positive{% else %}negative{% endif %}">
+                            ${{ "%.2f"|format(trade.pnl_usd) }}
+                        </span>
+                    </div>
+                    <div class="trade-details">
+                        📅 Entry Time: {{ trade.entry_time }}
+                    </div>
+                    <div class="trade-chart">
+                        <img src="data:image/png;base64,{{ trade.chart_base64 }}" alt="Trade Chart">
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+            
+            <!-- All Trades Table -->
+            <div class="section">
+                <h2 class="section-title">📝 Wszystkie Transakcje</h2>
+                {{ trades_html|safe }}
+            </div>
+            
+        </div>
+        
+        <!-- Footer -->
+        <div class="footer">
+            <p><strong>Adaptive Trading Bot - Backtest Report</strong></p>
+            <p>Generated by Professional Backtester V2</p>
+            <p>⚠️ Past performance is not indicative of future results</p>
+        </div>
+    </div>
+</body>
+</html>

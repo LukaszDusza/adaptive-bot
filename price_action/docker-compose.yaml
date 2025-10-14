@@ -1,0 +1,46 @@
+services:
+  bot-sol:
+    container_name: sol-demo
+    build: .
+    env_file:
+      - .env
+    volumes:
+      # Mount only essential directories for trading
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./bot_state:/app/bot_state
+    restart: unless-stopped
+    command: >
+      python main.py --run-bot
+      --ticker ETHUSDT
+      --timeframe 1h
+      --helper-timeframes 2h 4h 6h 12h 1D
+      --prob-threshold 0.6
+      --tsl-pct 0.03
+      --tp-pct 0.06
+      --trade-size 500.0
+      --leverage 10 
+      --partial-tp
+
+  bot-sol-syl:
+    container_name: sol-syl
+    build: .
+    env_file:
+      - .env_sylwia
+    volumes:
+      # Mount only essential directories for trading
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./bot_state:/app/bot_state
+    restart: unless-stopped
+    command: >
+      python main.py --run-bot
+      --ticker ETHUSDT
+      --timeframe 1h
+      --helper-timeframes 2h 4h 6h 12h 1D
+      --prob-threshold 0.6
+      --tsl-pct 0.03
+      --tp-pct 0.06
+      --trade-size 50.0
+      --leverage 10 
+      --partial-tp

@@ -662,7 +662,7 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
+dynamic-bot/.env
 .venv
 env/
 venv/
@@ -701,3 +701,45 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
+/dynamic-bot/scaler_short.joblib
+/dynamic-bot/scaler_long.joblib
+/dynamic-bot/trading_model_long.joblib
+/dynamic-bot/trading_model_short.joblib
+/dynamic-bot/feature_names_short.json
+/dynamic-bot/feature_names_long.json
+/dynamic-bot/historical_data_icp.csv
+/dynamic-bot/trading_model_short.joblib
+/dynamic-bot/trading_model_long.joblib
+/dynamic-bot/scaler_short.joblib
+/dynamic-bot/scaler_long.joblib
+/dynamic-bot/historical_data_icp.csv
+/dynamic-bot/feature_names_short.json
+/dynamic-bot/feature_names_long.json
+/dynamic-bot/.env
+/backtest_results_ICP/
+/komitet-expertow/.env
+/komitet-expertow-solid/.env
+/old_model/requirements.txt
+/trener/balance_optimization_history.html
+/old_model/best_balance_params_DOGEUSDT.json
+/data_cache/raw/
+/live_trader_data.csv
+/signals_analysis.csv
+/multiclass_predictions.csv
+/daily_charts/
+/old_model/.env
+/old_model/.env_sylwia
+/price_action/.env
+/price_action/.env_sylwia
+/price_action/results/
+/price_action/backtests/
+/price_action/analysis/
+/price_action/optuna/
+/price_action/ADVANCED_LOGGING_GUIDE.md
+/price_action/BACKTESTER_V2_README.md
+/price_action/BOT_V2_CHECKLIST.md
+/price_action/BOT_V2_QUICK_COMPARISON.md
+/price_action/FINAL_CHECKLIST.md
+/price_action/*.md
+/price_action/*_long
+/price_action/*_short

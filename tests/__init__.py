@@ -1,1 +1,0 @@
-# Tests package for Adaptive Trading Bot
