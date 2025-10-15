@@ -1,3 +1,85 @@
+"""
+DATA PREPARER - PRICE ACTION + ICT/SMART MONEY
+==============================================
+
+Ten moduł przygotowuje cechy (features) dla modelu ML tradingowego.
+
+STRUKTURA CECH (TIERS):
+=======================
+
+TIER 0: OHLCV (basic data)
+  - open, high, low, close, volume, turnover
+
+TIER 1: Podstawowe wskaźniki techniczne
+  - RSI, SMA, VWAP, ATR, Bollinger Bands
+  - Volume analysis, Support/Resistance
+  - Candlestick patterns
+
+TIER 2: Zaawansowane Price Action
+  - Order Flow proxies
+  - Volume Profile approximation
+  - Market regime detection
+  - Mikrostruktura rynku
+
+TIER 3: Wskaźniki kompozytowe
+  - Market State Indicator (MSI)
+  - Momentum Regime
+  - Volume Confirmation Score
+  - Multi-Factor Sentiment
+
+TIER 4: ICT & SMART MONEY CONCEPTS ⭐ NOWE! ⭐
+  ┌──────────────────────────────────────────────┐
+  │  30+ cech wykrywających działania            │
+  │  instytucjonalnych traderów:                 │
+  │                                              │
+  │  • Fair Value Gaps (FVG)                     │
+  │  • Liquidity Sweeps                          │
+  │  • Order Blocks                              │
+  │  • Breaker Blocks                            │
+  │  • Market Structure Shifts (MSS)             │
+  │  • Institutional Candles                     │
+  │  • Liquidity Voids                           │
+  │                                              │
+  │  COMPOSITE: ict_composite_score              │
+  │  (master score - najważniejsza cecha!)       │
+  └──────────────────────────────────────────────┘
+
+KLUCZOWE CECHY DLA MODELU (High Importance):
+=============================================
+1. ict_composite_score          ← MASTER ICT SCORE
+2. liquidity_sweep_with_volume  ← Sweep z potwierdzeniem
+3. high_conviction_sweep        ← Najsilniejszy sygnał
+4. ob_with_fvg                  ← Order Block + FVG
+5. market_structure_shift       ← Change of Character
+
+FLOW:
+=====
+1. fetch_and_prepare_data() 
+   ↓
+2. _calculate_base_features()    ← Tu dodawane są wszystkie cechy
+   ├─ Basic features (1-10)
+   ├─ Advanced PA (11-20)
+   ├─ Composite indicators (21)
+   └─ ICT & Smart Money (22) ⭐ NOWE!
+   ↓
+3. _add_multi_timeframe_features()
+   ↓
+4. remove_correlated_features()  ← Usuwa skorelowane, ZACHOWUJE ICT
+   ↓
+5. Target generation (will_pump_X%)
+
+DOKUMENTACJA:
+=============
+- Szczegóły ICT: ICT_FEATURES_DOCUMENTATION.md
+- Quick start: ICT_UPDATE_README.md
+- Testing: test_ict_features.py
+- Checklist: ICT_CHECKLIST.md
+
+Author: Łukasz + Claude
+Updated: 2025-01-15 (ICT implementation)
+Version: 2.0 (with ICT/Smart Money)
+"""
+
 import os
 import pandas as pd
 import numpy as np
@@ -198,9 +280,34 @@ def remove_correlated_features(df: pd.DataFrame,
     # Domyślna lista ważnych cech
     if keep_important is None:
         keep_important = [
+            # Podstawowe wskaźniki (klasyczne)
             'rsi_14', 'volume_vs_ma_20', 'dist_from_vwap', 'atr_normalized',
+            
+            # Wskaźniki kompozytowe (już istniejące)
             'market_state_indicator', 'momentum_regime', 'volume_confirmation_score',
-            'multi_factor_sentiment', 'oversold_overbought_signal'
+            'multi_factor_sentiment', 'oversold_overbought_signal',
+            
+            # ====================================================================
+            # ICT & SMART MONEY - NAJWYŻSZY PRIORYTET (nowe)
+            # ====================================================================
+            'ict_composite_score',           # Master ICT score - KLUCZOWA CECHA
+            'fvg_signal',                    # Fair Value Gaps
+            'fvg_size',                      # Wielkość FVG
+            'liquidity_sweep',               # Liquidity Sweeps - bardzo ważne
+            'liquidity_sweep_strength',      # Siła sweep
+            'order_block',                   # Order Blocks - gdzie smart money
+            'order_block_strength',          # Siła OB
+            'breaker_block',                 # Breaker Blocks
+            'market_structure_shift',        # MSS - Change of Character
+            'market_structure_direction',    # Kierunek struktury
+            'institutional_candle',          # Świece instytucjonalne
+            'institutional_candle_strength', # Siła inst. candle
+            
+            # Smart Money Context Features (kombinacje)
+            'ob_with_fvg',                   # OB + FVG = silny sygnał
+            'high_conviction_sweep',         # Sweep + volume
+            'structure_aligned_ob',          # OB aligned z trendem
+            'fvg_fill_reversal',             # FVG fill + reversal
         ]
     
     # Cechy numeryczne (bez targetu)
@@ -279,6 +386,397 @@ def remove_correlated_features(df: pd.DataFrame,
     print(f"{'='*60}\n")
     
     return df_cleaned, to_drop_list
+
+
+# ============================================================================
+# ICT & SMART MONEY CONCEPTS
+# ============================================================================
+
+def detect_fair_value_gaps(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Fair Value Gaps (FVG) - ICT Core Concept
+    
+    FVG Bullish: gdy low[i] > high[i-2] (gap w górę - brak ceny między świecami)
+    FVG Bearish: gdy high[i] < low[i-2] (gap w dół - brak ceny między świecami)
+    
+    Te gap'y często działają jak magnesy - cena wraca aby je wypełnić.
+    Smart Money używa ich jako entry zones.
+    """
+    # Bullish FVG: obecny low > high sprzed 2 świec (zwróć boolean Series!)
+    fvg_bullish = (df['low'] > df['high'].shift(2))
+    
+    # Bearish FVG: obecny high < low sprzed 2 świec (zwróć boolean Series!)
+    fvg_bearish = (df['high'] < df['low'].shift(2))
+    
+    # Signal: 1 = bullish FVG, -1 = bearish FVG, 0 = brak
+    df['fvg_signal'] = fvg_bullish.astype(int) - fvg_bearish.astype(int)
+    
+    # Rozmiar gap'u (znormalizowany przez cenę)
+    df['fvg_size'] = np.where(
+        fvg_bullish, 
+        (df['low'] - df['high'].shift(2)) / df['close'],
+        np.where(
+            fvg_bearish, 
+            (df['low'].shift(2) - df['high']) / df['close'], 
+            0
+        )
+    )
+    
+    # Czy FVG został wypełniony w ostatnich N świecach
+    df['fvg_filled'] = 0
+    for i in range(1, 6):  # sprawdź ostatnie 5 świec
+        # Bullish FVG wypełniony jeśli cena wróciła w dół
+        # POPRAWKA: użyj boolean Series przed operatorem &
+        filled_bull = fvg_bullish.shift(i) & (df['low'] <= df['high'].shift(i+2))
+        # Bearish FVG wypełniony jeśli cena wróciła w górę
+        filled_bear = fvg_bearish.shift(i) & (df['high'] >= df['low'].shift(i+2))
+        df['fvg_filled'] += (filled_bull.astype(int) - filled_bear.astype(int))
+    
+    return df
+
+
+def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
+    """
+    Liquidity Sweeps - ICT Core Concept
+    
+    Smart Money często "sweepuje" (zbiera) płynność z retail stop lossów
+    umieszczonych za oczywistymi high/low, a następnie reversal.
+    
+    Bullish Sweep: cena bierze recent low + natychmiastowy reversal w górę
+    Bearish Sweep: cena bierze recent high + natychmiastowy reversal w dół
+    """
+    # Znajdź recent extreme levels
+    recent_high = df['high'].rolling(lookback).max()
+    recent_low = df['low'].rolling(lookback).min()
+    
+    # Bullish Liquidity Sweep: 
+    # - cena bierze recent low (sweep stop lossów)
+    # - świeca zamyka się wyżej (reversal)
+    sweep_low = (
+        (df['low'] <= recent_low.shift(1)) &  # zbiera płynność
+        (df['close'] > df['open']) &           # bullish reversal candle
+        (df['close'] > recent_low.shift(1))    # zamyka powyżej swept level
+    )
+    
+    # Bearish Liquidity Sweep:
+    # - cena bierze recent high (sweep stop lossów)
+    # - świeca zamyka się niżej (reversal)
+    sweep_high = (
+        (df['high'] >= recent_high.shift(1)) &  # zbiera płynność
+        (df['close'] < df['open']) &             # bearish reversal candle
+        (df['close'] < recent_high.shift(1))     # zamyka poniżej swept level
+    )
+    
+    df['liquidity_sweep'] = sweep_low.astype(int) - sweep_high.astype(int)
+    
+    # Siła sweep'u - jak daleko cena poszła poza level
+    df['liquidity_sweep_strength'] = np.where(
+        sweep_low,
+        (recent_low.shift(1) - df['low']) / df['close'],
+        np.where(
+            sweep_high,
+            (df['high'] - recent_high.shift(1)) / df['close'],
+            0
+        )
+    )
+    
+    # Czy sweep miał wysokie volume (bardziej wiarygodny)
+    if 'volume_vs_ma_20' in df.columns:
+        df['liquidity_sweep_with_volume'] = (
+            (df['liquidity_sweep'] != 0) & 
+            (df['volume_vs_ma_20'] > 1.3)
+        ).astype(int) * df['liquidity_sweep']
+    
+    return df
+
+
+def detect_order_blocks(df: pd.DataFrame, impulse_threshold: float = 0.015) -> pd.DataFrame:
+    """
+    Order Blocks (OB) - ICT Core Concept
+    
+    Order Block = ostatnia przeciwna świeca przed silnym impulsem.
+    To miejsce gdzie Smart Money złożyło duże zlecenia.
+    
+    Bullish OB: ostatnia bearish świeca przed silnym ruchem w górę
+    Bearish OB: ostatnia bullish świeca przed silnym ruchem w dół
+    """
+    # Wykryj silne impulsy (>1.5% w 3 świece)
+    price_change_3 = df['close'].pct_change(3)
+    bullish_impulse = (price_change_3 > impulse_threshold)
+    bearish_impulse = (price_change_3 < -impulse_threshold)
+    
+    # Sprawdź czy poprzednia świeca była przeciwna
+    bearish_candle = (df['close'] < df['open'])
+    bullish_candle = (df['close'] > df['open'])
+    
+    # Bullish Order Block: bearish świeca przed bullish impulsem
+    bullish_ob = bullish_impulse & bearish_candle.shift(1)
+    
+    # Bearish Order Block: bullish świeca przed bearish impulsem
+    bearish_ob = bearish_impulse & bullish_candle.shift(1)
+    
+    df['order_block'] = bullish_ob.astype(int) - bearish_ob.astype(int)
+    
+    # Siła Order Block = wielkość impulsu
+    df['order_block_strength'] = np.where(
+        bullish_ob,
+        price_change_3,
+        np.where(bearish_ob, -price_change_3, 0)
+    )
+    
+    # Dystans do Order Block (jak daleko jesteśmy od ostatniego OB)
+    last_bullish_ob_price = df['close'].where(bullish_ob).ffill()
+    last_bearish_ob_price = df['close'].where(bearish_ob).ffill()
+    
+    df['dist_from_bullish_ob'] = (df['close'] - last_bullish_ob_price) / df['close']
+    df['dist_from_bearish_ob'] = (df['close'] - last_bearish_ob_price) / df['close']
+    
+    # Czy testujemy Order Block (w zasięgu ±0.5%)
+    df['testing_bullish_ob'] = (df['dist_from_bullish_ob'].abs() < 0.005).astype(int)
+    df['testing_bearish_ob'] = (df['dist_from_bearish_ob'].abs() < 0.005).astype(int)
+    
+    return df
+
+
+def detect_breaker_blocks(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Breaker Blocks - ICT Advanced Concept
+    
+    Breaker = Order Block który został przebity i zmienił swoją rolę.
+    Support który został złamany staje się resistance (i odwrotnie).
+    
+    To sign of "Change of Character" - zmiana struktury rynku.
+    """
+    # Wykryj czy poprzedni support został przebity
+    support_level = df['low'].rolling(10).min()
+    support_broken = (
+        (df['low'].shift(3) == support_level.shift(3)) &  # był support
+        (df['close'] < support_level.shift(3)) &           # został przebity w dół
+        (df['close'].shift(1) >= support_level.shift(3))   # dopiero co przebiliśmy
+    )
+    
+    # Wykryj czy poprzedni resistance został przebity
+    resistance_level = df['high'].rolling(10).max()
+    resistance_broken = (
+        (df['high'].shift(3) == resistance_level.shift(3)) &  # był resistance
+        (df['close'] > resistance_level.shift(3)) &            # został przebity w górę
+        (df['close'].shift(1) <= resistance_level.shift(3))    # dopiero co przebiliśmy
+    )
+    
+    # Breaker signal: 1 = bullish break, -1 = bearish break
+    df['breaker_block'] = resistance_broken.astype(int) - support_broken.astype(int)
+    
+    # Siła breakout (jak daleko poszliśmy poza level)
+    df['breaker_strength'] = np.where(
+        resistance_broken,
+        (df['close'] - resistance_level.shift(3)) / df['close'],
+        np.where(
+            support_broken,
+            (support_level.shift(3) - df['close']) / df['close'],
+            0
+        )
+    )
+    
+    return df
+
+
+def detect_market_structure_shift(df: pd.DataFrame, swing_period: int = 10) -> pd.DataFrame:
+    """
+    Market Structure Shift (MSS) - ICT Core Concept
+    
+    MSS = Change of Character - moment gdy struktura rynku się zmienia:
+    - Bullish: higher highs & higher lows
+    - Bearish: lower highs & lower lows
+    
+    MSS występuje gdy ta struktura zostaje złamana.
+    """
+    # Znajdź swing points (lokalne ekstrema)
+    # Swing High = highest high w oknie
+    highs_window = df['high'].rolling(window=swing_period*2+1, center=True).max()
+    is_swing_high = (df['high'] == highs_window)
+    
+    # Swing Low = lowest low w oknie
+    lows_window = df['low'].rolling(window=swing_period*2+1, center=True).min()
+    is_swing_low = (df['low'] == lows_window)
+    
+    # Track ostatniego swing high/low
+    last_swing_high = df['high'].where(is_swing_high).ffill()
+    last_swing_low = df['low'].where(is_swing_low).ffill()
+    
+    # Bullish MSS: przebiliśmy ostatni swing high (breaking resistance)
+    bullish_mss = (df['close'] > last_swing_high.shift(1)) & (last_swing_high.shift(1).notna())
+    
+    # Bearish MSS: przebiliśmy ostatni swing low (breaking support)
+    bearish_mss = (df['close'] < last_swing_low.shift(1)) & (last_swing_low.shift(1).notna())
+    
+    df['market_structure_shift'] = bullish_mss.astype(int) - bearish_mss.astype(int)
+    
+    # Jak dawno był ostatni MSS (0 = właśnie teraz, rośnie z czasem)
+    mss_occurred = (df['market_structure_shift'] != 0)
+    df['bars_since_mss'] = (~mss_occurred).cumsum() - (~mss_occurred).cumsum().where(~mss_occurred).ffill().fillna(0)
+    
+    # Kierunek obecnej struktury (1 = uptrend, -1 = downtrend, 0 = neutral)
+    df['market_structure_direction'] = df['market_structure_shift'].replace(0, np.nan).ffill().fillna(0)
+    
+    return df
+
+
+def detect_institutional_candles(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Institutional Candles - Smart Money Detection
+    
+    Duże świece z wysokim volume = prawdopodobnie działanie smart money.
+    
+    Kryteria:
+    1. Range > 2x średnia (duża świeca)
+    2. Volume > 1.5x średnia (wysokie zainteresowanie)
+    3. Close w górnej/dolnej części range (pokazuje dominację)
+    """
+    # Wielkość świecy vs średnia
+    candle_range = df['high'] - df['low']
+    avg_range = candle_range.rolling(50).mean()
+    large_range = (candle_range > avg_range * 2)
+    
+    # Wysoki volume
+    high_volume = (df['volume'] > df['volume'].rolling(50).mean() * 1.5)
+    
+    # Pozycja close w range świecy
+    close_position = (df['close'] - df['low']) / (candle_range + 1e-8)
+    
+    # Bullish institutional: duża świeca, high vol, close w górnych 30%
+    close_in_upper = (close_position > 0.7)
+    bullish_institutional = (large_range & high_volume & close_in_upper)
+    
+    # Bearish institutional: duża świeca, high vol, close w dolnych 30%
+    close_in_lower = (close_position < 0.3)
+    bearish_institutional = (large_range & high_volume & close_in_lower)
+    
+    df['institutional_candle'] = (
+        bullish_institutional.astype(int) - bearish_institutional.astype(int)
+    )
+    
+    # Siła świecy instytucjonalnej
+    df['institutional_candle_strength'] = np.where(
+        bullish_institutional | bearish_institutional,
+        (candle_range / avg_range) * (df['volume'] / df['volume'].rolling(50).mean()),
+        0
+    )
+    
+    return df
+
+
+def detect_liquidity_voids(df: pd.DataFrame, volume_threshold: float = 0.5) -> pd.DataFrame:
+    """
+    Liquidity Voids - ICT Concept
+    
+    Obszary z bardzo niskim volume = brak płynności.
+    Cena często szybko przechodzi przez te obszary (swift move).
+    
+    Retail lubi handlować w tych obszarach, Smart Money ich unika.
+    """
+    # Nisko-wolumenowe świece (< 50% średniej)
+    avg_volume = df['volume'].rolling(50).mean()
+    low_volume = (df['volume'] < avg_volume * volume_threshold)
+    
+    # Zlicz ile ostatnich świec miało niski volume
+    df['liquidity_void_depth'] = low_volume.astype(int).rolling(5).sum()
+    
+    # Czy jesteśmy w strefie liquidity void (3+ świece z niskim volume)
+    df['in_liquidity_void'] = (df['liquidity_void_depth'] >= 3).astype(int)
+    
+    # Siła void (jak niskie było volume)
+    df['liquidity_void_strength'] = np.where(
+        low_volume,
+        1 - (df['volume'] / avg_volume),
+        0
+    )
+    
+    return df
+
+
+def add_ict_smart_money_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    MASTER FUNCTION: Dodaje wszystkie ICT & Smart Money Features
+    
+    Te cechy mają WYSOKĄ WAGĘ dla modelu bo reprezentują działania
+    smart money i institutional traders.
+    """
+    print("  === ICT & SMART MONEY CONCEPTS ===")
+    
+    print("    → Fair Value Gaps (FVG)...")
+    df = detect_fair_value_gaps(df)
+    
+    print("    → Liquidity Sweeps...")
+    df = detect_liquidity_sweeps(df, lookback=20)
+    
+    print("    → Order Blocks...")
+    df = detect_order_blocks(df, impulse_threshold=0.015)
+    
+    print("    → Breaker Blocks...")
+    df = detect_breaker_blocks(df)
+    
+    print("    → Market Structure Shifts (MSS)...")
+    df = detect_market_structure_shift(df, swing_period=10)
+    
+    print("    → Institutional Candles...")
+    df = detect_institutional_candles(df)
+    
+    print("    → Liquidity Voids...")
+    df = detect_liquidity_voids(df, volume_threshold=0.5)
+    
+    # ========================================================================
+    # COMPOSITE ICT SCORE - agregacja wszystkich sygnałów ICT
+    # To jest KLUCZOWA cecha - model powinien jej dać dużą wagę
+    # ========================================================================
+    print("    → Composite ICT Score (HIGH IMPORTANCE)...")
+    
+    df['ict_composite_score'] = (
+        df['fvg_signal'] * 0.15 +                    # FVG jako entry zones
+        df['liquidity_sweep'] * 0.25 +               # Sweeps = silny sygnał
+        df['order_block'] * 0.20 +                   # OB = gdzie smart money siedzi
+        df['breaker_block'] * 0.15 +                 # Breaker = zmiana charakteru
+        df['market_structure_shift'] * 0.20 +        # MSS = change of trend
+        df['institutional_candle'] * 0.05            # Potwierdzenie przez volume
+    )
+    
+    # Znormalizuj do zakresu [-1, 1] dla łatwiejszej interpretacji
+    max_abs = df['ict_composite_score'].abs().max()
+    if max_abs > 0:
+        df['ict_composite_score'] = df['ict_composite_score'] / max_abs
+    
+    # ========================================================================
+    # SMART MONEY CONTEXT FEATURES - dodatkowe cechy kontekstowe
+    # ========================================================================
+    print("    → Smart Money Context Features...")
+    
+    # Czy jesteśmy przy Order Block + FVG (bardzo silny sygnał)
+    df['ob_with_fvg'] = (
+        ((df['testing_bullish_ob'] == 1) & (df['fvg_signal'] == 1)) |
+        ((df['testing_bearish_ob'] == 1) & (df['fvg_signal'] == -1))
+    ).astype(int)
+    
+    # Liquidity sweep + institutional volume (highest conviction)
+    if 'liquidity_sweep_with_volume' in df.columns:
+        df['high_conviction_sweep'] = (
+            (df['liquidity_sweep_with_volume'] != 0) & 
+            (df['institutional_candle'] != 0)
+        ).astype(int) * np.sign(df['liquidity_sweep_with_volume'])
+    
+    # Market structure aligned with OB (trend confirmation)
+    df['structure_aligned_ob'] = (
+        ((df['market_structure_direction'] == 1) & (df['order_block'] == 1)) |
+        ((df['market_structure_direction'] == -1) & (df['order_block'] == -1))
+    ).astype(int)
+    
+    # FVG being filled = potential reversal point
+    df['fvg_fill_reversal'] = (
+        (df['fvg_filled'] != 0) & 
+        (df['liquidity_sweep'] != 0)
+    ).astype(int)
+    
+    print("    ✓ ICT/Smart Money: 30+ nowych cech dodanych")
+    
+    return df
 
 
 # ============================================================================
@@ -984,6 +1482,14 @@ def _calculate_base_features(df_out: pd.DataFrame):
     print("     ✓ Dodano 5 nowych wskaźników kompozytowych")
     # ========================================================================
 
+    # ========================================================================
+    # ICT & SMART MONEY CONCEPTS - WYSOKIE PRIORYTETY DLA MODELU
+    # ========================================================================
+    print("  22. ICT & Smart Money Concepts (HIGH PRIORITY)...")
+    df_out = add_ict_smart_money_features(df_out)
+    print("     ✓ ICT/Smart Money: 30+ cech dodanych z wysokim priorytetem")
+    # ========================================================================
+
     df_out.replace([np.inf, -np.inf], np.nan, inplace=True)
     
     # Defragment DataFrame to avoid PerformanceWarning
@@ -1080,6 +1586,13 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
 
             base_df = pd.merge_asof(base_df, helper_features, left_index=True, right_index=True, direction='backward')
             print(f"Dodano cechy z interwału {helper_tf}.")
+
+    # FIX: Remove duplicate index values that may have been introduced during merge operations
+    if base_df.index.duplicated().any():
+        n_duplicates = base_df.index.duplicated().sum()
+        print(f"⚠️  Wykryto {n_duplicates} duplikatów w indeksie. Usuwanie duplikatów (zachowuję pierwszy wpis)...")
+        base_df = base_df[~base_df.index.duplicated(keep='first')]
+        print(f"✓ Usunięto duplikaty. Pozostało {len(base_df)} unikalnych wpisów.")
 
     final_df = _calculate_base_features(base_df)
 

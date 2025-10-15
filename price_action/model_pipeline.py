@@ -261,24 +261,23 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     holdout_df = df_model_base.iloc[-holdout_size:]
 
     def objective_labels(trial):
-        # POPRAWKA #2: ZBALANSOWANE BARRIERS dla LONG
-        base_barrier = trial.suggest_float('base_barrier', 0.010, 0.040, log=True)  # Było: 0.015-0.040 (1-3%)
-        
+        base_barrier = trial.suggest_float('base_barrier', 0.005, 0.020, log=True)
+
         if side == 'long':
-            pt_multiplier = trial.suggest_float('pt_multiplier', 0.5, 6.5)  # Było: 2.5-4.5 (PT: 1.5-7.5%)
-            sl_multiplier = trial.suggest_float('sl_multiplier', 0.5, 3.5)  # Było: 0.4-1.0 (SL: 0.6-3.6%)
+            pt_multiplier = trial.suggest_float('pt_multiplier', 1.5, 5.0)
+            sl_multiplier = trial.suggest_float('sl_multiplier', 0.5, 1.5)
             pt = base_barrier * pt_multiplier
             sl = base_barrier * sl_multiplier
         elif side == 'short':
-            pt_multiplier = trial.suggest_float('pt_multiplier', 0.5, 6.5)
-            sl_multiplier = trial.suggest_float('sl_multiplier', 0.5, 3.5)
+            pt_multiplier = trial.suggest_float('pt_multiplier', 1.5, 5.0)
+            sl_multiplier = trial.suggest_float('sl_multiplier', 0.5, 1.5)
             pt = base_barrier * pt_multiplier
             sl = base_barrier * sl_multiplier
         else:
             pt = base_barrier
             sl = base_barrier
 
-        time_limit = trial.suggest_int('time_limit', 8, 48)  # Było: 12-40 (8-24h dla 1h TF)
+        time_limit = trial.suggest_int('time_limit', 4, 24)  # Było: 12-40 (8-24h dla 1h TF)
         labels = get_triple_barrier_labels(df_features['close'], df_features.index, pt, sl, time_limit, verbose=False)
 
         X = train_val_df.copy()
