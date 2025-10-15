@@ -221,23 +221,23 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
 
     def objective_labels(trial):
         # POPRAWKA #2: ZBALANSOWANE BARRIERS dla LONG
-        base_barrier = trial.suggest_float('base_barrier', 0.010, 0.030, log=True)  # Było: 0.015-0.040 (1-3%)
+        base_barrier = trial.suggest_float('base_barrier', 0.010, 0.040, log=True)  # Było: 0.015-0.040 (1-3%)
         
         if side == 'long':
-            pt_multiplier = trial.suggest_float('pt_multiplier', 1.5, 2.5)  # Było: 2.5-4.5 (PT: 1.5-7.5%)
-            sl_multiplier = trial.suggest_float('sl_multiplier', 0.6, 1.2)  # Było: 0.4-1.0 (SL: 0.6-3.6%)
+            pt_multiplier = trial.suggest_float('pt_multiplier', 0.5, 6.5)  # Było: 2.5-4.5 (PT: 1.5-7.5%)
+            sl_multiplier = trial.suggest_float('sl_multiplier', 0.5, 3.5)  # Było: 0.4-1.0 (SL: 0.6-3.6%)
             pt = base_barrier * pt_multiplier
             sl = base_barrier * sl_multiplier
         elif side == 'short':
-            pt_multiplier = trial.suggest_float('pt_multiplier', 1.5, 2.5)
-            sl_multiplier = trial.suggest_float('sl_multiplier', 0.6, 1.2)
+            pt_multiplier = trial.suggest_float('pt_multiplier', 0.5, 6.5)
+            sl_multiplier = trial.suggest_float('sl_multiplier', 0.5, 3.5)
             pt = base_barrier * pt_multiplier
             sl = base_barrier * sl_multiplier
         else:
             pt = base_barrier
             sl = base_barrier
 
-        time_limit = trial.suggest_int('time_limit', 8, 24)  # Było: 12-40 (8-24h dla 1h TF)
+        time_limit = trial.suggest_int('time_limit', 8, 48)  # Było: 12-40 (8-24h dla 1h TF)
         labels = get_triple_barrier_labels(df_features['close'], df_features.index, pt, sl, time_limit, verbose=False)
 
         X = train_val_df.copy()
@@ -277,7 +277,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         return final_score
 
     print("\n--- ETAP 1: Rozpoczynanie optymalizacji parametrów etykiet ---")
-    print("POPRAWKA #2: Nowe zakresy barriers (niższy PT, szerszy SL, krótszy time_limit)")
     storage_name_labels = f"sqlite:///optuna/{strategy_id}_labels_study.db"
     study_labels = optuna.create_study(study_name=f"{strategy_id}_labels_optimization", storage=storage_name_labels,
                                        direction='maximize', load_if_exists=True)
