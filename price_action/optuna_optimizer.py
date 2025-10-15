@@ -27,6 +27,43 @@ from data_preparer_pa import fetch_and_prepare_data
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
+class BestTrialCallback:
+    """Callback to display best trial information during optimization"""
+    
+    def __init__(self):
+        self.best_pnl = float('-inf')
+        self.best_trial_number = None
+        self.best_params = None
+        self.best_values = None
+        self.last_update_trial = -1
+    
+    def __call__(self, study: optuna.Study, trial: optuna.trial.FrozenTrial):
+        """Called after each trial completes"""
+        # Get best trials from Pareto front
+        best_trials = study.best_trials
+        
+        if best_trials:
+            # Find trial with highest PnL (values[0])
+            current_best = max(best_trials, key=lambda t: t.values[0])
+            
+            # Update if we found a better PnL
+            if current_best.values[0] > self.best_pnl:
+                self.best_pnl = current_best.values[0]
+                self.best_trial_number = current_best.number
+                self.best_params = current_best.params
+                self.best_values = current_best.values
+                self.last_update_trial = trial.number
+                
+                # Display best result found so far (on new line, clean output)
+                # This avoids interfering with tqdm progress bar
+                print(f"\n✨ Best: Trial #{self.best_trial_number} | "
+                      f"PnL=${self.best_pnl:+.2f} | "
+                      f"prob={self.best_params['prob_threshold']:.2f} "
+                      f"tp={self.best_params['tp_pct']:.3f} "
+                      f"tsl={self.best_params['tsl_pct']:.3f} | "
+                      f"DD={-self.best_values[1]:.2f}%")
+
+
 class BacktesterOptimizer:
     """Optimizer for backtester parameters using Optuna"""
     
@@ -94,19 +131,19 @@ class BacktesterOptimizer:
         logging.info(f"✓ Data prepared: {len(df)} candles")
         return df
     
-    def objective(self, trial: optuna.Trial) -> float:
+    def objective(self, trial: optuna.Trial) -> tuple:
         """
-        Optuna objective function - OPTIMIZED FOR MAXIMUM TOTAL PNL
+        Optuna multi-objective function - OPTIMIZED FOR THREE OBJECTIVES
         
-        Scoring formula:
-        score = total_pnl - (max_dd * 50) + (sharpe * 200)
+        Returns three objectives (all to maximize):
+        1. Total PnL (USD profit) - HIGHEST PRIORITY
+        2. Negative Max Drawdown (lower drawdown is better) - SECOND PRIORITY
+        3. Trade count score (balanced trading activity) - THIRD PRIORITY
         
-        Priority:
-        1. Maximize Total PnL (USD profit) - PRIMARY GOAL
-        2. Limit Max Drawdown (risk control)
-        3. Reward high Sharpe Ratio (quality filter)
+        The trade count score prevents Optuna from selecting strategies with too few trades
+        while also avoiding over-trading. Optimal range: 50-200 trades for 10k candles.
         
-        Returns: composite score (higher is better)
+        Returns: tuple of (pnl, -drawdown, trade_score)
         """
         
         # Suggest parameters
@@ -116,7 +153,7 @@ class BacktesterOptimizer:
         
         # Ensure TSL is not greater than TP (logical constraint)
         if tsl_pct >= tp_pct:
-            return -999.0  # Invalid combination
+            return -999999.0, -100.0, -999.0  # Invalid combination
         
         # Calculate SL as 50% of TP
         sl_pct = tp_pct * 0.5
@@ -148,30 +185,39 @@ class BacktesterOptimizer:
                 self.initial_capital
             )
             
-            # Use composite score for optimization - FOCUS ON TOTAL PNL
-            # Primary goal: Maximize absolute profit (Total PnL in USD)
-            # Risk control: Penalize large drawdowns (DD * 50)
-            # Quality filter: Reward good risk-adjusted returns (Sharpe * 200)
-            if metrics['total_trades'] < 10:
-                return -999.0  # Reject if too few trades
-            
+            # Extract metrics
             total_pnl = metrics.get('total_pnl_usd', -999999)
             total_return = metrics.get('total_return_pct', -999)
             max_dd = abs(metrics.get('max_drawdown_pct', 100))
             sharpe = metrics.get('sharpe_ratio', 0)
+            num_trades = metrics['total_trades']
             
-            # Composite score: FOCUS ON TOTAL PNL
-            # Primary: Total PnL (most important)
-            # Secondary: Limit drawdown risk
-            # Tertiary: Sharpe as quality filter
-            score = total_pnl - (max_dd * 50) + (sharpe * 200)
+            # Multi-objective optimization:
+            # Objective 1: Maximize Total PnL (PRIMARY - highest priority)
+            obj1_pnl = total_pnl
+            
+            # Objective 2: Minimize Drawdown (SECONDARY - return negative for maximization)
+            obj2_drawdown = -max_dd
+            
+            # Objective 3: Optimize Trade Count (TERTIARY - balanced trading activity)
+            # Penalize too few trades (prevents 1-trade strategies)
+            # Reward optimal range: 50-200 trades for 10k candles
+            # Slightly penalize excessive trading (> 300 trades)
+            if num_trades < 10:
+                return -999999.0, -100.0, -999.0  # Reject if too few trades
+            elif num_trades < 30:
+                obj3_trade_score = num_trades * 2  # Encourage more trades
+            elif num_trades < 200:
+                obj3_trade_score = 100 + (num_trades - 30) * 0.5  # Optimal range
+            else:
+                obj3_trade_score = 185 - (num_trades - 200) * 0.1  # Slight penalty for over-trading
             
             # Log trial results
             logging.info(
                 f"Trial {trial.number}: "
                 f"prob={prob_threshold:.2f}, tp={tp_pct:.3f}, tsl={tsl_pct:.3f} | "
-                f"Score={score:.2f}, PnL=${total_pnl:+.2f}, Return={total_return:.2f}%, "
-                f"DD={max_dd:.2f}%, Sharpe={sharpe:.3f}, Trades={metrics['total_trades']}"
+                f"Obj1(PnL)=${obj1_pnl:+.2f}, Obj2(DD)={obj2_drawdown:.2f}%, Obj3(Trades)={obj3_trade_score:.1f} | "
+                f"Return={total_return:.2f}%, DD={max_dd:.2f}%, Sharpe={sharpe:.3f}, Trades={num_trades}"
             )
             
             # Store additional metrics in trial user attributes
@@ -182,12 +228,15 @@ class BacktesterOptimizer:
             trial.set_user_attr('total_trades', metrics['total_trades'])
             trial.set_user_attr('win_rate', metrics.get('win_rate', 0))
             trial.set_user_attr('profit_factor', metrics.get('profit_factor', 0))
+            trial.set_user_attr('obj1_pnl', obj1_pnl)
+            trial.set_user_attr('obj2_drawdown', obj2_drawdown)
+            trial.set_user_attr('obj3_trade_score', obj3_trade_score)
             
-            return score
+            return obj1_pnl, obj2_drawdown, obj3_trade_score
             
         except Exception as e:
             logging.error(f"Trial {trial.number} failed: {e}")
-            return -999.0
+            return -999999.0, -100.0, -999.0
     
     def optimize(self, n_trials: int = 100) -> Dict:
         """
@@ -207,18 +256,81 @@ class BacktesterOptimizer:
         logging.info(f"Data points: {len(self.df)}")
         logging.info(f"{'='*70}\n")
         
-        # Create study
+        # Create database directory for persistent storage
+        os.makedirs("optuna", exist_ok=True)
+        
+        # Generate unique study name based on ticker, timeframe, and helper timeframes
+        # This allows resuming optimization for same configuration in the future
+        helpers_str = '_'.join(self.helper_timeframes) if self.helper_timeframes else 'none'
+        study_name = f"{self.ticker}_{self.timeframe}_{helpers_str}_multi_opt"
+        
+        # SQLite database storage for persistent optimization history
+        storage_url = f"sqlite:///optuna/optuna_{self.ticker}_{self.timeframe}_{helpers_str}.db"
+        
+        logging.info(f"Database: {storage_url}")
+        logging.info(f"Study name: {study_name}")
+        logging.info(f"Load if exists: True (can resume previous optimizations)\n")
+        
+        # Create multi-objective study (3 objectives, all to maximize)
+        # Objective 1: PnL (highest priority)
+        # Objective 2: -Drawdown (second priority)
+        # Objective 3: Trade count score (third priority)
+        # load_if_exists=True allows resuming previous optimizations
         study = optuna.create_study(
-            direction='maximize',
-            study_name=f"{self.ticker}_{self.timeframe}_optimization"
+            directions=['maximize', 'maximize', 'maximize'],
+            study_name=study_name,
+            storage=storage_url,
+            load_if_exists=True
         )
         
-        # Run optimization
-        study.optimize(self.objective, n_trials=n_trials, show_progress_bar=True)
+        # Check if resuming previous optimization
+        existing_trials = len(study.trials)
+        if existing_trials > 0:
+            logging.info(f"{'='*70}")
+            logging.info(f"RESUMING PREVIOUS OPTIMIZATION")
+            logging.info(f"Found {existing_trials} existing trials in database")
+            logging.info(f"Will run {n_trials} additional trials")
+            logging.info(f"Total trials after completion: {existing_trials + n_trials}")
+            logging.info(f"{'='*70}\n")
         
-        # Get best results
-        best_trial = study.best_trial
+        # Suppress INFO logs during optimization (only show progress bar)
+        # This hides position logs from backtester which clutter the console
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        logging.getLogger().setLevel(logging.WARNING)
+        
+        # Create callback to display best trial info during optimization
+        callback = BestTrialCallback()
+        
+        # Run optimization with parallel execution (n_jobs=-1 uses all CPU cores)
+        # Callback will display best results after each trial
+        # Note: show_progress_bar works cleanly only with n_jobs=1 to avoid multiple progress bars
+        study.optimize(self.objective, n_trials=n_trials, show_progress_bar=True, n_jobs=1, callbacks=[callback])
+        
+        # Print final newline after optimization to separate from next output
+        print("\n")
+        
+        # Restore INFO logging after optimization completes
+        optuna.logging.set_verbosity(optuna.logging.INFO)
+        logging.getLogger().setLevel(logging.INFO)
+        
+        # Get best results from Pareto front
+        # For multi-objective, we get all Pareto-optimal trials
+        best_trials = study.best_trials
+        
+        logging.info(f"\n{'='*70}")
+        logging.info(f"Found {len(best_trials)} Pareto-optimal solutions")
+        logging.info(f"{'='*70}\n")
+        
+        # Select the trial with highest PnL (primary objective) from Pareto front
+        # This prioritizes PnL while still considering the multi-objective trade-offs
+        best_trial = max(best_trials, key=lambda t: t.values[0])  # values[0] is PnL
         best_params = best_trial.params
+        
+        logging.info(f"Selected best trial based on highest PnL from Pareto front:")
+        logging.info(f"  PnL: ${best_trial.values[0]:,.2f}")
+        logging.info(f"  Drawdown: {-best_trial.values[1]:.2f}%")
+        logging.info(f"  Trade Score: {best_trial.values[2]:.1f}")
+        logging.info(f"  Parameters: {best_params}\n")
         
         # Run final backtest with best parameters
         logging.info(f"\n{'='*70}")
@@ -250,28 +362,41 @@ class BacktesterOptimizer:
         )
         
         # Print results
-        self._print_optimization_results(best_params, final_metrics, study)
+        self._print_optimization_results(best_params, final_metrics, study, best_trial, best_trials)
         
         return {
             'best_params': best_params,
             'metrics': final_metrics,
-            'study': study
+            'study': study,
+            'best_trial': best_trial,
+            'pareto_trials': best_trials
         }
     
-    def _print_optimization_results(self, best_params: Dict, metrics: Dict, study: optuna.Study):
-        """Print optimization results in a nice format"""
+    def _print_optimization_results(self, best_params: Dict, metrics: Dict, study: optuna.Study, 
+                                     best_trial, pareto_trials):
+        """Print multi-objective optimization results in a nice format"""
         print("\n" + "="*70)
-        print(f"{'OPTIMIZATION RESULTS (OPTIMIZED FOR MAX TOTAL PNL)':^70}")
+        print(f"{'MULTI-OBJECTIVE OPTIMIZATION RESULTS':^70}")
         print("="*70)
         
-        print(f"\n{'BEST PARAMETERS:':^70}")
+        print(f"\n{'OPTIMIZATION OBJECTIVES (Priority Order):':^70}")
+        print(f"  1️⃣  Maximize PnL (USD profit) - PRIMARY")
+        print(f"  2️⃣  Minimize Drawdown (risk control) - SECONDARY")
+        print(f"  3️⃣  Optimize Trade Count (active trading) - TERTIARY")
+        
+        print(f"\n{'BEST PARAMETERS (Highest PnL from Pareto Front):':^70}")
         print(f"  PROB_THRESHOLD = {best_params['prob_threshold']:.2f}")
         print(f"  TP_PCT         = {best_params['tp_pct']:.3f}")
         print(f"  TSL_PCT        = {best_params['tsl_pct']:.3f}")
         print(f"  SL_PCT         = {best_params['tp_pct'] * 0.5:.3f} (auto: 50% of TP)")
         
+        print(f"\n{'OBJECTIVE VALUES FOR SELECTED SOLUTION:':^70}")
+        print(f"  🎯 Obj 1 - Total PnL:      ${best_trial.values[0]:+,.2f}  ⭐ PRIMARY")
+        print(f"  🛡️  Obj 2 - Max Drawdown:   {-best_trial.values[1]:.2f}%  (lower is better)")
+        print(f"  📊 Obj 3 - Trade Score:    {best_trial.values[2]:.1f}  (balanced activity)")
+        
         print(f"\n{'PERFORMANCE WITH BEST PARAMETERS:':^70}")
-        print(f"  🎯 Total PnL:     ${metrics.get('total_pnl_usd', 0):+.2f}  ⭐ PRIMARY METRIC")
+        print(f"  Total PnL:        ${metrics.get('total_pnl_usd', 0):+.2f}")
         print(f"  Total Return:     {metrics.get('total_return_pct', 0):.2f}%")
         print(f"  Max Drawdown:     {metrics.get('max_drawdown_pct', 0):.2f}%")
         print(f"  Sharpe Ratio:     {metrics.get('sharpe_ratio', 0):.3f}")
@@ -286,9 +411,9 @@ class BacktesterOptimizer:
         print(f"  Avg Loss:         ${metrics.get('avg_loss', 0):.2f}")
         
         print(f"\n{'OPTIMIZATION INFO:':^70}")
-        print(f"  Total Trials:     {len(study.trials)}")
-        print(f"  Best Trial:       #{study.best_trial.number}")
-        print(f"  Best Score:       {study.best_value:.3f}")
+        print(f"  Total Trials:         {len(study.trials)}")
+        print(f"  Pareto-Optimal Solns: {len(pareto_trials)}")
+        print(f"  Selected Trial:       #{best_trial.number}")
         
         print("="*70 + "\n")
         
@@ -298,16 +423,33 @@ class BacktesterOptimizer:
         
         with open(results_file, 'w') as f:
             f.write("="*70 + "\n")
-            f.write(f"OPTIMIZATION RESULTS - {self.ticker} {self.timeframe}\n")
+            f.write(f"MULTI-OBJECTIVE OPTIMIZATION RESULTS - {self.ticker} {self.timeframe}\n")
             f.write("="*70 + "\n\n")
-            f.write("BEST PARAMETERS:\n")
+            
+            f.write("OPTIMIZATION OBJECTIVES (Priority Order):\n")
+            f.write("  1. Maximize PnL (USD profit) - PRIMARY\n")
+            f.write("  2. Minimize Drawdown (risk control) - SECONDARY\n")
+            f.write("  3. Optimize Trade Count (active trading) - TERTIARY\n\n")
+            
+            f.write("BEST PARAMETERS (Highest PnL from Pareto Front):\n")
             f.write(f"PROB_THRESHOLD={best_params['prob_threshold']:.2f}\n")
             f.write(f"TP_PCT={best_params['tp_pct']:.3f}\n")
             f.write(f"TSL_PCT={best_params['tsl_pct']:.3f}\n")
             f.write(f"SL_PCT={best_params['tp_pct'] * 0.5:.3f}\n\n")
+            
+            f.write("OBJECTIVE VALUES:\n")
+            f.write(f"Objective 1 (PnL): ${best_trial.values[0]:+,.2f}\n")
+            f.write(f"Objective 2 (Drawdown): {-best_trial.values[1]:.2f}%\n")
+            f.write(f"Objective 3 (Trade Score): {best_trial.values[2]:.1f}\n\n")
+            
             f.write("PERFORMANCE:\n")
             for key, value in metrics.items():
                 f.write(f"{key}: {value}\n")
+            
+            f.write(f"\nOPTIMIZATION INFO:\n")
+            f.write(f"Total Trials: {len(study.trials)}\n")
+            f.write(f"Pareto-Optimal Solutions: {len(pareto_trials)}\n")
+            f.write(f"Selected Trial: #{best_trial.number}\n")
         
         logging.info(f"✓ Results saved to: {results_file}")
 

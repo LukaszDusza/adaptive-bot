@@ -18,11 +18,11 @@ TICKER="ETHUSDT"
 TIMEFRAME="15m"
 HELPER_TIMEFRAMES="1h 4h"
 LIMIT_TRAIN=80000
-LIMIT_BACKTEST=3000
+LIMIT_BACKTEST=10000
 DATE_FROM="2025-05-31"  # Training data end date (prevents data leakage)
 LABEL_TRIALS=100
 MODEL_TRIALS=100
-PROB_THRESHOLD=0.7
+PROB_THRESHOLD=0.6
 TP_PCT=0.04
 TSL_PCT=0.02
 TRADE_SIZE=1000
@@ -232,12 +232,29 @@ generate_report() {
 optimize_parameters() {
     echo -e "${YELLOW}========================================${NC}"
     echo -e "${YELLOW}Optimizing Parameters with Optuna${NC}"
+    echo -e "${YELLOW}Multi-Objective Optimization${NC}"
     echo -e "${YELLOW}========================================${NC}"
     echo ""
     echo "This will find the optimal values for:"
     echo "  - PROB_THRESHOLD (probability threshold)"
     echo "  - TP_PCT (take profit percentage)"
     echo "  - TSL_PCT (trailing stop loss percentage)"
+    echo ""
+    echo -e "${GREEN}Optimization Objectives (Priority Order):${NC}"
+    echo "  1️⃣  PRIMARY: Maximize PnL (USD profit)"
+    echo "  2️⃣  SECONDARY: Minimize Drawdown (risk control)"
+    echo "  3️⃣  TERTIARY: Optimize Trade Count (balanced activity)"
+    echo ""
+    echo "The optimizer finds Pareto-optimal solutions that balance"
+    echo "these three objectives and selects the one with highest PnL."
+    echo "This prevents strategies with too few trades (e.g., 1 trade"
+    echo "over 3 months) while maximizing profit and controlling risk."
+    echo ""
+    echo -e "${GREEN}Database Persistence:${NC}"
+    echo "  • Results are saved to SQLite database in optuna/ directory"
+    echo "  • Unique database per ticker + timeframe + helper timeframes"
+    echo "  • You can resume optimization later by running this again"
+    echo "  • Previous trials are preserved and new trials are added"
     echo ""
     echo "Current parameters:"
     echo "  - PROB_THRESHOLD: $PROB_THRESHOLD"
