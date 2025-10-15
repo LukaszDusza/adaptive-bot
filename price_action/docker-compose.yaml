@@ -3,6 +3,8 @@ services:
   bot-eth-syl:
     container_name: eth-syl
     build: .
+    environment:
+      - PYTHONUNBUFFERED=1
     env_file:
       - .env_sylwia
     volumes:
@@ -16,9 +18,9 @@ services:
       --ticker ETHUSDT
       --timeframe 15m
       --helper-timeframes 1h 4h
-      --prob-threshold 0.6
-      --tsl-pct 0.03
-      --tp-pct 0.015
+      --prob-threshold 0.65
+      --tsl-pct 0.01
+      --tp-pct 0.02
       --trade-size 50.0
       --leverage 10 
       --partial-tp
