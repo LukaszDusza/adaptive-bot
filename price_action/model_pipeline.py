@@ -142,6 +142,12 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
     POPRAWKA #1: RECALL-FOCUSED OPTIMIZATION dla LONG
     Zmieniono objective function aby priorytetyzować recall (łapanie okazji)
     przy zachowaniu minimum 50% precision (jakość sygnałów).
+    
+    OPTYMALIZACJA SZYBKOŚCI:
+    - Zredukowano liczbę CV splits z 6 do 3 (2x szybciej)
+    - Dodano pruning dla słabych trials (early stopping)
+    - Włączono równoległe wykonywanie trials (n_jobs=-1)
+    - Zoptymalizowano sampler (fewer startup trials)
     """
     def objective_model(trial):
         params = {
@@ -163,7 +169,8 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
         }
         
         scores = []
-        for train_index, val_index in walk_forward_split(X, n_splits=6, test_size=0.15):
+        # OPTYMALIZACJA: Zredukowano z 6 do 3 splits (2x szybciej)
+        for fold_idx, (train_index, val_index) in enumerate(walk_forward_split(X, n_splits=3, test_size=0.15)):
             X_train, X_val = X.iloc[train_index], X.iloc[val_index]
             y_train, y_val = y.iloc[train_index], y.iloc[val_index]
 
@@ -199,15 +206,49 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
                     best_score = max(best_score, score)
             
             scores.append(best_score if best_score > 0 else 0.0)
+            
+            # OPTYMALIZACJA: Pruning po pierwszym fold (oszczędność ~66% czasu dla słabych trials)
+            if fold_idx == 0 and len(scores) > 0:
+                trial.report(scores[0], fold_idx)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
 
         if not scores:
             return 0.0
         return np.mean(scores)
 
     storage_name = f"sqlite:///optuna/{strategy_id}_model_study.db"
-    study = optuna.create_study(study_name=f"{strategy_id}_model_optimization", storage=storage_name,
-                                direction='maximize', load_if_exists=True)
-    study.optimize(objective_model, n_trials=n_model_trials, show_progress_bar=True)
+    
+    # OPTYMALIZACJA: TPE sampler z mniejszą liczbą startup trials
+    sampler = optuna.samplers.TPESampler(
+        n_startup_trials=5,  # Było domyślnie 10
+        multivariate=True,
+        seed=42
+    )
+    
+    # OPTYMALIZACJA: MedianPruner do early stopping słabych trials
+    pruner = optuna.pruners.MedianPruner(
+        n_startup_trials=3,  # Pruning po 3 trials
+        n_warmup_steps=0,    # Natychmiastowy pruning
+        interval_steps=1
+    )
+    
+    study = optuna.create_study(
+        study_name=f"{strategy_id}_model_optimization",
+        storage=storage_name,
+        direction='maximize',
+        load_if_exists=True,
+        sampler=sampler,
+        pruner=pruner
+    )
+    
+    # OPTYMALIZACJA: Równoległe wykonywanie trials (n_jobs=-1 = wszystkie CPU)
+    study.optimize(
+        objective_model,
+        n_trials=n_model_trials,
+        n_jobs=-1,  # Wszystkie dostępne CPU cores
+        show_progress_bar=True
+    )
     return study.best_params
 
 
@@ -255,7 +296,8 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         balance_penalty = np.exp(-10 * mse)
 
         scores = []
-        for train_index, val_index in walk_forward_split(X, n_splits=6, test_size=0.15):
+        # OPTYMALIZACJA: Zredukowano z 6 do 3 splits (2x szybciej)
+        for fold_idx, (train_index, val_index) in enumerate(walk_forward_split(X, n_splits=3, test_size=0.15)):
             X_train, X_val, y_train, y_val = X.iloc[train_index], X.iloc[val_index], y.iloc[train_index], y.iloc[val_index]
             if y_train.nunique() < 3:
                 continue
@@ -265,7 +307,14 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
             probe_model = lgb.LGBMClassifier(random_state=42, objective='multiclass', num_class=3, verbose=-1)
             probe_model.fit(X_train_scaled, y_train, feature_name=X_train.columns.to_list())
             preds = probe_model.predict(X_val_scaled)
-            scores.append(f1_score(y_val, preds, average='macro'))
+            fold_score = f1_score(y_val, preds, average='macro')
+            scores.append(fold_score)
+            
+            # OPTYMALIZACJA: Pruning po pierwszym fold (oszczędność ~66% czasu dla słabych trials)
+            if fold_idx == 0:
+                trial.report(fold_score * balance_penalty, fold_idx)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
 
         if not scores:
             return 0.0
@@ -277,10 +326,39 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         return final_score
 
     print("\n--- ETAP 1: Rozpoczynanie optymalizacji parametrów etykiet ---")
+    print("OPTYMALIZACJA: Zredukowano CV splits (6→3), dodano pruning i równoległe wykonywanie")
     storage_name_labels = f"sqlite:///optuna/{strategy_id}_labels_study.db"
-    study_labels = optuna.create_study(study_name=f"{strategy_id}_labels_optimization", storage=storage_name_labels,
-                                       direction='maximize', load_if_exists=True)
-    study_labels.optimize(objective_labels, n_trials=n_label_trials, show_progress_bar=True)
+    
+    # OPTYMALIZACJA: TPE sampler z mniejszą liczbą startup trials
+    sampler_labels = optuna.samplers.TPESampler(
+        n_startup_trials=5,
+        multivariate=True,
+        seed=42
+    )
+    
+    # OPTYMALIZACJA: MedianPruner do early stopping słabych trials
+    pruner_labels = optuna.pruners.MedianPruner(
+        n_startup_trials=3,
+        n_warmup_steps=0,
+        interval_steps=1
+    )
+    
+    study_labels = optuna.create_study(
+        study_name=f"{strategy_id}_labels_optimization",
+        storage=storage_name_labels,
+        direction='maximize',
+        load_if_exists=True,
+        sampler=sampler_labels,
+        pruner=pruner_labels
+    )
+    
+    # OPTYMALIZACJA: Równoległe wykonywanie trials (n_jobs=-1)
+    study_labels.optimize(
+        objective_labels,
+        n_trials=n_label_trials,
+        n_jobs=-1,
+        show_progress_bar=True
+    )
     best_label_params = study_labels.best_params
     print(f"\nNajlepsze parametry etykiet: {best_label_params}")
     
