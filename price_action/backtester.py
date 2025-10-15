@@ -412,6 +412,13 @@ class BacktestEngine:
                 missing_short = set(features_short) - set(last_closed_candle.columns)
                 
                 if missing_long or missing_short:
+                    if i == 1:  # Log only once at start
+                        logging.warning(f"Missing features detected - skipping predictions!")
+                        if missing_long:
+                            logging.warning(f"Missing LONG features ({len(missing_long)}): {list(missing_long)[:10]}")
+                        if missing_short:
+                            logging.warning(f"Missing SHORT features ({len(missing_short)}): {list(missing_short)[:10]}")
+                        logging.info(f"Available features in data: {len(last_closed_candle.columns)}")
                     continue
                 
                 X_long = last_closed_candle[features_long]
@@ -432,6 +439,10 @@ class BacktestEngine:
                 elif proba_short > prob_threshold and proba_short > proba_long:
                     decision = "SHORT"
                     chosen_proba = proba_short
+                
+                # DEBUG: Log first 10 predictions to diagnose issue
+                if i <= 10:
+                    logging.info(f"Candle {i} @ {current_candle.name}: proba_long={proba_long:.4f}, proba_short={proba_short:.4f}, decision={decision}")
                 
                 self.decision_log.append({
                     'timestamp': current_candle.name,

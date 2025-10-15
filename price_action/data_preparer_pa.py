@@ -235,12 +235,16 @@ def remove_correlated_features(df: pd.DataFrame,
                 })
                 
                 # Decyzja którą cechę usunąć
-                if column in keep_important and corr_feature not in keep_important:
+                # PRIORITY 1: Never drop features in keep_important
+                if column in keep_important and corr_feature in keep_important:
+                    # Both are important - keep both (don't add either to drop list)
+                    continue
+                elif column in keep_important and corr_feature not in keep_important:
                     to_drop.add(corr_feature)
                 elif corr_feature in keep_important and column not in keep_important:
                     to_drop.add(column)
                 else:
-                    # Usuń tę z mniejszą wariancją (mniej informatywna)
+                    # Neither is important - drop the one with lower variance
                     var_col = df[column].var()
                     var_corr = df[corr_feature].var()
                     if var_col < var_corr:
@@ -1135,6 +1139,31 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     # Construct strategy_id to match the naming convention in model_pipeline.py
     helpers_str = '_plus_' + '_'.join(helper_timeframes) if helper_timeframes else ""
     strategy_id = f"{ticker}_{timeframe.replace(' ', '')}{helpers_str}_{side}"
+    
+    # BACKTEST FIX: Load trained model features EARLY to preserve them
+    model_features_to_preserve = []
+    if side == 'backtest':
+        print("\n🔧 BACKTEST MODE: Loading trained model features to preserve them...")
+        long_features_path = os.path.join("models", f"{strategy_id.replace('_backtest', '_long')}_features.joblib")
+        short_features_path = os.path.join("models", f"{strategy_id.replace('_backtest', '_short')}_features.joblib")
+        
+        try:
+            import joblib
+            if os.path.exists(long_features_path):
+                long_features = joblib.load(long_features_path)
+                model_features_to_preserve.extend(long_features)
+                print(f"   ✓ Loaded {len(long_features)} LONG model features from {os.path.basename(long_features_path)}")
+            if os.path.exists(short_features_path):
+                short_features = joblib.load(short_features_path)
+                model_features_to_preserve.extend(short_features)
+                print(f"   ✓ Loaded {len(short_features)} SHORT model features from {os.path.basename(short_features_path)}")
+            model_features_to_preserve = list(set(model_features_to_preserve))  # Remove duplicates
+            print(f"   ✓ Total unique model features to preserve: {len(model_features_to_preserve)}")
+            print(f"   ✓ These features will NOT be removed during correlation/weak feature cleanup\n")
+        except Exception as e:
+            print(f"   ⚠️  Warning: Could not load model features: {e}")
+            print(f"   Continuing without model feature preservation...\n")
+    
     weak_features_path = os.path.join("models", f"{strategy_id}_weak_features.json")
     
     # Load weak features from file if exists, otherwise use empty list
@@ -1151,6 +1180,11 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     else:
         print(f"Plik słabych cech nie istnieje: {weak_features_path}")
         print("To normalne podczas pierwszego uruchomienia. Żadne cechy nie zostaną usunięte.")
+    
+    # BACKTEST FIX: Exclude model features from removal
+    if model_features_to_preserve:
+        features_to_remove = [f for f in features_to_remove if f not in model_features_to_preserve]
+        print(f"🔧 Excluded {len(model_features_to_preserve)} model features from weak feature removal")
     
     existing_features_to_remove = [col for col in features_to_remove if col in final_df.columns]
     if existing_features_to_remove:
@@ -1178,14 +1212,19 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         # ⚠️ KROK 1: USUŃ surowe OHLC PRZED analizą korelacji
         # Te cechy są zawsze skorelowane (reprezentują poziom ceny)
         # Zachowamy tylko CECHY POCHODNE (dist_from_*, price_change_pct, etc.)
-        print("\n🗑️  Usuwanie surowych cech OHLC (zawsze skorelowane)...")
-        ohlc_to_remove = ['open', 'high', 'low']  # Zachowujemy 'close' jako reference point
-        existing_ohlc = [col for col in ohlc_to_remove if col in final_df.columns]
-        if existing_ohlc:
-            final_df.drop(columns=existing_ohlc, inplace=True)
-            print(f"   ✓ Usunięto: {existing_ohlc}")
-            print(f"   ✓ Zachowano: 'close' (jako punkt odniesienia)")
-            print(f"   ✓ Zachowano: cechy pochodne (dist_from_*, price_change_pct, body_to_wick_ratio, etc.)\n")
+        # BACKTEST FIX: Keep OHLCV for backtesting (needed for trade execution)
+        if side != 'backtest':
+            print("\n🗑️  Usuwanie surowych cech OHLC (zawsze skorelowane)...")
+            ohlc_to_remove = ['open', 'high', 'low']  # Zachowujemy 'close' jako reference point
+            existing_ohlc = [col for col in ohlc_to_remove if col in final_df.columns]
+            if existing_ohlc:
+                final_df.drop(columns=existing_ohlc, inplace=True)
+                print(f"   ✓ Usunięto: {existing_ohlc}")
+                print(f"   ✓ Zachowano: 'close' (jako punkt odniesienia)")
+                print(f"   ✓ Zachowano: cechy pochodne (dist_from_*, price_change_pct, body_to_wick_ratio, etc.)\n")
+        else:
+            print("\n🔧 BACKTEST MODE: Keeping OHLCV columns for trade execution")
+            print(f"   ✓ Preserved: open, high, low, close, volume\n")
         
         # ⚠️ KROK 2: USUŃ pivoty S1/R1 (skorelowane z ceną)
         # Zachowamy tylko DISTANCE od pivotów (dist_from_s1, dist_from_r1)
@@ -1238,6 +1277,21 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             'trend_alignment_score', 'near_swing_high_alignment', 
             'near_swing_low_alignment', 'momentum_alignment_score'
         ]
+        
+        # BACKTEST FIX: Merge model features with important features
+        if model_features_to_preserve:
+            important_features.extend(model_features_to_preserve)
+            important_features = list(set(important_features))  # Remove duplicates
+            print(f"🔧 Added {len(model_features_to_preserve)} model features to preservation list")
+            print(f"   Total features to preserve: {len(important_features)}\n")
+        
+        # BACKTEST FIX: Add OHLCV columns to important features for backtest mode
+        if side == 'backtest':
+            ohlcv_cols = ['open', 'high', 'low', 'close', 'volume']
+            important_features.extend(ohlcv_cols)
+            important_features = list(set(important_features))
+            print(f"🔧 BACKTEST MODE: Added OHLCV columns to preservation list")
+            print(f"   Total features to preserve: {len(important_features)}\n")
         
         final_df, removed_corr_features = remove_correlated_features(
             final_df,

@@ -58,13 +58,13 @@ python analysis.py \
 # Backtest combined LONG/SHORT strategy
 python main.py \
 --backtest \
---ticker "SOLUSDT" \
+--ticker "ETHUSDT" \
 --timeframe "1h" \
 --helper-timeframes 2h 4h 6h 12h 1D \
 --limit 3000 \
 --prob-threshold 0.8 \
---tp-pct 0.07 \
---tsl-pct 0.04 \
+--tp-pct 0.06 \
+--tsl-pct 0.03 \
 --trade-size 1000 \
 --partial-tp
 
