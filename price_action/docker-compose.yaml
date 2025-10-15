@@ -18,7 +18,7 @@ services:
       --ticker ETHUSDT
       --timeframe 15m
       --helper-timeframes 1h 4h
-      --prob-threshold 0.65
+      --prob-threshold 0.60
       --tsl-pct 0.01
       --tp-pct 0.02
       --trade-size 50.0

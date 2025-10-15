@@ -90,6 +90,7 @@ import asyncio
 from scipy.signal import find_peaks
 import json
 from typing import Tuple, List
+import logging
 
 # ============================================================================
 # NOWE FUNKCJE: Wskaźniki kompozytowe i usuwanie korelacji
@@ -1538,9 +1539,9 @@ def _calculate_helper_features(df: pd.DataFrame):
 
 
 def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timeframes: list = None, side: str = 'long', date_from: str = None):
-    print("Pobieranie danych...")
+    logging.info(f"📊 Fetching data: ticker={ticker}, timeframe={timeframe}, limit={limit}, helpers={helper_timeframes}")
     if date_from:
-        print(f"⚠️  UWAGA: Dane będą pobrane wstecz od daty: {date_from}")
+        logging.warning(f"⚠️  UWAGA: Dane będą pobrane wstecz od daty: {date_from}")
     load_dotenv()
     api_key, api_secret = os.getenv("BYBIT_API_KEY"), os.getenv("BYBIT_API_SECRET")
     base_url = os.getenv("BYBIT_BASE_URL")
@@ -1557,13 +1558,17 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         for col in numeric_cols: df[col] = pd.to_numeric(df[col], errors='coerce')
         return df
 
+    logging.info(f"🔄 Calling fetch_ohlcv for {ticker} {timeframe}...")
     base_raw_data = adapter.fetch_ohlcv(symbol=ticker, timeframe=timeframe, limit=limit, end_date=date_from)
-    if not base_raw_data: return pd.DataFrame()
+    if not base_raw_data:
+        logging.error(f"❌ fetch_ohlcv returned EMPTY DATA for {ticker} {timeframe}! Check API connection, symbol validity, or timeframe format.")
+        return pd.DataFrame()
 
     base_df = to_dataframe(base_raw_data)
     base_df = base_df.iloc[:-1]
     base_df.sort_index(inplace=True)
-    print(f"Pobrano {len(base_df)} zamkniętych świec dla interwału bazowego {timeframe}.")
+    logging.info(f"✅ Pobrano {len(base_df)} zamkniętych świec dla interwału bazowego {timeframe}.")
+    logging.info(f"📊 Base DataFrame shape after loading: {base_df.shape}")
 
     if helper_timeframes:
         for helper_tf in helper_timeframes:
@@ -1594,7 +1599,9 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         base_df = base_df[~base_df.index.duplicated(keep='first')]
         print(f"✓ Usunięto duplikaty. Pozostało {len(base_df)} unikalnych wpisów.")
 
+    logging.info(f"📊 DataFrame shape before feature calculation: {base_df.shape}")
     final_df = _calculate_base_features(base_df)
+    logging.info(f"📊 DataFrame shape after feature calculation: {final_df.shape}")
 
     # OPTIMIZATION: Multi-timeframe confluence features
     if helper_timeframes:
@@ -1767,6 +1774,8 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             'adx_14', 'obv_divergence', 'cmf_20', 'mfi_14', 'cci_20',
             # Volume features
             'volume', 'turnover', 'rvol_ratio',
+            # Volume-Price Divergence features (MUST KEEP!)
+            'obv', 'obv_ma_20', 'vpt', 'vpt_ma_20', 'ad_line', 'ad_line_ma_20',
             # Key price derivatives (NIE surowe OHLC!)
             'dist_from_s1', 'dist_from_r1', 'dist_from_resistance', 'dist_from_support',
             'price_change_pct_5', 'roc_10', 'roc_20', 'momentum_consensus',

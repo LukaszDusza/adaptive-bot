@@ -38,16 +38,16 @@ logging.basicConfig(
 
 class BotConfig:
     """Bot configuration"""
-    TICKER: str = "SOLUSDT"
-    TIMEFRAME: str = "1h"
-    HELPER_TIMEFRAMES: list = ["4h", "12h", "1D"]
-    TRADE_SIZE_USD: float = 100.0
+    TICKER: str = "ETHUSDT"
+    TIMEFRAME: str = "15m"
+    HELPER_TIMEFRAMES: list = ["1h", "4h"]
+    TRADE_SIZE_USD: float = 50.0
     LEVERAGE: int = 10
-    TP_PCT: float = 0.06
-    TSL_PCT: float = 0.022
+    TP_PCT: float = 0.02
+    TSL_PCT: float = 0.01
     PROBABILITY_THRESHOLD: float = 0.80
     LOOP_SLEEP_SECONDS: int = 60
-    CANDLES_FOR_FEATURES: int = 200
+    CANDLES_FOR_FEATURES: int = 10000
     PARTIAL_TP_ENABLED: bool = True
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 3
@@ -150,21 +150,25 @@ class TradingBot:
         try:
             # Fetch data if not provided
             if df is None:
+                logging.info(f"📥 Fetching market data for {self.config.TICKER}...")
                 df = fetch_and_prepare_data(
                     ticker=self.config.TICKER,
                     timeframe=self.config.TIMEFRAME,
                     limit=self.config.CANDLES_FOR_FEATURES,
                     helper_timeframes=self.config.HELPER_TIMEFRAMES,
-                    side='live'
+                    side='backtest'  # Use backtest mode to preserve trained model features
                 )
+                logging.info(f"✓ Data fetched successfully ({len(df)} candles)")
             
             if df.empty:
+                logging.error("❌ Empty dataframe received!")
                 return "ERROR"
             
             last_row = df.iloc[-1]
             last_row_df = df.iloc[[-1]]
             
             # Extract features
+            logging.info("🤖 Running ML model predictions...")
             X_long = last_row_df[self.features_long]
             X_short = last_row_df[self.features_short]
             
@@ -174,7 +178,7 @@ class TradingBot:
             proba_buy = self.model_long.predict_proba(X_long_scaled)[0][1]
             proba_sell = self.model_short.predict_proba(X_short_scaled)[0][1]
             
-            logging.info(f"Probabilities: BUY={proba_buy:.3f}, SELL={proba_sell:.3f}")
+            logging.info(f"📊 Model Probabilities: BUY={proba_buy:.3f}, SELL={proba_sell:.3f} (threshold={self.config.PROBABILITY_THRESHOLD:.3f})")
             
             # Determine decision
             decision = "HOLD"
@@ -182,6 +186,8 @@ class TradingBot:
                 decision = "BUY"
             elif proba_sell > self.config.PROBABILITY_THRESHOLD and proba_sell > proba_buy:
                 decision = "SELL"
+            
+            logging.info(f"🎯 Model Decision: {decision}")
             
             # Cache decision data for later use
             self.last_decision_data = {
@@ -575,7 +581,8 @@ class TradingBot:
             }
             self._save_state()
             
-            logging.warning(f"✓ Position opened | SL: {sl:.4f} | TP: {tp:.4f if tp > 0 else 'OFF'}")
+            tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
+            logging.warning(f"✓ Position opened | SL: {sl:.4f} | TP: {tp_display}")
             
         except Exception as e:
             logging.error(f"Failed to open position: {e}", exc_info=True)
@@ -592,13 +599,14 @@ class TradingBot:
         logging.info("="*60)
         
         try:
+            # Always get decision to log model probabilities
+            decision = self.get_decision()
+            
             # Manage existing position
             if self._manage_position():
                 return
             
-            # Get decision
-            decision = self.get_decision()
-            
+            # Open new position if signal and no position
             if decision in ["BUY", "SELL"]:
                 self._open_position(decision)
             elif decision == "HOLD":
