@@ -340,7 +340,8 @@ class BacktestEngine:
             tp_pct: float,
             sl_pct: float,
             tsl_pct: float,
-            enable_partial_tp: bool) -> Dict:
+            enable_partial_tp: bool,
+            min_proba_diff: float = 0.0) -> Dict:
         """Main backtest loop - NO LOOK-AHEAD BIAS"""
         
         logging.info(f"Starting backtest. Candles: {len(df)}, Capital: ${self.initial_capital}")
@@ -430,19 +431,26 @@ class BacktestEngine:
                 proba_long = model_long.predict_proba(X_long_scaled)[0][1]
                 proba_short = model_short.predict_proba(X_short_scaled)[0][1]
                 
+                # Calculate probability difference (confidence gap)
+                proba_diff = abs(proba_long - proba_short)
+                
                 decision = "HOLD"
                 chosen_proba = 0.0
                 
                 if proba_long > prob_threshold and proba_long > proba_short:
-                    decision = "LONG"
-                    chosen_proba = proba_long
+                    # Check if confidence gap is sufficient
+                    if proba_diff >= min_proba_diff:
+                        decision = "LONG"
+                        chosen_proba = proba_long
                 elif proba_short > prob_threshold and proba_short > proba_long:
-                    decision = "SHORT"
-                    chosen_proba = proba_short
+                    # Check if confidence gap is sufficient
+                    if proba_diff >= min_proba_diff:
+                        decision = "SHORT"
+                        chosen_proba = proba_short
                 
                 # DEBUG: Log first 10 predictions to diagnose issue
                 if i <= 10:
-                    logging.info(f"Candle {i} @ {current_candle.name}: proba_long={proba_long:.4f}, proba_short={proba_short:.4f}, decision={decision}")
+                    logging.info(f"Candle {i} @ {current_candle.name}: proba_long={proba_long:.4f}, proba_short={proba_short:.4f}, diff={proba_diff:.4f}, decision={decision}")
                 
                 self.decision_log.append({
                     'timestamp': current_candle.name,
@@ -632,7 +640,8 @@ def main(args):
         tp_pct=args.tp_pct,
         sl_pct=args.sl_pct,
         tsl_pct=args.tsl_pct,
-        enable_partial_tp=args.partial_tp
+        enable_partial_tp=args.partial_tp,
+        min_proba_diff=args.min_proba_diff
     )
     
     metrics = calculate_metrics(results['trades'], results['equity_curve'], args.initial_capital)
@@ -661,6 +670,8 @@ def run_backtester_with_args(args):
         args.taker_fee = 0.00055
     if not hasattr(args, 'slippage_pct'):
         args.slippage_pct = 0.0001
+    if not hasattr(args, 'min_proba_diff'):
+        args.min_proba_diff = 0.0
     
     # Run the main backtest function
     main(args)
@@ -678,6 +689,8 @@ if __name__ == "__main__":
     parser.add_argument('--sl-pct', type=float, required=True)
     parser.add_argument('--tsl-pct', type=float, required=True)
     parser.add_argument('--prob-threshold', type=float, required=True)
+    parser.add_argument('--min-proba-diff', type=float, default=0.0,
+                        help='Minimum probability difference between BUY and SELL (confidence gap)')
     parser.add_argument('--partial-tp', action='store_true')
     parser.add_argument('--maker-fee', type=float, default=0.0002)
     parser.add_argument('--taker-fee', type=float, default=0.00055)

@@ -18,22 +18,24 @@ TICKER="ETHUSDT"
 TIMEFRAME="15m"
 HELPER_TIMEFRAMES="1h 4h"
 LIMIT_TRAIN=80000
-LIMIT_BACKTEST=10000
+LIMIT_BACKTEST=5000
 DATE_FROM="2025-05-31"  # Training data end date (prevents data leakage)
 LABEL_TRIALS=100
 MODEL_TRIALS=100
-PROB_THRESHOLD=0.6
-TP_PCT=0.04
-TSL_PCT=0.02
+PROB_THRESHOLD=0.65
+MIN_PROBA_DIFF=0.25
+TP_PCT=0.150
+TSL_PCT=0.010
 TRADE_SIZE=1000
 OPTUNA_TRIALS=100  # Number of Optuna optimization trials
 
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}  SOLUSDT ML Trading Workflow${NC}"
+echo -e "${BLUE}  ML Trading Workflow${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 echo -e "${YELLOW}Current Parameters:${NC}"
 echo "  PROB_THRESHOLD: $PROB_THRESHOLD"
+echo "  MIN_PROBA_DIFF: $MIN_PROBA_DIFF"
 echo "  TP_PCT: $TP_PCT"
 echo "  TSL_PCT: $TSL_PCT"
 echo ""
@@ -183,6 +185,7 @@ run_backtest() {
     echo -e "${YELLOW}========================================${NC}"
     echo "Parameters:"
     echo "  - Probability Threshold: $PROB_THRESHOLD"
+    echo "  - Min Proba Diff: $MIN_PROBA_DIFF"
     echo "  - Take Profit: ${TP_PCT}%"
     echo "  - Trailing Stop Loss: ${TSL_PCT}%"
     echo "  - Trade Size: \$${TRADE_SIZE}"
@@ -195,6 +198,7 @@ run_backtest() {
         --helper-timeframes $HELPER_TIMEFRAMES \
         --limit $LIMIT_BACKTEST \
         --prob-threshold $PROB_THRESHOLD \
+        --min-proba-diff $MIN_PROBA_DIFF \
         --tp-pct $TP_PCT \
         --tsl-pct $TSL_PCT \
         --trade-size $TRADE_SIZE \
@@ -258,6 +262,7 @@ optimize_parameters() {
     echo ""
     echo "Current parameters:"
     echo "  - PROB_THRESHOLD: $PROB_THRESHOLD"
+    echo "  - MIN_PROBA_DIFF: $MIN_PROBA_DIFF"
     echo "  - TP_PCT: $TP_PCT"
     echo "  - TSL_PCT: $TSL_PCT"
     echo ""

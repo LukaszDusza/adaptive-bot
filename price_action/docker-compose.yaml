@@ -19,6 +19,7 @@ services:
       --timeframe 15m
       --helper-timeframes 1h 4h
       --prob-threshold 0.60
+      --min-proba-diff 0.10
       --tsl-pct 0.01
       --tp-pct 0.02
       --trade-size 50.0

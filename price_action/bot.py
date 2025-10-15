@@ -46,6 +46,7 @@ class BotConfig:
     TP_PCT: float = 0.02
     TSL_PCT: float = 0.01
     PROBABILITY_THRESHOLD: float = 0.80
+    MIN_PROBA_DIFF: float = 0.0  # Minimum difference between BUY and SELL probabilities
     LOOP_SLEEP_SECONDS: int = 60
     CANDLES_FOR_FEATURES: int = 10000
     PARTIAL_TP_ENABLED: bool = True
@@ -178,14 +179,26 @@ class TradingBot:
             proba_buy = self.model_long.predict_proba(X_long_scaled)[0][1]
             proba_sell = self.model_short.predict_proba(X_short_scaled)[0][1]
             
+            # Calculate probability difference (confidence gap)
+            proba_diff = abs(proba_buy - proba_sell)
+            
             logging.info(f"📊 Model Probabilities: BUY={proba_buy:.3f}, SELL={proba_sell:.3f} (threshold={self.config.PROBABILITY_THRESHOLD:.3f})")
+            logging.info(f"📏 Probability Difference: {proba_diff:.3f} (min_required={self.config.MIN_PROBA_DIFF:.3f})")
             
             # Determine decision
             decision = "HOLD"
             if proba_buy > self.config.PROBABILITY_THRESHOLD and proba_buy > proba_sell:
-                decision = "BUY"
+                # Check if confidence gap is sufficient
+                if proba_diff >= self.config.MIN_PROBA_DIFF:
+                    decision = "BUY"
+                else:
+                    logging.warning(f"⚠️  BUY signal rejected: insufficient confidence gap ({proba_diff:.3f} < {self.config.MIN_PROBA_DIFF:.3f})")
             elif proba_sell > self.config.PROBABILITY_THRESHOLD and proba_sell > proba_buy:
-                decision = "SELL"
+                # Check if confidence gap is sufficient
+                if proba_diff >= self.config.MIN_PROBA_DIFF:
+                    decision = "SELL"
+                else:
+                    logging.warning(f"⚠️  SELL signal rejected: insufficient confidence gap ({proba_diff:.3f} < {self.config.MIN_PROBA_DIFF:.3f})")
             
             logging.info(f"🎯 Model Decision: {decision}")
             
@@ -661,6 +674,7 @@ def launch_bot(args):
     config.TP_PCT = args.tp_pct
     config.TSL_PCT = args.tsl_pct
     config.PROBABILITY_THRESHOLD = args.prob_threshold
+    config.MIN_PROBA_DIFF = args.min_proba_diff
     config.PARTIAL_TP_ENABLED = args.partial_tp
     
     print("\n" + "="*70)
@@ -671,6 +685,7 @@ def launch_bot(args):
     print(f"Trade Size:        ${config.TRADE_SIZE_USD}")
     print(f"TP/TSL:            {config.TP_PCT*100:.2f}% / {config.TSL_PCT*100:.2f}%")
     print(f"Threshold:         {config.PROBABILITY_THRESHOLD:.3f}")
+    print(f"Min Proba Diff:    {config.MIN_PROBA_DIFF:.3f}")
     print(f"Partial TP:        {'ON' if config.PARTIAL_TP_ENABLED else 'OFF'}")
     print(f"")
     print(f"Logs directory:    logs/")
@@ -694,6 +709,8 @@ if __name__ == "__main__":
     parser.add_argument('--tp-pct', type=float, required=True)
     parser.add_argument('--tsl-pct', type=float, required=True)
     parser.add_argument('--prob-threshold', type=float, required=True)
+    parser.add_argument('--min-proba-diff', type=float, default=0.0,
+                        help='Minimum probability difference between BUY and SELL (confidence gap)')
     parser.add_argument('--partial-tp', action='store_true')
     
     launch_bot(parser.parse_args())

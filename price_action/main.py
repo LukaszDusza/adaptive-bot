@@ -28,6 +28,8 @@ def main():
     parser.add_argument('--date-from', type=str, default=None, 
                         help="Data końcowa dla danych treningowych (YYYY-MM-DD). Jeśli podana, dane będą pobrane wstecz od tej daty.")
     parser.add_argument('--prob-threshold', type=float, default=0.8)
+    parser.add_argument('--min-proba-diff', type=float, default=0.0,
+                        help="Minimum probability difference between BUY and SELL (confidence gap)")
     parser.add_argument('--tp-pct', type=float, default=0.07)
     parser.add_argument('--tsl-pct', type=float, default=0.04)
     parser.add_argument('--trade-size', type=float, default=100.0)

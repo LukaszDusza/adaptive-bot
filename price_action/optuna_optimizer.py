@@ -54,14 +54,18 @@ class BestTrialCallback:
                 self.best_values = current_best.values
                 self.last_update_trial = trial.number
                 
+                # Get winrate from trial user attributes
+                winrate = current_best.user_attrs.get('win_rate', 0)
+                
                 # Display best result found so far (on new line, clean output)
                 # This avoids interfering with tqdm progress bar
                 print(f"\n✨ Best: Trial #{self.best_trial_number} | "
                       f"PnL=${self.best_pnl:+.2f} | "
                       f"prob={self.best_params['prob_threshold']:.2f} "
                       f"tp={self.best_params['tp_pct']:.3f} "
-                      f"tsl={self.best_params['tsl_pct']:.3f} | "
-                      f"DD={-self.best_values[1]:.2f}%")
+                      f"tsl={self.best_params['tsl_pct']:.3f} "
+                      f"min_diff={self.best_params['min_proba_diff']:.2f} | "
+                      f"WR={winrate:.1f}% DD={-self.best_values[1]:.2f}%")
 
 
 class BacktesterOptimizer:
@@ -150,6 +154,7 @@ class BacktesterOptimizer:
         prob_threshold = trial.suggest_float('prob_threshold', 0.5, 0.9, step=0.05)
         tp_pct = trial.suggest_float('tp_pct', 0.02, 0.15, step=0.01)
         tsl_pct = trial.suggest_float('tsl_pct', 0.01, 0.08, step=0.005)
+        min_proba_diff = trial.suggest_float('min_proba_diff', 0.0, 0.7, step=0.05)
         
         # Ensure TSL is not greater than TP (logical constraint)
         if tsl_pct >= tp_pct:
@@ -175,7 +180,8 @@ class BacktesterOptimizer:
                 tp_pct=tp_pct,
                 sl_pct=sl_pct,
                 tsl_pct=tsl_pct,
-                enable_partial_tp=self.enable_partial_tp
+                enable_partial_tp=self.enable_partial_tp,
+                min_proba_diff=min_proba_diff
             )
             
             # Calculate metrics
@@ -215,7 +221,7 @@ class BacktesterOptimizer:
             # Log trial results
             logging.info(
                 f"Trial {trial.number}: "
-                f"prob={prob_threshold:.2f}, tp={tp_pct:.3f}, tsl={tsl_pct:.3f} | "
+                f"prob={prob_threshold:.2f}, tp={tp_pct:.3f}, tsl={tsl_pct:.3f}, min_diff={min_proba_diff:.2f} | "
                 f"Obj1(PnL)=${obj1_pnl:+.2f}, Obj2(DD)={obj2_drawdown:.2f}%, Obj3(Trades)={obj3_trade_score:.1f} | "
                 f"Return={total_return:.2f}%, DD={max_dd:.2f}%, Sharpe={sharpe:.3f}, Trades={num_trades}"
             )
@@ -352,7 +358,8 @@ class BacktesterOptimizer:
             tp_pct=best_params['tp_pct'],
             sl_pct=best_params['tp_pct'] * 0.5,
             tsl_pct=best_params['tsl_pct'],
-            enable_partial_tp=self.enable_partial_tp
+            enable_partial_tp=self.enable_partial_tp,
+            min_proba_diff=best_params['min_proba_diff']
         )
         
         final_metrics = calculate_metrics(
@@ -386,6 +393,7 @@ class BacktesterOptimizer:
         
         print(f"\n{'BEST PARAMETERS (Highest PnL from Pareto Front):':^70}")
         print(f"  PROB_THRESHOLD = {best_params['prob_threshold']:.2f}")
+        print(f"  MIN_PROBA_DIFF = {best_params['min_proba_diff']:.2f}")
         print(f"  TP_PCT         = {best_params['tp_pct']:.3f}")
         print(f"  TSL_PCT        = {best_params['tsl_pct']:.3f}")
         print(f"  SL_PCT         = {best_params['tp_pct'] * 0.5:.3f} (auto: 50% of TP)")
@@ -433,6 +441,7 @@ class BacktesterOptimizer:
             
             f.write("BEST PARAMETERS (Highest PnL from Pareto Front):\n")
             f.write(f"PROB_THRESHOLD={best_params['prob_threshold']:.2f}\n")
+            f.write(f"MIN_PROBA_DIFF={best_params['min_proba_diff']:.2f}\n")
             f.write(f"TP_PCT={best_params['tp_pct']:.3f}\n")
             f.write(f"TSL_PCT={best_params['tsl_pct']:.3f}\n")
             f.write(f"SL_PCT={best_params['tp_pct'] * 0.5:.3f}\n\n")
