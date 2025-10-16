@@ -41,6 +41,13 @@ def get_triple_barrier_labels(prices: pd.Series, t_events: pd.Index, profit_take
                               time_limit: int, verbose=True):
     if verbose:
         print("Rozpoczynanie etykietowania danych...")
+    
+    # Handle duplicate index values by keeping the first occurrence
+    if not prices.index.is_unique:
+        if verbose:
+            print(f"Warning: prices index has {prices.index.duplicated().sum()} duplicates. Keeping first occurrence.")
+        prices = prices[~prices.index.duplicated(keep='first')]
+    
     prices_arr = prices.to_numpy()
     event_indices = prices.index.get_indexer(t_events)
     outcomes = _compute_labels_fast(prices_arr, event_indices, profit_take_pct, stop_loss_pct, time_limit)

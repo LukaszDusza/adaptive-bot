@@ -1,7 +1,7 @@
 services:
 
-  bot-eth-syl:
-    container_name: eth-syl
+  bot-syl-eth:
+    container_name: syl-eth
     build: .
     environment:
       - PYTHONUNBUFFERED=1
@@ -18,16 +18,16 @@ services:
       --ticker ETHUSDT
       --timeframe 15m
       --helper-timeframes 1h 4h
-      --prob-threshold 0.60
-      --min-proba-diff 0.30
+      --prob-threshold 0.6
+      --min-proba-diff 0.10
       --tsl-pct 0.01
       --tp-pct 0.02
       --trade-size 100.0
       --leverage 10 
       --partial-tp
 
-  bot-sol-luk:
-    container_name: sol-luk
+  bot-luk-sol:
+    container_name: luk-sol
     build: .
     environment:
       - PYTHONUNBUFFERED=1
