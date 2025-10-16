@@ -77,6 +77,9 @@ class TradingBot:
         # Initialize trade logger
         self.trade_logger = TradeLogger(base_dir="logs")
         
+        # Restore trade logging if position was active before restart
+        self._restore_trade_logging_if_needed()
+        
         # Cache for last decision data
         self.last_decision_data = {}
         self.last_candle_data = {}
@@ -135,6 +138,41 @@ class TradingBot:
             except Exception as e:
                 logging.error(f"Failed to load state: {e}")
     
+    def _restore_trade_logging_if_needed(self):
+        """
+        Restore trade logging if bot restarts with an active position.
+        This prevents the 'Attempted to log TSL_UPDATE but no active trade' warning.
+        """
+        if not self.state:
+            return
+        
+        # Check if state indicates an active position
+        if 'side' in self.state and 'entry_price' in self.state:
+            side = self.state.get('side')
+            entry_price = self.state.get('entry_price')
+            
+            if side and entry_price:
+                logging.info(f"🔄 Restoring trade logging for existing {side} position @ {entry_price}")
+                
+                # Create minimal decision data for restored trade
+                decision_data = {
+                    "decision": "BUY" if side == "Long" else "SELL",
+                    "proba_buy": 0.0,
+                    "proba_sell": 0.0,
+                    "threshold": self.config.PROBABILITY_THRESHOLD,
+                    "candle_close_time": self.state.get('last_updated', datetime.now().isoformat()),
+                    "restored": True  # Flag to indicate this is a restored trade
+                }
+                
+                # Restart trade logging
+                self.trade_logger.start_trade(
+                    ticker=self.config.TICKER,
+                    side=side.upper(),
+                    decision_data=decision_data
+                )
+                
+                logging.info("✓ Trade logging restored")
+    
     def _extract_top_indicators(self, df_row, features_list, n=10) -> Dict[str, float]:
         """Extract top N indicator values from dataframe row"""
         indicators = {}
@@ -166,8 +204,17 @@ class TradingBot:
                 logging.error("❌ Empty dataframe received!")
                 return "ERROR"
             
-            last_row = df.iloc[-1]
-            last_row_df = df.iloc[[-1]]
+            # CRITICAL: Use ONLY closed candles (exclude the last incomplete candle)
+            # The last candle (iloc[-1]) is still forming and will be excluded
+            df_closed = df.iloc[:-1]
+            
+            if df_closed.empty:
+                logging.error("❌ No closed candles available!")
+                return "ERROR"
+            
+            # Use the last CLOSED candle for ML prediction
+            last_row = df_closed.iloc[-1]
+            last_row_df = df_closed.iloc[[-1]]
             
             # Extract features
             logging.info("🤖 Running ML model predictions...")
