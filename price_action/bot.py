@@ -443,15 +443,31 @@ class TradingBot:
                 "candle": self.last_candle_data
             })
             
-            # Move SL to breakeven
-            logging.info(f"Moving SL to breakeven: {entry:.4f}")
+            # Move SL to breakeven if it was below breakeven
+            last_sl = self.state.get('last_sl', 0)
+            should_update_sl = False
+            
             if side == 'Long':
-                self.adapter.set_stop_loss(self.config.TICKER, entry, "Buy")
-            else:
-                self.adapter.set_stop_loss(self.config.TICKER, entry, "Sell")
+                # For Long: move SL to breakeven if it was below entry
+                if last_sl < entry:
+                    should_update_sl = True
+                    logging.info(f"TSL was below breakeven ({last_sl:.4f}), moving to breakeven: {entry:.4f}")
+            else:  # Short
+                # For Short: move SL to breakeven if it was above entry
+                if last_sl > entry or last_sl == 0:
+                    should_update_sl = True
+                    logging.info(f"TSL was above breakeven ({last_sl:.4f}), moving to breakeven: {entry:.4f}")
+            
+            if should_update_sl:
+                logging.info(f"Moving SL to breakeven: {entry:.4f}")
+                if side == 'Long':
+                    self.adapter.set_stop_loss(self.config.TICKER, entry, "Buy")
+                else:
+                    self.adapter.set_stop_loss(self.config.TICKER, entry, "Sell")
+                
+                self.state['last_sl'] = entry
             
             self.state['partial_tp_taken'] = True
-            self.state['last_sl'] = entry
             self._save_state()
             
             logging.info(f"✓ Partial TP executed. Remaining: {size - qty}")

@@ -250,7 +250,15 @@ class BacktestEngine:
         if size_to_close:
             pos.current_size -= close_size
             pos.partial_tp_taken = True
-            pos.stop_loss = pos.entry_price
+            # Move SL to breakeven if it was below breakeven
+            if pos.side == 'Long':
+                if pos.stop_loss < pos.entry_price:
+                    pos.stop_loss = pos.entry_price
+                    logging.info(f"TSL moved to breakeven after partial TP: {pos.entry_price:.4f}")
+            else:  # Short
+                if pos.stop_loss > pos.entry_price:
+                    pos.stop_loss = pos.entry_price
+                    logging.info(f"TSL moved to breakeven after partial TP: {pos.entry_price:.4f}")
             logging.info(f"Partial close: {exit_reason}, Net P&L: ${net_pnl_usd:.2f}")
         else:
             # Reset tracking for next trade
