@@ -83,9 +83,11 @@ class BybitAdapter:
         base_url: Optional[str] = None,
         category: str = "linear",
         recv_window: int = 20000,
+        hedge_mode: bool = False,
     ) -> None:
         self.category = category
         self.recv_window = recv_window
+        self.hedge_mode = hedge_mode
 
         if not api_key or not api_secret:
             raise ValueError("Brak kluczy API (BYBIT_API_KEY / BYBIT_API_SECRET).")
@@ -104,6 +106,27 @@ class BybitAdapter:
             self._prime_instrument_cache()
         except Exception as e:
             log.warning(f"Nie udało się wczytać specyfikacji instrumentów: {e}")
+
+    def _get_position_idx(self, side: str) -> int:
+        """
+        Calculate positionIdx based on hedge_mode and side.
+        
+        One-Way Mode (hedge_mode=False): positionIdx = 0
+        Hedge Mode (hedge_mode=True):
+            - "Buy" or "Long" -> positionIdx = 1
+            - "Sell" or "Short" -> positionIdx = 2
+        """
+        if not self.hedge_mode:
+            return 0
+        
+        # Hedge mode: determine based on side
+        if side in ("Buy", "Long"):
+            return 1
+        elif side in ("Sell", "Short"):
+            return 2
+        else:
+            log.warning(f"Unknown side '{side}', defaulting to positionIdx=0")
+            return 0
 
     def _prime_instrument_cache(self):
         log.info("Pobieranie specyfikacji instrumentów dla 'linear'...")
@@ -125,14 +148,8 @@ class BybitAdapter:
             log.error(f"Nie udało się pobrać specyfikacji instrumentów: {e}", exc_info=True)
 
     def round_qty(self, symbol: str, qty: float) -> float:
-        s = _norm_symbol(symbol)
-        step = self._lot_step.get(s)
-
-        if step is not None and step > 0:
-            precision = abs(int(math.log10(step))) if step < 1 else 0
-            factor = 10 ** precision
-            return math.floor(qty * factor) / factor
-        return round(qty, 6)
+        # Always round to 1 decimal place for all tickers
+        return round(qty, 1)
 
     def get_position_size(self, symbol: str) -> float:
         try:
@@ -266,60 +283,121 @@ class BybitAdapter:
             return 0.0
         return float(arr[0].get("lastPrice", 0) or 0)
 
+    def _format_qty(self, qty: float) -> str:
+        """Format quantity as integer string if whole number, otherwise with decimals."""
+        if qty == int(qty):
+            return str(int(qty))
+        return str(qty)
+
     def market_open(self, symbol_u: str, side: str, qty: float):
-        safe_qty = self.round_qty(symbol_u, qty)
-        log.info(f"Oryginalna ilość {qty} zaokrąglona do {safe_qty} dla {symbol_u}")
-        resp = self.client.place_order(
-            category=self.category,
-            symbol=symbol_u,
-            side=side,
-            orderType="Market",
-            qty=str(safe_qty), timeInForce="IOC", reduceOnly=False,
-        )
-        if str(resp.get("retCode")) not in ("0",):
-            raise BybitAPIError(f"place_order -> {resp}")
-        return resp
+        # Try 2 decimal places first
+        safe_qty = round(qty, 2)
+        position_idx = self._get_position_idx(side)
+        log.info(f"Próba otwarcia pozycji: {qty} zaokrąglona do {safe_qty} (2 miejsca po przecinku) dla {symbol_u} (positionIdx={position_idx})")
+        
+        try:
+            resp = self.client.place_order(
+                category=self.category,
+                symbol=symbol_u,
+                side=side,
+                orderType="Market",
+                qty=self._format_qty(safe_qty), timeInForce="IOC", reduceOnly=False, positionIdx=position_idx,
+            )
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"place_order -> {resp}")
+            return resp
+        except (InvalidRequestError, BybitAPIError) as e:
+            error_msg = str(e)
+            # If "Qty invalid" error, retry with 1 decimal place
+            if "Qty invalid" in error_msg or "10001" in error_msg:
+                safe_qty = round(qty, 1)
+                log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
+                resp = self.client.place_order(
+                    category=self.category,
+                    symbol=symbol_u,
+                    side=side,
+                    orderType="Market",
+                    qty=self._format_qty(safe_qty), timeInForce="IOC", reduceOnly=False, positionIdx=position_idx,
+                )
+                if str(resp.get("retCode")) not in ("0",):
+                    raise BybitAPIError(f"place_order -> {resp}")
+                return resp
+            else:
+                raise
 
     def market_close(self, symbol_u: str, side: str, qty: float):
-        safe_qty = self.round_qty(symbol_u, qty)
-        log.info(f"Oryginalna ilość {qty} zaokrąglona do {safe_qty} dla {symbol_u}")
-        resp = self.client.place_order(
-            category=self.category,
-            symbol=symbol_u,
-            side=side,
-            orderType="Market",
-            qty=str(safe_qty), reduceOnly=True, timeInForce="IOC",
-        )
-        if str(resp.get("retCode")) not in ("0",):
-            raise BybitAPIError(f"close_position (partial) -> {resp}")
-        return resp
+        # Try 2 decimal places first
+        safe_qty = round(qty, 2)
+        position_idx = self._get_position_idx(side)
+        log.info(f"Próba zamknięcia pozycji: {qty} zaokrąglona do {safe_qty} (2 miejsca po przecinku) dla {symbol_u} (positionIdx={position_idx})")
+        
+        try:
+            resp = self.client.place_order(
+                category=self.category,
+                symbol=symbol_u,
+                side=side,
+                orderType="Market",
+                qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
+            )
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"close_position (partial) -> {resp}")
+            return resp
+        except (InvalidRequestError, BybitAPIError) as e:
+            error_msg = str(e)
+            # If "Qty invalid" error, retry with 1 decimal place
+            if "Qty invalid" in error_msg or "10001" in error_msg:
+                safe_qty = round(qty, 1)
+                log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
+                resp = self.client.place_order(
+                    category=self.category,
+                    symbol=symbol_u,
+                    side=side,
+                    orderType="Market",
+                    qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
+                )
+                if str(resp.get("retCode")) not in ("0",):
+                    raise BybitAPIError(f"close_position (partial) -> {resp}")
+                return resp
+            else:
+                raise
 
     def set_stop_loss(self, symbol_u: str, price: float, side: str):
+        position_idx = self._get_position_idx(side)
         resp = self.client.set_trading_stop(
-            category=self.category, symbol=symbol_u, stopLoss=str(price), positionIdx=0,
+            category=self.category, symbol=symbol_u, stopLoss=str(price), positionIdx=position_idx,
         )
         if str(resp.get("retCode")) not in ("0",):
             raise BybitAPIError(f"set_trading_stop (SL) -> {resp}")
         return resp
 
     def set_take_profit(self, symbol_u: str, price: float, side: str):
+        position_idx = self._get_position_idx(side)
         resp = self.client.set_trading_stop(
             category=self.category,
             symbol=symbol_u,
             takeProfit=str(price),
-            positionIdx=0,
+            positionIdx=position_idx,
         )
         if str(resp.get("retCode")) not in ("0",):
             raise BybitAPIError(f"set_trading_stop (TP) -> {resp}")
         return resp
 
     def cancel_tpsl(self, symbol_u: str):
+        # Get position to determine correct positionIdx
+        pos = self.get_position(symbol_u)
+        if pos:
+            side = pos["side"]  # "Long" or "Short"
+            position_idx = self._get_position_idx(side)
+        else:
+            # No position, use default
+            position_idx = 0
+        
         resp = self.client.set_trading_stop(
             category=self.category,
             symbol=symbol_u,
             takeProfit="0",
             stopLoss="0",
-            positionIdx=0,
+            positionIdx=position_idx,
         )
         if str(resp.get("retCode")) not in ("0",):
             raise BybitAPIError(f"cancel_tpsl -> {resp}")
@@ -330,20 +408,43 @@ class BybitAdapter:
         if not pos:
             return
         side = "Sell" if pos["side"] == "Long" else "Buy"
+        position_idx = self._get_position_idx(side)
         qty = abs(float(pos.get("size", 0)))
         if qty <= 0: return
-        safe_qty = self.round_qty(symbol_u, qty)
-        log.info(f"Oryginalna ilość {qty} zaokrąglona do {safe_qty} dla {symbol_u}")
-        resp = self.client.place_order(
-            category=self.category,
-            symbol=symbol_u,
-            side=side,
-            orderType="Market",
-            qty=str(safe_qty), reduceOnly=True, timeInForce="IOC",
-        )
-        if str(resp.get("retCode")) not in ("0",):
-            raise BybitAPIError(f"close_position -> {resp}")
-        return resp
+        
+        # Try 2 decimal places first
+        safe_qty = round(qty, 2)
+        log.info(f"Próba zamknięcia całej pozycji: {qty} zaokrąglona do {safe_qty} (2 miejsca po przecinku) dla {symbol_u} (positionIdx={position_idx})")
+        
+        try:
+            resp = self.client.place_order(
+                category=self.category,
+                symbol=symbol_u,
+                side=side,
+                orderType="Market",
+                qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
+            )
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"close_position -> {resp}")
+            return resp
+        except (InvalidRequestError, BybitAPIError) as e:
+            error_msg = str(e)
+            # If "Qty invalid" error, retry with 1 decimal place
+            if "Qty invalid" in error_msg or "10001" in error_msg:
+                safe_qty = round(qty, 1)
+                log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
+                resp = self.client.place_order(
+                    category=self.category,
+                    symbol=symbol_u,
+                    side=side,
+                    orderType="Market",
+                    qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
+                )
+                if str(resp.get("retCode")) not in ("0",):
+                    raise BybitAPIError(f"close_position -> {resp}")
+                return resp
+            else:
+                raise
 
     async def fetch_historical_liquidations_async(self, symbol: str, start_ms: int, end_ms: int) -> List[Dict]:
         log.info(f"Pobieranie historii likwidacji dla {symbol}...")

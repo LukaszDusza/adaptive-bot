@@ -744,3 +744,4 @@ cython_debug/
 /price_action/*_long
 /price_action/*_short
 /price_action/bot_state/
+/price_action/.env_luk

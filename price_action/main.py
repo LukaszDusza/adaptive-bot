@@ -35,6 +35,8 @@ def main():
     parser.add_argument('--trade-size', type=float, default=100.0)
     parser.add_argument('--leverage', type=int, default=10)
     parser.add_argument('--partial-tp', action='store_true')
+    parser.add_argument('--hedge-mode', action='store_true',
+                        help='Enable Hedge Mode (positionIdx: 1=Long, 2=Short). Default is One-Way Mode (positionIdx: 0).')
 
     args = parser.parse_args()
 

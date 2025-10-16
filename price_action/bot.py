@@ -41,15 +41,16 @@ class BotConfig:
     TICKER: str = "ETHUSDT"
     TIMEFRAME: str = "15m"
     HELPER_TIMEFRAMES: list = ["1h", "4h"]
-    TRADE_SIZE_USD: float = 50.0
+    TRADE_SIZE_USD: float = 100.0
     LEVERAGE: int = 10
-    TP_PCT: float = 0.02
+    TP_PCT: float = 0.03
     TSL_PCT: float = 0.01
-    PROBABILITY_THRESHOLD: float = 0.80
-    MIN_PROBA_DIFF: float = 0.0  # Minimum difference between BUY and SELL probabilities
+    PROBABILITY_THRESHOLD: float = 0.7
+    MIN_PROBA_DIFF: float = 0.2  # Minimum difference between BUY and SELL probabilities
     LOOP_SLEEP_SECONDS: int = 60
     CANDLES_FOR_FEATURES: int = 5000  # Reduced from 10000 to avoid Bybit API data availability issues
     PARTIAL_TP_ENABLED: bool = True
+    HEDGE_MODE: bool = False  # Hedge Mode: positionIdx 1=Long, 2=Short. One-Way Mode: positionIdx 0
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 3
 
@@ -92,7 +93,7 @@ class TradingBot:
         base_url = os.getenv("BYBIT_BASE_URL")
         if not key or not secret:
             raise ValueError("Missing API keys in .env")
-        return BybitAdapter(api_key=key, api_secret=secret, base_url=base_url)
+        return BybitAdapter(api_key=key, api_secret=secret, base_url=base_url, hedge_mode=self.config.HEDGE_MODE)
     
     def _get_strategy_id(self):
         helpers = '_plus_' + '_'.join(self.config.HELPER_TIMEFRAMES) if self.config.HELPER_TIMEFRAMES else ""
@@ -364,7 +365,7 @@ class TradingBot:
         # Execute partial close
         logging.warning(f"🎯 PARTIAL TP HIT at {current_price:.4f}")
         
-        qty = round(size / 2, 3)
+        qty = round(size / 2, 2)
         if qty <= 0:
             return
         
@@ -513,7 +514,7 @@ class TradingBot:
             if current_price == 0:
                 return
             
-            qty = round(self.config.TRADE_SIZE_USD / current_price, 3)
+            qty = round(self.config.TRADE_SIZE_USD / current_price, 2)
             if qty <= 0:
                 return
             
@@ -676,6 +677,7 @@ def launch_bot(args):
     config.PROBABILITY_THRESHOLD = args.prob_threshold
     config.MIN_PROBA_DIFF = args.min_proba_diff
     config.PARTIAL_TP_ENABLED = args.partial_tp
+    config.HEDGE_MODE = getattr(args, 'hedge_mode', False)
     
     print("\n" + "="*70)
     print(f"{'BOT V2 WITH ADVANCED LOGGING':^70}")
@@ -687,6 +689,7 @@ def launch_bot(args):
     print(f"Threshold:         {config.PROBABILITY_THRESHOLD:.3f}")
     print(f"Min Proba Diff:    {config.MIN_PROBA_DIFF:.3f}")
     print(f"Partial TP:        {'ON' if config.PARTIAL_TP_ENABLED else 'OFF'}")
+    print(f"Position Mode:     {'HEDGE (Long=1, Short=2)' if config.HEDGE_MODE else 'ONE-WAY (Idx=0)'}")
     print(f"")
     print(f"Logs directory:    logs/")
     print(f"  - Trade JSONs:   logs/trades/")
@@ -712,5 +715,7 @@ if __name__ == "__main__":
     parser.add_argument('--min-proba-diff', type=float, default=0.0,
                         help='Minimum probability difference between BUY and SELL (confidence gap)')
     parser.add_argument('--partial-tp', action='store_true')
+    parser.add_argument('--hedge-mode', action='store_true',
+                        help='Enable Hedge Mode (positionIdx: 1=Long, 2=Short). Default is One-Way Mode (positionIdx: 0).')
     
     launch_bot(parser.parse_args())
