@@ -48,7 +48,7 @@ class BotConfig:
     PROBABILITY_THRESHOLD: float = 0.80
     MIN_PROBA_DIFF: float = 0.0  # Minimum difference between BUY and SELL probabilities
     LOOP_SLEEP_SECONDS: int = 60
-    CANDLES_FOR_FEATURES: int = 10000
+    CANDLES_FOR_FEATURES: int = 5000  # Reduced from 10000 to avoid Bybit API data availability issues
     PARTIAL_TP_ENABLED: bool = True
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 3

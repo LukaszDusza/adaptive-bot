@@ -27,7 +27,7 @@ MIN_PROBA_DIFF=0.25
 TP_PCT=0.150
 TSL_PCT=0.010
 TRADE_SIZE=1000
-OPTUNA_TRIALS=100  # Number of Optuna optimization trials
+OPTUNA_TRIALS=100
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  ML Trading Workflow${NC}"
@@ -53,6 +53,7 @@ show_menu() {
     echo "8) Complete Workflow (Train Both + Backtest + Report)"
     echo "9) Analyze Logged Trades"
     echo "10) Optimize Parameters (Optuna) 🔥"
+    echo "11) Optimize & Auto-Deploy 🚀 (Optuna → Update Docker → Restart)"
     echo "0) Exit"
     echo ""
 }
@@ -306,6 +307,204 @@ optimize_parameters() {
     fi
 }
 
+# Function to automatically deploy optimized parameters
+auto_deploy_optimized_params() {
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}🚀 Optimize & Auto-Deploy${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    echo ""
+    echo "This will:"
+    echo "  1. Run Optuna optimization"
+    echo "  2. Extract best parameters from results"
+    echo "  3. Update docker-compose.yaml for $TICKER"
+    echo "  4. Restart Docker container with new parameters"
+    echo ""
+    echo -e "${YELLOW}⚠️  Warning: This will modify docker-compose.yaml and restart containers!${NC}"
+    echo ""
+    
+    read -p "Do you want to continue? (y/n) " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        echo "Cancelled."
+        return
+    fi
+    
+    # Step 1: Run Optuna optimization
+    echo ""
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}STEP 1/4: Running Optuna Optimization${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    optimize_parameters
+    
+    # Check if optimization succeeded
+    RESULTS_FILE="optuna/optimization_results_${TICKER}_${TIMEFRAME}.txt"
+    if [ ! -f "$RESULTS_FILE" ]; then
+        echo -e "${RED}✗ Optimization results file not found: $RESULTS_FILE${NC}"
+        echo -e "${RED}Cannot proceed with auto-deployment.${NC}"
+        return
+    fi
+    
+    # Step 2: Extract best parameters from results file
+    echo ""
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}STEP 2/4: Extracting Best Parameters${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    
+    # Parse parameters from results file
+    OPT_PROB_THRESHOLD=$(grep "^PROB_THRESHOLD=" "$RESULTS_FILE" | cut -d'=' -f2)
+    OPT_MIN_PROBA_DIFF=$(grep "^MIN_PROBA_DIFF=" "$RESULTS_FILE" | cut -d'=' -f2)
+    OPT_TP_PCT=$(grep "^TP_PCT=" "$RESULTS_FILE" | cut -d'=' -f2)
+    OPT_TSL_PCT=$(grep "^TSL_PCT=" "$RESULTS_FILE" | cut -d'=' -f2)
+    
+    if [ -z "$OPT_PROB_THRESHOLD" ] || [ -z "$OPT_MIN_PROBA_DIFF" ] || [ -z "$OPT_TP_PCT" ] || [ -z "$OPT_TSL_PCT" ]; then
+        echo -e "${RED}✗ Failed to extract parameters from results file${NC}"
+        echo "Expected format: PROB_THRESHOLD=X.XX"
+        return
+    fi
+    
+    echo -e "${GREEN}✓ Extracted optimal parameters:${NC}"
+    echo "  PROB_THRESHOLD = $OPT_PROB_THRESHOLD"
+    echo "  MIN_PROBA_DIFF = $OPT_MIN_PROBA_DIFF"
+    echo "  TP_PCT         = $OPT_TP_PCT"
+    echo "  TSL_PCT        = $OPT_TSL_PCT"
+    
+    # Step 3: Update docker-compose.yaml
+    echo ""
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}STEP 3/4: Updating docker-compose.yaml${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    
+    DOCKER_COMPOSE_FILE="docker-compose.yaml"
+    if [ ! -f "$DOCKER_COMPOSE_FILE" ]; then
+        echo -e "${RED}✗ docker-compose.yaml not found${NC}"
+        return
+    fi
+    
+    # Create backup
+    BACKUP_FILE="${DOCKER_COMPOSE_FILE}.backup.$(date +%Y%m%d_%H%M%S)"
+    cp "$DOCKER_COMPOSE_FILE" "$BACKUP_FILE"
+    echo -e "${GREEN}✓ Created backup: $BACKUP_FILE${NC}"
+    
+    # Update parameters in docker-compose.yaml for the specific ticker
+    # Find the service block for this ticker and update parameters
+    python3 << EOF
+import re
+import sys
+
+ticker = "$TICKER"
+prob_threshold = "$OPT_PROB_THRESHOLD"
+min_proba_diff = "$OPT_MIN_PROBA_DIFF"
+tp_pct = "$OPT_TP_PCT"
+tsl_pct = "$OPT_TSL_PCT"
+
+try:
+    with open("$DOCKER_COMPOSE_FILE", 'r') as f:
+        content = f.read()
+    
+    # Find the service block containing this ticker
+    # Pattern: --ticker TICKER ... --prob-threshold X.XX --min-proba-diff X.XX --tsl-pct X.XX --tp-pct X.XX
+    
+    # Update prob-threshold
+    content = re.sub(
+        r'(--ticker\s+' + ticker + r'.*?--prob-threshold\s+)[\d.]+',
+        r'\g<1>' + prob_threshold,
+        content,
+        flags=re.DOTALL
+    )
+    
+    # Update min-proba-diff
+    content = re.sub(
+        r'(--ticker\s+' + ticker + r'.*?--min-proba-diff\s+)[\d.]+',
+        r'\g<1>' + min_proba_diff,
+        content,
+        flags=re.DOTALL
+    )
+    
+    # Update tsl-pct
+    content = re.sub(
+        r'(--ticker\s+' + ticker + r'.*?--tsl-pct\s+)[\d.]+',
+        r'\g<1>' + tsl_pct,
+        content,
+        flags=re.DOTALL
+    )
+    
+    # Update tp-pct
+    content = re.sub(
+        r'(--ticker\s+' + ticker + r'.*?--tp-pct\s+)[\d.]+',
+        r'\g<1>' + tp_pct,
+        content,
+        flags=re.DOTALL
+    )
+    
+    with open("$DOCKER_COMPOSE_FILE", 'w') as f:
+        f.write(content)
+    
+    print("✓ Successfully updated docker-compose.yaml")
+    sys.exit(0)
+    
+except Exception as e:
+    print(f"✗ Error updating docker-compose.yaml: {e}")
+    sys.exit(1)
+EOF
+    
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗ Failed to update docker-compose.yaml${NC}"
+        echo -e "${YELLOW}Restoring backup...${NC}"
+        cp "$BACKUP_FILE" "$DOCKER_COMPOSE_FILE"
+        return
+    fi
+    
+    echo -e "${GREEN}✓ docker-compose.yaml updated successfully${NC}"
+    echo ""
+    echo "Updated parameters for ticker: $TICKER"
+    echo "  --prob-threshold $OPT_PROB_THRESHOLD"
+    echo "  --min-proba-diff $OPT_MIN_PROBA_DIFF"
+    echo "  --tp-pct $OPT_TP_PCT"
+    echo "  --tsl-pct $OPT_TSL_PCT"
+    
+    # Step 4: Restart Docker containers
+    echo ""
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}STEP 4/4: Restarting Docker Containers${NC}"
+    echo -e "${BLUE}========================================${NC}"
+    
+    echo "Running: docker compose down && docker compose up --build -d"
+    echo ""
+    
+    docker compose down
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗ Failed to stop containers${NC}"
+        return
+    fi
+    
+    echo ""
+    docker compose up --build -d
+    if [ $? -ne 0 ]; then
+        echo -e "${RED}✗ Failed to start containers${NC}"
+        return
+    fi
+    
+    echo ""
+    echo -e "${GREEN}========================================${NC}"
+    echo -e "${GREEN}✓ Auto-Deployment Complete!${NC}"
+    echo -e "${GREEN}========================================${NC}"
+    echo ""
+    echo "Summary:"
+    echo "  ✓ Optimization completed"
+    echo "  ✓ Parameters extracted"
+    echo "  ✓ docker-compose.yaml updated"
+    echo "  ✓ Containers restarted with new parameters"
+    echo ""
+    echo "Optimal parameters now deployed for $TICKER:"
+    echo "  PROB_THRESHOLD: $OPT_PROB_THRESHOLD"
+    echo "  MIN_PROBA_DIFF: $OPT_MIN_PROBA_DIFF"
+    echo "  TP_PCT:         $OPT_TP_PCT"
+    echo "  TSL_PCT:        $OPT_TSL_PCT"
+    echo ""
+    echo "Backup saved to: $BACKUP_FILE"
+    echo ""
+}
+
 # Function to run complete workflow
 complete_workflow() {
     echo -e "${BLUE}========================================${NC}"
@@ -374,7 +573,7 @@ analyze_trades() {
 # Main loop
 while true; do
     show_menu
-    read -p "Enter your choice [0-10]: " choice
+    read -p "Enter your choice [0-11]: " choice
     echo ""
     
     case $choice in
@@ -415,6 +614,9 @@ while true; do
             ;;
         10)
             optimize_parameters
+            ;;
+        11)
+            auto_deploy_optimized_params
             ;;
         0)
             echo -e "${BLUE}Goodbye!${NC}"
