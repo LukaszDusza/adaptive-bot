@@ -275,7 +275,7 @@ class TradingBot:
                 if new_sl > last_sl:
                     try:
                         logging.info(f"📈 TSL update: {last_sl:.4f} → {new_sl:.4f}")
-                        self.adapter.set_stop_loss(self.config.TICKER, new_sl, "Sell")
+                        self.adapter.set_stop_loss(self.config.TICKER, new_sl, "Buy")
                         
                         # Log TSL event
                         self.trade_logger.log_event("TSL_UPDATE", {
@@ -311,7 +311,7 @@ class TradingBot:
                 if new_sl < last_sl:
                     try:
                         logging.info(f"📉 TSL update: {last_sl:.4f} → {new_sl:.4f}")
-                        self.adapter.set_stop_loss(self.config.TICKER, new_sl, "Buy")
+                        self.adapter.set_stop_loss(self.config.TICKER, new_sl, "Sell")
                         
                         # Log TSL event
                         self.trade_logger.log_event("TSL_UPDATE", {
@@ -399,9 +399,9 @@ class TradingBot:
             # Move SL to breakeven
             logging.info(f"Moving SL to breakeven: {entry:.4f}")
             if side == 'Long':
-                self.adapter.set_stop_loss(self.config.TICKER, entry, "Sell")
-            else:
                 self.adapter.set_stop_loss(self.config.TICKER, entry, "Buy")
+            else:
+                self.adapter.set_stop_loss(self.config.TICKER, entry, "Sell")
             
             self.state['partial_tp_taken'] = True
             self.state['last_sl'] = entry
@@ -552,14 +552,13 @@ class TradingBot:
                 highest = 999999
                 lowest = actual_entry
             
-            # Set SL
-            sl_side = "Sell" if decision == "BUY" else "Buy"
-            self.adapter.set_stop_loss(self.config.TICKER, sl, sl_side)
+            # Set SL - use position side (not SL order side) for correct positionIdx in hedge mode
+            position_side = side_str  # "Buy" for LONG, "Sell" for SHORT
+            self.adapter.set_stop_loss(self.config.TICKER, sl, position_side)
             
-            # Set TP
+            # Set TP - use position side (not TP order side) for correct positionIdx in hedge mode
             if tp > 0:
-                tp_side = "Sell" if decision == "BUY" else "Buy"
-                self.adapter.set_take_profit(self.config.TICKER, tp, tp_side)
+                self.adapter.set_take_profit(self.config.TICKER, tp, position_side)
             
             # Log entry event
             self.trade_logger.log_event("ENTRY", {
