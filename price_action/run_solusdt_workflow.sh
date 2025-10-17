@@ -14,11 +14,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-TICKER="SOLUSDT"
+TICKER="ETHUSDT"
 TIMEFRAME="15m"
 HELPER_TIMEFRAMES="1h 4h"
 LIMIT_TRAIN=138240
-LIMIT_BACKTEST=2880
+LIMIT_BACKTEST=8640 # trzy miesiace do tylu
 DATE_FROM="2025-05-31"
 LABEL_TRIALS=200
 MODEL_TRIALS=200
@@ -28,6 +28,7 @@ TP_PCT=0.03
 TSL_PCT=0.01
 TRADE_SIZE=1000
 OPTUNA_TRIALS=100
+TP_MECHANISM="partial-tp"  # Options: "partial-tp" (50% at halfway) or "dynamic-tp" (25% at 4 levels)
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  ML Trading Workflow${NC}"
@@ -38,6 +39,7 @@ echo "  PROB_THRESHOLD: $PROB_THRESHOLD"
 echo "  MIN_PROBA_DIFF: $MIN_PROBA_DIFF"
 echo "  TP_PCT: $TP_PCT"
 echo "  TSL_PCT: $TSL_PCT"
+echo "  TP_MECHANISM: $TP_MECHANISM"
 echo ""
 
 # Function to display menu
@@ -181,15 +183,45 @@ run_analysis() {
 
 # Function to run backtest
 run_backtest() {
+    # Prompt for ticker selection
+    if ! prompt_ticker; then
+        return
+    fi
+    
     echo -e "${YELLOW}========================================${NC}"
     echo -e "${YELLOW}Running Backtest for $TICKER ${TIMEFRAME}${NC}"
     echo -e "${YELLOW}========================================${NC}"
+    echo ""
+    echo -e "${GREEN}Select TP Mechanism:${NC}"
+    echo "1) Partial TP (50% at halfway to TP)"
+    echo "2) Dynamic TP (25% at each of 4 levels: 25%, 50%, 75%, 100%)"
+    echo ""
+    read -p "Enter your choice [1-2]: " tp_choice
+    echo ""
+    
+    case $tp_choice in
+        1)
+            SELECTED_TP_MECHANISM="partial-tp"
+            echo -e "${GREEN}Selected: Partial TP (50% at halfway)${NC}"
+            ;;
+        2)
+            SELECTED_TP_MECHANISM="dynamic-tp"
+            echo -e "${GREEN}Selected: Dynamic TP (25% at 4 levels)${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}Invalid choice. Using default: partial-tp${NC}"
+            SELECTED_TP_MECHANISM="partial-tp"
+            ;;
+    esac
+    echo ""
+    
     echo "Parameters:"
     echo "  - Probability Threshold: $PROB_THRESHOLD"
     echo "  - Min Proba Diff: $MIN_PROBA_DIFF"
     echo "  - Take Profit: ${TP_PCT}%"
     echo "  - Trailing Stop Loss: ${TSL_PCT}%"
     echo "  - Trade Size: \$${TRADE_SIZE}"
+    echo "  - TP Mechanism: $SELECTED_TP_MECHANISM"
     echo ""
     
     python main.py \
@@ -203,7 +235,7 @@ run_backtest() {
         --tp-pct $TP_PCT \
         --tsl-pct $TSL_PCT \
         --trade-size $TRADE_SIZE \
-        --partial-tp
+        --$SELECTED_TP_MECHANISM
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Backtest completed successfully!${NC}"
@@ -235,6 +267,11 @@ generate_report() {
 
 # Function to optimize parameters with Optuna
 optimize_parameters() {
+    # Prompt for ticker selection
+    if ! prompt_ticker; then
+        return
+    fi
+    
     echo -e "${YELLOW}========================================${NC}"
     echo -e "${YELLOW}Optimizing Parameters with Optuna${NC}"
     echo -e "${YELLOW}Multi-Objective Optimization${NC}"
@@ -267,6 +304,30 @@ optimize_parameters() {
     echo "  - TP_PCT: $TP_PCT"
     echo "  - TSL_PCT: $TSL_PCT"
     echo ""
+    
+    echo -e "${GREEN}Select TP Mechanism for Optimization:${NC}"
+    echo "1) Partial TP (50% at halfway to TP)"
+    echo "2) Dynamic TP (25% at each of 4 levels: 25%, 50%, 75%, 100%)"
+    echo ""
+    read -p "Enter your choice [1-2]: " tp_choice
+    echo ""
+    
+    case $tp_choice in
+        1)
+            SELECTED_TP_MECHANISM="partial-tp"
+            echo -e "${GREEN}Selected: Partial TP (50% at halfway)${NC}"
+            ;;
+        2)
+            SELECTED_TP_MECHANISM="dynamic-tp"
+            echo -e "${GREEN}Selected: Dynamic TP (25% at 4 levels)${NC}"
+            ;;
+        *)
+            echo -e "${YELLOW}Invalid choice. Using default: partial-tp${NC}"
+            SELECTED_TP_MECHANISM="partial-tp"
+            ;;
+    esac
+    echo ""
+    
     echo "Number of trials: $OPTUNA_TRIALS"
     echo ""
     
@@ -286,7 +347,7 @@ optimize_parameters() {
         --helper-timeframes $HELPER_TIMEFRAMES \
         --limit $LIMIT_BACKTEST \
         --trials $OPTUNA_TRIALS \
-        --partial-tp
+        --$SELECTED_TP_MECHANISM
     
     if [ $? -eq 0 ]; then
         echo ""
@@ -294,7 +355,7 @@ optimize_parameters() {
         echo -e "${GREEN}✓ Optimization completed successfully!${NC}"
         echo -e "${GREEN}========================================${NC}"
         echo ""
-        echo "Results saved to: optuna/optimization_results_${TICKER}_${TIMEFRAME}.txt"
+        echo "Results saved to: optuna/optimization_results_${TICKER}_${TIMEFRAME}_${SELECTED_TP_MECHANISM}_limit${LIMIT_BACKTEST}.txt"
         echo ""
         echo -e "${YELLOW}Next steps:${NC}"
         echo "1. Review the optimization results file"
@@ -337,7 +398,8 @@ auto_deploy_optimized_params() {
     optimize_parameters
     
     # Check if optimization succeeded
-    RESULTS_FILE="optuna/optimization_results_${TICKER}_${TIMEFRAME}.txt"
+    # Note: SELECTED_TP_MECHANISM is set by optimize_parameters function
+    RESULTS_FILE="optuna/optimization_results_${TICKER}_${TIMEFRAME}_${SELECTED_TP_MECHANISM}_limit${LIMIT_BACKTEST}.txt"
     if [ ! -f "$RESULTS_FILE" ]; then
         echo -e "${RED}✗ Optimization results file not found: $RESULTS_FILE${NC}"
         echo -e "${RED}Cannot proceed with auto-deployment.${NC}"

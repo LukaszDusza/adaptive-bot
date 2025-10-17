@@ -37,6 +37,7 @@ class Position:
     partial_tp_taken: bool = False
     tp_pct: float = 0.0
     entry_probability: float = 0.0
+    dynamic_tp_levels_taken: int = 0  # Tracks how many of 4 dynamic TP levels have been taken
 
 
 @dataclass
@@ -168,6 +169,44 @@ class BacktestEngine:
         
         return False, None
     
+    def check_dynamic_tp(self, candle: pd.Series) -> Tuple[bool, Optional[float], Optional[int]]:
+        """Check if next dynamic TP level reached (4 levels: 25%, 50%, 75%, 100%)"""
+        if not self.position:
+            return False, None, None
+        
+        pos = self.position
+        
+        if pos.take_profit == np.inf or pos.take_profit == 0:
+            return False, None, None
+        
+        # Check if all 4 levels already taken
+        if pos.dynamic_tp_levels_taken >= 4:
+            return False, None, None
+        
+        # Calculate distance from entry to TP
+        if pos.side == 'Long':
+            distance = pos.take_profit - pos.entry_price
+        else:
+            distance = pos.entry_price - pos.take_profit
+        
+        # Calculate the next level to check (1-based: 1, 2, 3, 4)
+        next_level = pos.dynamic_tp_levels_taken + 1
+        
+        # Calculate the price for this level
+        level_pct = next_level * 0.25  # 0.25, 0.50, 0.75, 1.0
+        
+        if pos.side == 'Long':
+            level_price = pos.entry_price + (distance * level_pct)
+            hit = candle['high'] >= level_price
+        else:
+            level_price = pos.entry_price - (distance * level_pct)
+            hit = candle['low'] <= level_price
+        
+        if hit:
+            return True, level_price, next_level
+        
+        return False, None, None
+    
     def close_position(self, exit_price: float, exit_time: pd.Timestamp, 
                        exit_reason: str, mae_pct: float, mfe_pct: float,
                        size_to_close: Optional[float] = None):
@@ -250,16 +289,28 @@ class BacktestEngine:
         if size_to_close:
             pos.current_size -= close_size
             pos.partial_tp_taken = True
-            # Move SL to breakeven if it was below breakeven
-            if pos.side == 'Long':
-                if pos.stop_loss < pos.entry_price:
-                    pos.stop_loss = pos.entry_price
-                    logging.info(f"TSL moved to breakeven after partial TP: {pos.entry_price:.4f}")
-            else:  # Short
-                if pos.stop_loss > pos.entry_price:
-                    pos.stop_loss = pos.entry_price
-                    logging.info(f"TSL moved to breakeven after partial TP: {pos.entry_price:.4f}")
-            logging.info(f"Partial close: {exit_reason}, Net P&L: ${net_pnl_usd:.2f}")
+            
+            # Check if position is fully closed after partial close
+            if pos.current_size <= 0:
+                # Reset tracking for next trade
+                self.current_trade_ohlcv = []
+                self.current_tsl_history = []
+                self.partial_tp_hit = False
+                self.partial_tp_time = None
+                self.partial_tp_price = None
+                self.position = None
+                logging.info(f"Position fully closed via partial closes: {exit_reason}, Net P&L: ${net_pnl_usd:.2f}")
+            else:
+                # Move SL to breakeven if it was below breakeven
+                if pos.side == 'Long':
+                    if pos.stop_loss < pos.entry_price:
+                        pos.stop_loss = pos.entry_price
+                        logging.info(f"TSL moved to breakeven after partial TP: {pos.entry_price:.4f}")
+                else:  # Short
+                    if pos.stop_loss > pos.entry_price:
+                        pos.stop_loss = pos.entry_price
+                        logging.info(f"TSL moved to breakeven after partial TP: {pos.entry_price:.4f}")
+                logging.info(f"Partial close: {exit_reason}, Net P&L: ${net_pnl_usd:.2f}")
         else:
             # Reset tracking for next trade
             self.current_trade_ohlcv = []
@@ -349,10 +400,19 @@ class BacktestEngine:
             sl_pct: float,
             tsl_pct: float,
             enable_partial_tp: bool,
+            enable_dynamic_tp: bool = False,
             min_proba_diff: float = 0.0) -> Dict:
         """Main backtest loop - NO LOOK-AHEAD BIAS"""
         
+        # Validate mutual exclusivity
+        if enable_partial_tp and enable_dynamic_tp:
+            raise ValueError("Cannot enable both --partial-tp and --dynamic-tp. Choose only one.")
+        
         logging.info(f"Starting backtest. Candles: {len(df)}, Capital: ${self.initial_capital}")
+        if enable_dynamic_tp:
+            logging.info("Dynamic TP enabled: 4 levels at 25%, 50%, 75%, 100% from BE to TP")
+        elif enable_partial_tp:
+            logging.info("Partial TP enabled: 50% at halfway from BE to TP")
         
         current_mae_pct = 0.0
         current_mfe_pct = 0.0
@@ -378,7 +438,7 @@ class BacktestEngine:
                 current_mae_pct = min(current_mae_pct, mae)
                 current_mfe_pct = max(current_mfe_pct, mfe)
                 
-                # Check partial TP
+                # Check partial TP (old mechanism)
                 if enable_partial_tp:
                     partial_hit, partial_price = self.check_partial_tp(current_candle)
                     if partial_hit:
@@ -395,6 +455,42 @@ class BacktestEngine:
                             mfe_pct=current_mfe_pct,
                             size_to_close=self.position.current_size / 2
                         )
+                
+                # Check dynamic TP (new mechanism)
+                if enable_dynamic_tp:
+                    dynamic_hit, dynamic_price, level = self.check_dynamic_tp(current_candle)
+                    if dynamic_hit:
+                        # Track dynamic TP hit
+                        self.partial_tp_hit = True
+                        self.partial_tp_time = current_candle.name
+                        self.partial_tp_price = dynamic_price
+                        
+                        # Close 25% of initial position size
+                        size_to_close = self.position.initial_size * 0.25
+                        
+                        self.close_position(
+                            exit_price=dynamic_price,
+                            exit_time=current_candle.name,
+                            exit_reason=f'Dynamic TP Level {level} ({level*25}%)',
+                            mae_pct=current_mae_pct,
+                            mfe_pct=current_mfe_pct,
+                            size_to_close=size_to_close
+                        )
+                        
+                        # Increment the level counter and move SL to BE after first level
+                        if self.position:  # Position still exists (partial close)
+                            self.position.dynamic_tp_levels_taken = level
+                            
+                            # Move SL to breakeven only after first level
+                            if level == 1:
+                                if self.position.side == 'Long':
+                                    if self.position.stop_loss < self.position.entry_price:
+                                        self.position.stop_loss = self.position.entry_price
+                                        logging.info(f"SL moved to breakeven after Dynamic TP Level 1: {self.position.entry_price:.4f}")
+                                else:  # Short
+                                    if self.position.stop_loss > self.position.entry_price:
+                                        self.position.stop_loss = self.position.entry_price
+                                        logging.info(f"SL moved to breakeven after Dynamic TP Level 1: {self.position.entry_price:.4f}")
                 
                 # Check exit conditions
                 should_exit, exit_price, exit_reason = self.check_exit_conditions(current_candle)
@@ -649,6 +745,7 @@ def main(args):
         sl_pct=args.sl_pct,
         tsl_pct=args.tsl_pct,
         enable_partial_tp=args.partial_tp,
+        enable_dynamic_tp=args.dynamic_tp,
         min_proba_diff=args.min_proba_diff
     )
     
@@ -680,6 +777,8 @@ def run_backtester_with_args(args):
         args.slippage_pct = 0.0001
     if not hasattr(args, 'min_proba_diff'):
         args.min_proba_diff = 0.0
+    if not hasattr(args, 'dynamic_tp'):
+        args.dynamic_tp = False
     
     # Run the main backtest function
     main(args)
@@ -699,7 +798,10 @@ if __name__ == "__main__":
     parser.add_argument('--prob-threshold', type=float, required=True)
     parser.add_argument('--min-proba-diff', type=float, default=0.0,
                         help='Minimum probability difference between BUY and SELL (confidence gap)')
-    parser.add_argument('--partial-tp', action='store_true')
+    parser.add_argument('--partial-tp', action='store_true',
+                        help='Enable old partial TP mechanism (50%% at halfway to TP)')
+    parser.add_argument('--dynamic-tp', action='store_true',
+                        help='Enable new dynamic TP mechanism (25%% at each of 4 levels: 25%%, 50%%, 75%%, 100%%)')
     parser.add_argument('--maker-fee', type=float, default=0.0002)
     parser.add_argument('--taker-fee', type=float, default=0.00055)
     parser.add_argument('--slippage-pct', type=float, default=0.0001)

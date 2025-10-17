@@ -1,40 +1,13 @@
 services:
 
-  bot-syl-eth:
-    container_name: syl-eth
+  bot-syl-sol-dynamic-tp:
+    container_name: syl-sol-dynamic-tp
     build: .
     environment:
       - PYTHONUNBUFFERED=1
     env_file:
       - .env_sylwia
     volumes:
-      # Mount only essential directories for trading
-      - ./models:/app/models
-      - ./logs:/app/logs
-      - ./bot_state:/app/bot_state
-    restart: unless-stopped
-    command: >
-      python main.py --run-bot
-      --ticker ETHUSDT
-      --timeframe 15m
-      --helper-timeframes 1h 4h
-      --prob-threshold 0.6
-      --min-proba-diff 0.10
-      --tsl-pct 0.01
-      --tp-pct 0.02
-      --trade-size 100.0
-      --leverage 10 
-      --partial-tp
-
-  bot-luk-sol:
-    container_name: luk-sol
-    build: .
-    environment:
-      - PYTHONUNBUFFERED=1
-    env_file:
-      - .env_luk
-    volumes:
-      # Mount only essential directories for trading
       - ./models:/app/models
       - ./logs:/app/logs
       - ./bot_state:/app/bot_state
@@ -44,12 +17,37 @@ services:
       --ticker SOLUSDT
       --timeframe 15m
       --helper-timeframes 1h 4h
-      --prob-threshold 0.60
-      --min-proba-diff 0.30
+      --prob-threshold 0.7
+      --min-proba-diff 0.4
       --tsl-pct 0.01
       --tp-pct 0.03
-      --trade-size 200.0
+      --trade-size 100.0
       --leverage 10 
-      --partial-tp
+      --dynamic-tp
+
+  bot-luk-sol-dynamic-tp:
+    container_name: luk-sol-dynamic-tp
+    build: .
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env_luk
+    volumes:
+      - ./models:/app/models
+      - ./logs:/app/logs
+      - ./bot_state:/app/bot_state
+    restart: unless-stopped
+    command: >
+      python main.py --run-bot
+      --ticker SOLUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 4h
+      --prob-threshold 0.7
+      --min-proba-diff 0.4
+      --tsl-pct 0.01
+      --tp-pct 0.03
+      --trade-size 300.0
+      --leverage 10 
+      --dynamic-tp
       --hedge-mode
 

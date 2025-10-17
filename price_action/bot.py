@@ -50,6 +50,7 @@ class BotConfig:
     LOOP_SLEEP_SECONDS: int = 60
     CANDLES_FOR_FEATURES: int = 5000  # Reduced from 10000 to avoid Bybit API data availability issues
     PARTIAL_TP_ENABLED: bool = True
+    DYNAMIC_TP_ENABLED: bool = False  # New dynamic TP: 25% at each of 4 levels (25%, 50%, 75%, 100%)
     HEDGE_MODE: bool = False  # Hedge Mode: positionIdx 1=Long, 2=Short. One-Way Mode: positionIdx 0
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 3
@@ -380,13 +381,27 @@ class TradingBot:
                         })
     
     def _handle_partial_tp(self, position: Dict, current_price: float):
-        """Handle partial TP with breakeven"""
-        if not self.config.PARTIAL_TP_ENABLED or self.config.TP_PCT <= 0:
+        """Handle partial TP with breakeven (old mechanism) or dynamic TP (new mechanism)"""
+        # Validate mutual exclusivity
+        if self.config.PARTIAL_TP_ENABLED and self.config.DYNAMIC_TP_ENABLED:
+            logging.error("Cannot enable both PARTIAL_TP and DYNAMIC_TP. Choose only one.")
             return
         
-        if self.state.get('partial_tp_taken', False):
+        if self.config.TP_PCT <= 0:
             return
         
+        # Handle old partial TP mechanism
+        if self.config.PARTIAL_TP_ENABLED:
+            if self.state.get('partial_tp_taken', False):
+                return
+            self._handle_old_partial_tp(position, current_price)
+        
+        # Handle new dynamic TP mechanism
+        elif self.config.DYNAMIC_TP_ENABLED:
+            self._handle_dynamic_tp(position, current_price)
+    
+    def _handle_old_partial_tp(self, position: Dict, current_price: float):
+        """Handle old partial TP mechanism (50% at halfway to TP)"""
         side = position.get('side')
         entry = position.get('entryPrice', 0)
         size = position.get('size', 0)
@@ -476,6 +491,121 @@ class TradingBot:
             logging.error(f"Partial TP failed: {e}")
             self.trade_logger.log_event("ERROR", {
                 "type": "PARTIAL_TP_FAILED",
+                "error": str(e)
+            })
+    
+    def _handle_dynamic_tp(self, position: Dict, current_price: float):
+        """Handle new dynamic TP mechanism (25% at each of 4 levels: 25%, 50%, 75%, 100%)"""
+        side = position.get('side')
+        entry = position.get('entryPrice', 0)
+        size = position.get('size', 0)
+        
+        if entry == 0 or size == 0:
+            return
+        
+        # Get current level (0-3, representing levels 1-4)
+        dynamic_tp_levels_taken = self.state.get('dynamic_tp_levels_taken', 0)
+        
+        if dynamic_tp_levels_taken >= 4:
+            return  # All levels taken
+        
+        # Calculate initial TP
+        initial_tp = self.state.get('initial_tp', 0)
+        if initial_tp == 0:
+            initial_tp = entry * (1 + self.config.TP_PCT) if side == 'Long' else entry * (1 - self.config.TP_PCT)
+        
+        # Calculate distance from entry to TP
+        if side == 'Long':
+            distance = initial_tp - entry
+        else:
+            distance = entry - initial_tp
+        
+        # Calculate next level (1-based: 1, 2, 3, 4)
+        next_level = dynamic_tp_levels_taken + 1
+        level_pct = next_level * 0.25  # 0.25, 0.50, 0.75, 1.0
+        
+        # Calculate price for this level
+        if side == 'Long':
+            level_price = entry + (distance * level_pct)
+            hit = current_price >= level_price
+        else:
+            level_price = entry - (distance * level_pct)
+            hit = current_price <= level_price
+        
+        if not hit:
+            return
+        
+        # Execute partial close (25% of initial size)
+        initial_size = self.state.get('initial_size', size)
+        qty = round(initial_size * 0.25, 2)
+        
+        if qty <= 0:
+            return
+        
+        logging.warning(f"🎯 DYNAMIC TP LEVEL {next_level} HIT ({int(level_pct*100)}%) at {current_price:.4f}")
+        
+        reduce_side = "Sell" if side == 'Long' else "Buy"
+        
+        try:
+            self.adapter.market_close(self.config.TICKER, reduce_side, qty)
+            time.sleep(2)
+            
+            # Calculate partial P&L
+            if side == 'Long':
+                pnl_pct = (current_price / entry - 1) * 100
+            else:
+                pnl_pct = (entry / current_price - 1) * 100
+            
+            pnl_usd = (self.config.TRADE_SIZE_USD * pnl_pct / 100) * 0.25  # 25% of position
+            
+            # Log dynamic TP event
+            self.trade_logger.log_event(f"DYNAMIC_TP_L{next_level}", {
+                "level": next_level,
+                "level_percentage": int(level_pct * 100),
+                "trigger_price": float(level_price),
+                "exit_price": float(current_price),
+                "quantity_closed": float(qty),
+                "quantity_remaining": float(size - qty),
+                "pnl_pct": float(pnl_pct),
+                "pnl_usd": float(pnl_usd),
+                "candle": self.last_candle_data
+            })
+            
+            # Update state
+            self.state['dynamic_tp_levels_taken'] = next_level
+            
+            # Move SL to breakeven only after first level
+            if next_level == 1:
+                last_sl = self.state.get('last_sl', 0)
+                should_update_sl = False
+                
+                if side == 'Long':
+                    if last_sl < entry:
+                        should_update_sl = True
+                        logging.info(f"TSL was below breakeven ({last_sl:.4f}), moving to breakeven: {entry:.4f}")
+                else:  # Short
+                    if last_sl > entry or last_sl == 0:
+                        should_update_sl = True
+                        logging.info(f"TSL was above breakeven ({last_sl:.4f}), moving to breakeven: {entry:.4f}")
+                
+                if should_update_sl:
+                    logging.info(f"Moving SL to breakeven: {entry:.4f}")
+                    if side == 'Long':
+                        self.adapter.set_stop_loss(self.config.TICKER, entry, "Buy")
+                    else:
+                        self.adapter.set_stop_loss(self.config.TICKER, entry, "Sell")
+                    
+                    self.state['last_sl'] = entry
+            
+            self._save_state()
+            
+            logging.info(f"✓ Dynamic TP Level {next_level} executed. Remaining: {size - qty}")
+            
+        except Exception as e:
+            logging.error(f"Dynamic TP Level {next_level} failed: {e}")
+            self.trade_logger.log_event("ERROR", {
+                "type": f"DYNAMIC_TP_L{next_level}_FAILED",
+                "level": next_level,
                 "error": str(e)
             })
     
@@ -650,7 +780,9 @@ class TradingBot:
                 'entry_price': actual_entry,
                 'initial_tp': tp,
                 'original_qty': qty,
+                'initial_size': self.config.TRADE_SIZE_USD,  # For dynamic TP calculations
                 'partial_tp_taken': False,
+                'dynamic_tp_levels_taken': 0,  # For dynamic TP mechanism
                 'last_sl': sl,
                 'highest_price': highest,
                 'lowest_price': lowest
@@ -739,7 +871,13 @@ def launch_bot(args):
     config.PROBABILITY_THRESHOLD = args.prob_threshold
     config.MIN_PROBA_DIFF = args.min_proba_diff
     config.PARTIAL_TP_ENABLED = args.partial_tp
+    config.DYNAMIC_TP_ENABLED = getattr(args, 'dynamic_tp', False)
     config.HEDGE_MODE = getattr(args, 'hedge_mode', False)
+    
+    # Validate mutual exclusivity
+    if config.PARTIAL_TP_ENABLED and config.DYNAMIC_TP_ENABLED:
+        print("\n❌ ERROR: Cannot enable both --partial-tp and --dynamic-tp. Choose only one.\n")
+        return
     
     print("\n" + "="*70)
     print(f"{'BOT V2 WITH ADVANCED LOGGING':^70}")
@@ -750,7 +888,15 @@ def launch_bot(args):
     print(f"TP/TSL:            {config.TP_PCT*100:.2f}% / {config.TSL_PCT*100:.2f}%")
     print(f"Threshold:         {config.PROBABILITY_THRESHOLD:.3f}")
     print(f"Min Proba Diff:    {config.MIN_PROBA_DIFF:.3f}")
-    print(f"Partial TP:        {'ON' if config.PARTIAL_TP_ENABLED else 'OFF'}")
+    
+    # Display TP mechanism
+    if config.PARTIAL_TP_ENABLED:
+        print(f"Partial TP:        ON (50% at halfway to TP)")
+    elif config.DYNAMIC_TP_ENABLED:
+        print(f"Dynamic TP:        ON (25% at 25%, 50%, 75%, 100%)")
+    else:
+        print(f"Partial/Dynamic:   OFF")
+    
     print(f"Position Mode:     {'HEDGE (Long=1, Short=2)' if config.HEDGE_MODE else 'ONE-WAY (Idx=0)'}")
     print(f"")
     print(f"Logs directory:    logs/")
@@ -776,7 +922,10 @@ if __name__ == "__main__":
     parser.add_argument('--prob-threshold', type=float, required=True)
     parser.add_argument('--min-proba-diff', type=float, default=0.0,
                         help='Minimum probability difference between BUY and SELL (confidence gap)')
-    parser.add_argument('--partial-tp', action='store_true')
+    parser.add_argument('--partial-tp', action='store_true',
+                        help='Enable old partial TP mechanism (50%% at halfway to TP)')
+    parser.add_argument('--dynamic-tp', action='store_true',
+                        help='Enable new dynamic TP mechanism (25%% at each of 4 levels: 25%%, 50%%, 75%%, 100%%)')
     parser.add_argument('--hedge-mode', action='store_true',
                         help='Enable Hedge Mode (positionIdx: 1=Long, 2=Short). Default is One-Way Mode (positionIdx: 0).')
     

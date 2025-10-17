@@ -78,7 +78,8 @@ class BacktesterOptimizer:
                  limit: int,
                  initial_capital: float = 10000.0,
                  risk_pct: float = 0.02,
-                 enable_partial_tp: bool = True):
+                 enable_partial_tp: bool = True,
+                 enable_dynamic_tp: bool = False):
         
         self.ticker = ticker
         self.timeframe = timeframe
@@ -87,6 +88,11 @@ class BacktesterOptimizer:
         self.initial_capital = initial_capital
         self.risk_pct = risk_pct
         self.enable_partial_tp = enable_partial_tp
+        self.enable_dynamic_tp = enable_dynamic_tp
+        
+        # Validate mutual exclusivity
+        if self.enable_partial_tp and self.enable_dynamic_tp:
+            raise ValueError("Cannot enable both enable_partial_tp and enable_dynamic_tp. Choose only one.")
         
         # Load models
         self._load_models()
@@ -181,6 +187,7 @@ class BacktesterOptimizer:
                 sl_pct=sl_pct,
                 tsl_pct=tsl_pct,
                 enable_partial_tp=self.enable_partial_tp,
+                enable_dynamic_tp=self.enable_dynamic_tp,
                 min_proba_diff=min_proba_diff
             )
             
@@ -426,7 +433,15 @@ class BacktesterOptimizer:
         print("="*70 + "\n")
         
         # Save results to file
-        results_file = f"optuna/optimization_results_{self.ticker}_{self.timeframe}.txt"
+        # Determine TP mechanism string for filename
+        if self.enable_dynamic_tp:
+            tp_mechanism = "dynamic-tp"
+        elif self.enable_partial_tp:
+            tp_mechanism = "partial-tp"
+        else:
+            tp_mechanism = "no-tp"
+        
+        results_file = f"optuna/optimization_results_{self.ticker}_{self.timeframe}_{tp_mechanism}_limit{self.limit}.txt"
         os.makedirs("optuna", exist_ok=True)
         
         with open(results_file, 'w') as f:
@@ -473,9 +488,16 @@ def main():
     parser.add_argument('--trials', type=int, default=100, help="Number of Optuna trials")
     parser.add_argument('--initial-capital', type=float, default=10000.0, help="Initial capital")
     parser.add_argument('--risk-pct', type=float, default=0.02, help="Risk per trade (% of capital)")
-    parser.add_argument('--partial-tp', action='store_true', help="Enable partial take profit")
+    parser.add_argument('--partial-tp', action='store_true',
+                        help='Enable old partial TP mechanism (50%% at halfway to TP)')
+    parser.add_argument('--dynamic-tp', action='store_true',
+                        help='Enable new dynamic TP mechanism (25%% at each of 4 levels: 25%%, 50%%, 75%%, 100%%)')
     
     args = parser.parse_args()
+    
+    # Validate mutual exclusivity
+    if args.partial_tp and args.dynamic_tp:
+        parser.error("Cannot use both --partial-tp and --dynamic-tp. Choose only one.")
     
     # Create optimizer
     optimizer = BacktesterOptimizer(
@@ -485,14 +507,23 @@ def main():
         limit=args.limit,
         initial_capital=args.initial_capital,
         risk_pct=args.risk_pct,
-        enable_partial_tp=args.partial_tp
+        enable_partial_tp=args.partial_tp,
+        enable_dynamic_tp=args.dynamic_tp
     )
     
     # Run optimization
     results = optimizer.optimize(n_trials=args.trials)
     
+    # Determine TP mechanism string for filename
+    if args.dynamic_tp:
+        tp_mechanism = "dynamic-tp"
+    elif args.partial_tp:
+        tp_mechanism = "partial-tp"
+    else:
+        tp_mechanism = "no-tp"
+    
     print("\n✓ Optimization complete!")
-    print(f"✓ Best parameters saved to: optuna/optimization_results_{args.ticker}_{args.timeframe}.txt")
+    print(f"✓ Best parameters saved to: optuna/optimization_results_{args.ticker}_{args.timeframe}_{tp_mechanism}_limit{args.limit}.txt")
     print("\nYou can now update your run_solusdt_workflow.sh with these optimal parameters.")
 
 
