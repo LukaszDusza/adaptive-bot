@@ -212,24 +212,23 @@ def run_analysis_with_args(args, output_dir=None):
     Uruchamia analizę z obiektu argumentów przekazanego z main.py.
 
     Args:
-        args: Obiekt argumentów z atrybutami ticker, timeframe, helper_timeframes, side
+        args: Obiekt argumentów z atrybutami ticker, timeframe, helper_timeframes, side, version
         output_dir: Opcjonalny katalog wyjściowy dla wyników analizy. Jeśli None, używa domyślnego 'results/plots'
     """
     strategy_id = _get_strategy_id(args.ticker, args.timeframe, args.helper_timeframes, args.side)
 
-    results_dir = "results"
-    models_dir = "models"
+    version = getattr(args, 'version', 'v1.0')
+    version_dir = os.path.join("models", version, strategy_id)
 
-    # Use custom output directory if provided, otherwise use default
     if output_dir:
         plots_dir = output_dir
     else:
-        plots_dir = os.path.join(results_dir, "plots")
+        plots_dir = os.path.join("results", "plots")
 
     os.makedirs(plots_dir, exist_ok=True)
 
-    results_path = os.path.join(results_dir, f"{strategy_id}_holdout_predictions.csv")
-    model_path = os.path.join(models_dir, f"{strategy_id}_model.joblib")
+    results_path = os.path.join(version_dir, "holdout_predictions.csv")
+    model_path = os.path.join(version_dir, "model.joblib")
 
     missing_files = []
     if not os.path.exists(model_path):
@@ -238,7 +237,7 @@ def run_analysis_with_args(args, output_dir=None):
         missing_files.append(f"Wyniki holdout: {results_path}")
 
     if missing_files:
-        print(f"Błąd: Nie znaleziono następujących plików dla strategii '{strategy_id}':")
+        print(f"Błąd: Nie znaleziono następujących plików dla strategii '{strategy_id}' (version: {version}):")
         for missing_file in missing_files:
             print(f"  - {missing_file}")
         print("Upewnij się, że model został wytrenowany.")
@@ -455,6 +454,8 @@ if __name__ == '__main__':
     parser.add_argument('--helper-timeframes', nargs='*', default=["4h", "12h", "1D"])
     parser.add_argument('--side', type=str, choices=['long', 'short'], required=True,
                         help="Określ, który model analizować: 'long' czy 'short'.")
+    parser.add_argument('--version', type=str, default='v1.0',
+                        help="Wersja modelu do analizy (np. v1.0, v1.1)")
     args = parser.parse_args()
 
     run_analysis_with_args(args)

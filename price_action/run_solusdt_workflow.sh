@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # ========================================
-# SOLUSDT Complete Workflow Script
+# Complete Workflow Script
 # ========================================
-# This script helps you easily train, analyze, and backtest SOLUSDT models
+# This script helps you easily train, analyze, and backtest models
 
 set -e  # Exit on error
 
@@ -14,18 +14,19 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-TICKER="ETHUSDT"
+TICKER="SOLUSDT"
 TIMEFRAME="15m"
 HELPER_TIMEFRAMES="1h 4h"
+VERSION=""
 LIMIT_TRAIN=138240
 LIMIT_BACKTEST=8640 # trzy miesiace do tylu
 DATE_FROM="2025-05-31"
-LABEL_TRIALS=200
-MODEL_TRIALS=200
-PROB_THRESHOLD=0.55
-MIN_PROBA_DIFF=0.30
-TP_PCT=0.03
-TSL_PCT=0.01
+LABEL_TRIALS=100
+MODEL_TRIALS=100
+PROB_THRESHOLD=0.8
+MIN_PROBA_DIFF=0.4
+TP_PCT=0.015
+TSL_PCT=0.015
 TRADE_SIZE=1000
 OPTUNA_TRIALS=100
 TP_MECHANISM="partial-tp"  # Options: "partial-tp" (50% at halfway) or "dynamic-tp" (25% at 4 levels)
@@ -34,7 +35,39 @@ echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  ML Trading Workflow${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
+
+# Prompt for version at the beginning
+prompt_version() {
+    echo -e "${YELLOW}Enter model version (e.g., v1.0, v1.1, v2.0):${NC}"
+    read -p "Version: " input_version
+
+    if [[ -z "$input_version" ]]; then
+        echo -e "${RED}Version is required!${NC}"
+        return 1
+    fi
+
+    VERSION="$input_version"
+    echo -e "${GREEN}Using version: $VERSION${NC}"
+
+    # Check if version directory exists
+    if [ -d "models/$VERSION" ]; then
+        echo -e "${YELLOW}⚠️  Warning: Version $VERSION already exists!${NC}"
+        echo "Existing files may be overwritten."
+        read -p "Continue? (y/n) " -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Cancelled."
+            return 1
+        fi
+    fi
+    echo ""
+    return 0
+}
+
 echo -e "${YELLOW}Current Parameters:${NC}"
+echo "  VERSION: $VERSION (will be prompted)"
+echo "  LABEL_TRIALS: $LABEL_TRIALS"
+echo "  MODEL_TRIALS: $MODEL_TRIALS"
 echo "  PROB_THRESHOLD: $PROB_THRESHOLD"
 echo "  MIN_PROBA_DIFF: $MIN_PROBA_DIFF"
 echo "  TP_PCT: $TP_PCT"
@@ -71,21 +104,72 @@ prompt_ticker() {
         if [[ ! -z "$input_ticker" ]]; then
             TICKER=$(echo "$input_ticker" | tr '[:lower:]' '[:upper:]')
             echo -e "${GREEN}Using ticker: $TICKER${NC}"
-            
-            # Check if models already exist
-            local strategy_id="${TICKER}_${TIMEFRAME}"
-            if [ -f "models/${strategy_id}_plus_*_long_model.joblib" ] || [ -f "models/${strategy_id}_plus_*_short_model.joblib" ]; then
-                echo -e "${YELLOW}⚠️  Warning: Models for $TICKER already exist and will be replaced!${NC}"
-                read -p "Continue? (y/n) " -n 1 -r
-                echo ""
-                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-                    echo "Cancelled."
-                    return 1
-                fi
-            fi
         else
             echo -e "${GREEN}Using default ticker: $TICKER${NC}"
         fi
+        echo ""
+    fi
+    return 0
+}
+
+# Function to prompt for timeframe
+prompt_timeframe() {
+    local skip_prompt=${1:-0}
+    
+    if [ "$skip_prompt" -eq 0 ]; then
+        echo -e "${YELLOW}Enter timeframe (e.g., 5m, 15m, 1h, 4h, default: $TIMEFRAME):${NC}"
+        read -p "Timeframe: " input_timeframe
+        
+        if [[ ! -z "$input_timeframe" ]]; then
+            TIMEFRAME="$input_timeframe"
+            echo -e "${GREEN}Using timeframe: $TIMEFRAME${NC}"
+        else
+            echo -e "${GREEN}Using default timeframe: $TIMEFRAME${NC}"
+        fi
+        echo ""
+    fi
+    return 0
+}
+
+# Function to prompt for helper timeframes
+prompt_helper_timeframes() {
+    local skip_prompt=${1:-0}
+    
+    if [ "$skip_prompt" -eq 0 ]; then
+        echo -e "${YELLOW}Enter helper timeframes (space-separated, e.g., '1h 4h', default: $HELPER_TIMEFRAMES):${NC}"
+        read -p "Helper timeframes: " input_helper_timeframes
+        
+        if [[ ! -z "$input_helper_timeframes" ]]; then
+            HELPER_TIMEFRAMES="$input_helper_timeframes"
+            echo -e "${GREEN}Using helper timeframes: $HELPER_TIMEFRAMES${NC}"
+        else
+            echo -e "${GREEN}Using default helper timeframes: $HELPER_TIMEFRAMES${NC}"
+        fi
+        echo ""
+    fi
+    return 0
+}
+
+# Function to prompt for training parameters
+prompt_training_params() {
+    local skip_prompt=${1:-0}
+
+    if [ "$skip_prompt" -eq 0 ]; then
+        echo -e "${YELLOW}Training Parameters:${NC}"
+        echo ""
+
+        read -p "Label trials (default: $LABEL_TRIALS): " input_label_trials
+        if [[ ! -z "$input_label_trials" ]]; then
+            LABEL_TRIALS=$input_label_trials
+        fi
+
+        read -p "Model trials (default: $MODEL_TRIALS): " input_model_trials
+        if [[ ! -z "$input_model_trials" ]]; then
+            MODEL_TRIALS=$input_model_trials
+        fi
+
+        echo ""
+        echo -e "${GREEN}Using: LABEL_TRIALS=$LABEL_TRIALS, MODEL_TRIALS=$MODEL_TRIALS${NC}"
         echo ""
     fi
     return 0
@@ -95,17 +179,40 @@ prompt_ticker() {
 train_long() {
     local skip_prompt=${1:-0}
     
+    # Prompt for version if not set
+    if [[ -z "$VERSION" ]]; then
+        if ! prompt_version; then
+            return
+        fi
+    fi
+
     # Prompt for ticker selection
     if ! prompt_ticker $skip_prompt; then
         return
     fi
-    
+
+    # Prompt for timeframe selection
+    if ! prompt_timeframe $skip_prompt; then
+        return
+    fi
+
+    # Prompt for helper timeframes selection
+    if ! prompt_helper_timeframes $skip_prompt; then
+        return
+    fi
+
+    # Prompt for training parameters
+    if ! prompt_training_params $skip_prompt; then
+        return
+    fi
+
     echo -e "${YELLOW}========================================${NC}"
-    echo -e "${YELLOW}Training LONG model for $TICKER ${TIMEFRAME}${NC}"
+    echo -e "${YELLOW}Training LONG model for $TICKER ${TIMEFRAME} (version: $VERSION)${NC}"
+    echo -e "${YELLOW}Label Trials: $LABEL_TRIALS | Model Trials: $MODEL_TRIALS${NC}"
     echo -e "${YELLOW}========================================${NC}"
     echo "This will take approximately 2-4 hours..."
     echo ""
-    
+
     python main.py \
         --train \
         --side long \
@@ -115,11 +222,12 @@ train_long() {
         --limit $LIMIT_TRAIN \
         --date-from "$DATE_FROM" \
         --label-trials $LABEL_TRIALS \
-        --model-trials $MODEL_TRIALS
-    
+        --model-trials $MODEL_TRIALS \
+        --version "$VERSION"
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ LONG model training completed successfully!${NC}"
-        echo -e "${GREEN}  Analysis results saved to: ${TICKER}_${TIMEFRAME}_plus_*_long/${NC}"
+        echo -e "${GREEN}  Model saved to: models/$VERSION/${TICKER}_${TIMEFRAME}_plus_*_long/${NC}"
     else
         echo -e "${RED}✗ LONG model training failed!${NC}"
         exit 1
@@ -130,17 +238,40 @@ train_long() {
 train_short() {
     local skip_prompt=${1:-0}
     
+    # Prompt for version if not set
+    if [[ -z "$VERSION" ]]; then
+        if ! prompt_version; then
+            return
+        fi
+    fi
+
     # Prompt for ticker selection
     if ! prompt_ticker $skip_prompt; then
         return
     fi
-    
+
+    # Prompt for timeframe selection
+    if ! prompt_timeframe $skip_prompt; then
+        return
+    fi
+
+    # Prompt for helper timeframes selection
+    if ! prompt_helper_timeframes $skip_prompt; then
+        return
+    fi
+
+    # Prompt for training parameters
+    if ! prompt_training_params $skip_prompt; then
+        return
+    fi
+
     echo -e "${YELLOW}========================================${NC}"
-    echo -e "${YELLOW}Training SHORT model for $TICKER ${TIMEFRAME}${NC}"
+    echo -e "${YELLOW}Training SHORT model for $TICKER ${TIMEFRAME} (version: $VERSION)${NC}"
+    echo -e "${YELLOW}Label Trials: $LABEL_TRIALS | Model Trials: $MODEL_TRIALS${NC}"
     echo -e "${YELLOW}========================================${NC}"
     echo "This will take approximately 2-4 hours..."
     echo ""
-    
+
     python main.py \
         --train \
         --side short \
@@ -150,11 +281,12 @@ train_short() {
         --limit $LIMIT_TRAIN \
         --date-from "$DATE_FROM" \
         --label-trials $LABEL_TRIALS \
-        --model-trials $MODEL_TRIALS
-    
+        --model-trials $MODEL_TRIALS \
+        --version "$VERSION"
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ SHORT model training completed successfully!${NC}"
-        echo -e "${GREEN}  Analysis results saved to: ${TICKER}_${TIMEFRAME}_plus_*_short/${NC}"
+        echo -e "${GREEN}  Model saved to: models/$VERSION/${TICKER}_${TIMEFRAME}_plus_*_short/${NC}"
     else
         echo -e "${RED}✗ SHORT model training failed!${NC}"
         exit 1
@@ -164,15 +296,39 @@ train_short() {
 # Function to run analysis
 run_analysis() {
     local side=$1
+
+    # Prompt for version if not set
+    if [[ -z "$VERSION" ]]; then
+        if ! prompt_version; then
+            return
+        fi
+    fi
+
+    # Prompt for ticker selection
+    if ! prompt_ticker; then
+        return
+    fi
+
+    # Prompt for timeframe selection
+    if ! prompt_timeframe; then
+        return
+    fi
+
+    # Prompt for helper timeframes selection
+    if ! prompt_helper_timeframes; then
+        return
+    fi
+
     echo -e "${YELLOW}========================================${NC}"
-    echo -e "${YELLOW}Running Analysis for $side model${NC}"
+    echo -e "${YELLOW}Running Analysis for $side model (version: $VERSION)${NC}"
     echo -e "${YELLOW}========================================${NC}"
-    
+
     python analysis.py \
         --ticker "$TICKER" \
         --timeframe $TIMEFRAME \
         --side $side \
-        --helper-timeframes $HELPER_TIMEFRAMES
+        --helper-timeframes $HELPER_TIMEFRAMES \
+        --version "$VERSION"
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Analysis completed successfully!${NC}"
@@ -183,13 +339,30 @@ run_analysis() {
 
 # Function to run backtest
 run_backtest() {
+    # Prompt for version if not set
+    if [[ -z "$VERSION" ]]; then
+        if ! prompt_version; then
+            return
+        fi
+    fi
+
     # Prompt for ticker selection
     if ! prompt_ticker; then
         return
     fi
-    
+
+    # Prompt for timeframe selection
+    if ! prompt_timeframe; then
+        return
+    fi
+
+    # Prompt for helper timeframes selection
+    if ! prompt_helper_timeframes; then
+        return
+    fi
+
     echo -e "${YELLOW}========================================${NC}"
-    echo -e "${YELLOW}Running Backtest for $TICKER ${TIMEFRAME}${NC}"
+    echo -e "${YELLOW}Running Backtest for $TICKER ${TIMEFRAME} (version: $VERSION)${NC}"
     echo -e "${YELLOW}========================================${NC}"
     echo ""
     echo -e "${GREEN}Select TP Mechanism:${NC}"
@@ -198,7 +371,7 @@ run_backtest() {
     echo ""
     read -p "Enter your choice [1-2]: " tp_choice
     echo ""
-    
+
     case $tp_choice in
         1)
             SELECTED_TP_MECHANISM="partial-tp"
@@ -214,8 +387,9 @@ run_backtest() {
             ;;
     esac
     echo ""
-    
+
     echo "Parameters:"
+    echo "  - Version: $VERSION"
     echo "  - Probability Threshold: $PROB_THRESHOLD"
     echo "  - Min Proba Diff: $MIN_PROBA_DIFF"
     echo "  - Take Profit: ${TP_PCT}%"
@@ -223,7 +397,7 @@ run_backtest() {
     echo "  - Trade Size: \$${TRADE_SIZE}"
     echo "  - TP Mechanism: $SELECTED_TP_MECHANISM"
     echo ""
-    
+
     python main.py \
         --backtest \
         --ticker "$TICKER" \
@@ -235,11 +409,12 @@ run_backtest() {
         --tp-pct $TP_PCT \
         --tsl-pct $TSL_PCT \
         --trade-size $TRADE_SIZE \
+        --version "$VERSION" \
         --$SELECTED_TP_MECHANISM
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Backtest completed successfully!${NC}"
-        echo -e "${GREEN}  Results saved to: backtests/${NC}"
+        echo -e "${GREEN}  Results saved to: models/$VERSION/backtests/${NC}"
     else
         echo -e "${RED}✗ Backtest failed!${NC}"
     fi
@@ -247,15 +422,38 @@ run_backtest() {
 
 # Function to generate report
 generate_report() {
+    # Prompt for version if not set
+    if [[ -z "$VERSION" ]]; then
+        if ! prompt_version; then
+            return
+        fi
+    fi
+
+    # Prompt for ticker selection
+    if ! prompt_ticker; then
+        return
+    fi
+
+    # Prompt for timeframe selection
+    if ! prompt_timeframe; then
+        return
+    fi
+
+    # Prompt for helper timeframes selection
+    if ! prompt_helper_timeframes; then
+        return
+    fi
+
     echo -e "${YELLOW}========================================${NC}"
-    echo -e "${YELLOW}Generating Report${NC}"
+    echo -e "${YELLOW}Generating Report (version: $VERSION)${NC}"
     echo -e "${YELLOW}========================================${NC}"
-    
+
     python main.py \
         --report \
         --ticker $TICKER \
         --timeframe $TIMEFRAME \
-        --helper-timeframes $HELPER_TIMEFRAMES
+        --helper-timeframes $HELPER_TIMEFRAMES \
+        --version "$VERSION"
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Report generated successfully!${NC}"
@@ -269,6 +467,16 @@ generate_report() {
 optimize_parameters() {
     # Prompt for ticker selection
     if ! prompt_ticker; then
+        return
+    fi
+
+    # Prompt for timeframe selection
+    if ! prompt_timeframe; then
+        return
+    fi
+
+    # Prompt for helper timeframes selection
+    if ! prompt_helper_timeframes; then
         return
     fi
     
@@ -355,7 +563,7 @@ optimize_parameters() {
         echo -e "${GREEN}✓ Optimization completed successfully!${NC}"
         echo -e "${GREEN}========================================${NC}"
         echo ""
-        echo "Results saved to: optuna/optimization_results_${TICKER}_${TIMEFRAME}_${SELECTED_TP_MECHANISM}_limit${LIMIT_BACKTEST}.txt"
+        echo "Results saved to: models/$VERSION/optuna/optimization_results_${TICKER}_${TIMEFRAME}_${SELECTED_TP_MECHANISM}_limit${LIMIT_BACKTEST}.txt"
         echo ""
         echo -e "${YELLOW}Next steps:${NC}"
         echo "1. Review the optimization results file"
@@ -399,7 +607,7 @@ auto_deploy_optimized_params() {
     
     # Check if optimization succeeded
     # Note: SELECTED_TP_MECHANISM is set by optimize_parameters function
-    RESULTS_FILE="optuna/optimization_results_${TICKER}_${TIMEFRAME}_${SELECTED_TP_MECHANISM}_limit${LIMIT_BACKTEST}.txt"
+    RESULTS_FILE="models/$VERSION/optuna/optimization_results_${TICKER}_${TIMEFRAME}_${SELECTED_TP_MECHANISM}_limit${LIMIT_BACKTEST}.txt"
     if [ ! -f "$RESULTS_FILE" ]; then
         echo -e "${RED}✗ Optimization results file not found: $RESULTS_FILE${NC}"
         echo -e "${RED}Cannot proceed with auto-deployment.${NC}"
@@ -587,38 +795,55 @@ complete_workflow() {
         return
     fi
     
+    # Prompt for version once
+    if ! prompt_version; then
+        return
+    fi
+
     # Prompt for ticker once
     if ! prompt_ticker; then
         return
     fi
-    
+
+    # Prompt for timeframe once
+    if ! prompt_timeframe; then
+        return
+    fi
+
+    # Prompt for helper timeframes once
+    if ! prompt_helper_timeframes; then
+        return
+    fi
+
     # Train LONG
     train_long 1
     echo ""
-    
+
     # Train SHORT
     train_short 1
     echo ""
-    
+
     # Run backtest
     run_backtest
     echo ""
-    
+
     # Generate report
     generate_report
     echo ""
-    
+
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}  Complete Workflow Finished!${NC}"
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}✓ LONG model trained${NC}"
-    echo -e "${GREEN}✓ SHORT model trained${NC}"
+    echo -e "${GREEN}✓ LONG model trained (version: $VERSION)${NC}"
+    echo -e "${GREEN}✓ SHORT model trained (version: $VERSION)${NC}"
     echo -e "${GREEN}✓ Backtest completed${NC}"
     echo -e "${GREEN}✓ Report generated${NC}"
     echo ""
+    echo "All results saved in: models/$VERSION/"
+    echo ""
     echo "Next steps:"
     echo "1. Review analysis results in model folders"
-    echo "2. Check backtest results in backtests/ folder"
+    echo "2. Check backtest results in models/$VERSION/backtests/ folder"
     echo "3. Open HTML report for detailed performance analysis"
     echo "4. Consider running parameter optimization (option 10)"
 }
@@ -649,24 +874,45 @@ while true; do
             echo -e "${YELLOW}Training BOTH models (LONG + SHORT)${NC}"
             echo "This will take approximately 4-8 hours..."
             echo ""
-            # Prompt for ticker once
-            if prompt_ticker; then
-                train_long 1
-                echo ""
-                train_short 1
+            # Prompt for version once
+            if ! prompt_version; then
+                continue
             fi
+            # Prompt for ticker once
+            if ! prompt_ticker; then
+                continue
+            fi
+            # Prompt for timeframe once
+            if ! prompt_timeframe; then
+                continue
+            fi
+            # Prompt for helper timeframes once
+            if ! prompt_helper_timeframes; then
+                continue
+            fi
+            # Prompt for training parameters once
+            if ! prompt_training_params; then
+                continue
+            fi
+            train_long 1
+            echo ""
+            train_short 1
             ;;
         4)
             run_analysis "long"
+            VERSION=""
             ;;
         5)
             run_analysis "short"
+            VERSION=""
             ;;
         6)
             run_backtest
+            VERSION=""
             ;;
         7)
             generate_report
+            VERSION=""
             ;;
         8)
             complete_workflow

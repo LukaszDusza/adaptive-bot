@@ -79,7 +79,8 @@ class BacktesterOptimizer:
                  initial_capital: float = 10000.0,
                  risk_pct: float = 0.02,
                  enable_partial_tp: bool = True,
-                 enable_dynamic_tp: bool = False):
+                 enable_dynamic_tp: bool = False,
+                 version: str = 'v1.0'):
         
         self.ticker = ticker
         self.timeframe = timeframe
@@ -89,15 +90,12 @@ class BacktesterOptimizer:
         self.risk_pct = risk_pct
         self.enable_partial_tp = enable_partial_tp
         self.enable_dynamic_tp = enable_dynamic_tp
+        self.version = version
         
-        # Validate mutual exclusivity
         if self.enable_partial_tp and self.enable_dynamic_tp:
             raise ValueError("Cannot enable both enable_partial_tp and enable_dynamic_tp. Choose only one.")
         
-        # Load models
         self._load_models()
-        
-        # Prepare data once
         self.df = self._prepare_data()
         
     def _get_strategy_id(self, side: str) -> str:
@@ -111,17 +109,17 @@ class BacktesterOptimizer:
         short_id = self._get_strategy_id('short')
         
         try:
-            self.model_long = joblib.load(f"models/{long_id}_model.joblib")
-            self.scaler_long = joblib.load(f"models/{long_id}_scaler.joblib")
-            self.features_long = joblib.load(f"models/{long_id}_features.joblib")
+            self.model_long = joblib.load(f"models/{self.version}/{long_id}/model.joblib")
+            self.scaler_long = joblib.load(f"models/{self.version}/{long_id}/scaler.joblib")
+            self.features_long = joblib.load(f"models/{self.version}/{long_id}/features.joblib")
             
-            self.model_short = joblib.load(f"models/{short_id}_model.joblib")
-            self.scaler_short = joblib.load(f"models/{short_id}_scaler.joblib")
-            self.features_short = joblib.load(f"models/{short_id}_features.joblib")
+            self.model_short = joblib.load(f"models/{self.version}/{short_id}/model.joblib")
+            self.scaler_short = joblib.load(f"models/{self.version}/{short_id}/scaler.joblib")
+            self.features_short = joblib.load(f"models/{self.version}/{short_id}/features.joblib")
             
-            logging.info(f"✓ Models loaded successfully")
+            logging.info(f"✓ Models loaded from version {self.version}")
         except FileNotFoundError as e:
-            logging.error(f"Model files not found: {e}")
+            logging.error(f"Model files not found for version {self.version}: {e}")
             raise
     
     def _prepare_data(self) -> pd.DataFrame:
@@ -132,7 +130,8 @@ class BacktesterOptimizer:
             timeframe=self.timeframe,
             limit=self.limit,
             helper_timeframes=self.helper_timeframes,
-            side='backtest'
+            side='backtest',
+            version=self.version
         )
         
         if df.empty:
@@ -278,7 +277,7 @@ class BacktesterOptimizer:
         study_name = f"{self.ticker}_{self.timeframe}_{helpers_str}_multi_opt"
         
         # SQLite database storage for persistent optimization history
-        storage_url = f"sqlite:///optuna/optuna_{self.ticker}_{self.timeframe}_{helpers_str}.db"
+        storage_url = f"sqlite:///models/{self.version}/optuna/optuna_{self.ticker}_{self.timeframe}_{helpers_str}.db"
         
         logging.info(f"Database: {storage_url}")
         logging.info(f"Study name: {study_name}")
@@ -441,8 +440,8 @@ class BacktesterOptimizer:
         else:
             tp_mechanism = "no-tp"
         
-        results_file = f"optuna/optimization_results_{self.ticker}_{self.timeframe}_{tp_mechanism}_limit{self.limit}.txt"
-        os.makedirs("optuna", exist_ok=True)
+        results_file = f"models/{self.version}/optuna/optimization_results_{self.ticker}_{self.timeframe}_{tp_mechanism}_limit{self.limit}.txt"
+        os.makedirs(f"models/{self.version}/optuna", exist_ok=True)
         
         with open(results_file, 'w') as f:
             f.write("="*70 + "\n")
@@ -484,6 +483,8 @@ def main():
     parser.add_argument('--ticker', type=str, required=True, help="Ticker symbol (e.g., SOLUSDT)")
     parser.add_argument('--timeframe', type=str, required=True, help="Main timeframe (e.g., 1h)")
     parser.add_argument('--helper-timeframes', nargs='*', default=None, help="Helper timeframes")
+    parser.add_argument('--version', type=str, default='v1.0',
+                        help='Model version to use (e.g., v1.0, v1.1)')
     parser.add_argument('--limit', type=int, default=2000, help="Number of candles for backtest")
     parser.add_argument('--trials', type=int, default=100, help="Number of Optuna trials")
     parser.add_argument('--initial-capital', type=float, default=10000.0, help="Initial capital")
@@ -495,11 +496,9 @@ def main():
     
     args = parser.parse_args()
     
-    # Validate mutual exclusivity
     if args.partial_tp and args.dynamic_tp:
         parser.error("Cannot use both --partial-tp and --dynamic-tp. Choose only one.")
     
-    # Create optimizer
     optimizer = BacktesterOptimizer(
         ticker=args.ticker,
         timeframe=args.timeframe,
@@ -508,10 +507,10 @@ def main():
         initial_capital=args.initial_capital,
         risk_pct=args.risk_pct,
         enable_partial_tp=args.partial_tp,
-        enable_dynamic_tp=args.dynamic_tp
+        enable_dynamic_tp=args.dynamic_tp,
+        version=args.version
     )
     
-    # Run optimization
     results = optimizer.optimize(n_trials=args.trials)
     
     # Determine TP mechanism string for filename
@@ -523,7 +522,7 @@ def main():
         tp_mechanism = "no-tp"
     
     print("\n✓ Optimization complete!")
-    print(f"✓ Best parameters saved to: optuna/optimization_results_{args.ticker}_{args.timeframe}_{tp_mechanism}_limit{args.limit}.txt")
+    print(f"✓ Best parameters saved to: models/{args.version}/optuna/optimization_results_{args.ticker}_{args.timeframe}_{tp_mechanism}_limit{args.limit}.txt")
     print("\nYou can now update your run_solusdt_workflow.sh with these optimal parameters.")
 
 

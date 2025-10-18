@@ -745,3 +745,7 @@ cython_debug/
 /price_action/*_short
 /price_action/bot_state/
 /price_action/.env_luk
+/price_action/models/v.1.0/backtests/
+/price_action/models/v.1.0/SOLUSDT_15m_plus_1h_4h_short/analysis/
+/price_action/models/v.1.0/SOLUSDT_15m_plus_1h_4h_long/analysis/
+/price_action/after_training/

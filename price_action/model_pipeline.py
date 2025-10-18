@@ -87,7 +87,7 @@ def walk_forward_split(X, n_splits=6, test_size=0.15):
         yield train_idx, test_idx
 
 
-def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, importance_threshold: float = 0.85):
+def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, version_dir: str, importance_threshold: float = 0.85):
     """
     Selekcja cech oparta na feature importance z LightGBM.
     OPTYMALIZACJA: Threshold 0.85 dla zachowania większej liczby cech (lepszy precision)
@@ -130,9 +130,7 @@ def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, impo
         print(f"  {row['feature']}: {row['importance']:.4f} (skumulowane: {row['cumulative_importance']:.2%})")
 
     removed_features = [f for f in X.columns if f not in selected_features]
-    models_dir = "models"
-    os.makedirs(models_dir, exist_ok=True)
-    weak_features_path = os.path.join(models_dir, f"{strategy_id}_weak_features.json")
+    weak_features_path = os.path.join(version_dir, "weak_features.json")
 
     with open(weak_features_path, 'w') as f:
         json.dump(removed_features, f, indent=2)
@@ -144,7 +142,7 @@ def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, impo
     return selected_features
 
 
-def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, strategy_id: str, side: str = 'long'):
+def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, strategy_id: str, version: str, side: str = 'long'):
     """
     POPRAWKA #1: RECALL-FOCUSED OPTIMIZATION dla LONG
     Zmieniono objective function aby priorytetyzować recall (łapanie okazji)
@@ -224,7 +222,7 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
             return 0.0
         return np.mean(scores)
 
-    storage_name = f"sqlite:///optuna/{strategy_id}_model_study.db"
+    storage_name = f"sqlite:///models/{version}/optuna/{strategy_id}_model_study.db"
     
     # OPTYMALIZACJA: TPE sampler z mniejszą liczbą startup trials
     sampler = optuna.samplers.TPESampler(
@@ -260,8 +258,18 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
 
 
 def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_model_trials: int, ticker: str,
-                          timeframe: str, helper_timeframes: list = None, side: str = 'long'):
+                          timeframe: str, helper_timeframes: list = None, side: str = 'long', version: str = 'v1.0'):
     strategy_id = _get_strategy_id(ticker, timeframe, helper_timeframes, side)
+    
+    version_dir = os.path.join("models", version, strategy_id)
+    os.makedirs(version_dir, exist_ok=True)
+    os.makedirs(os.path.join("models", version, "optuna"), exist_ok=True)
+    
+    print(f"\n{'='*60}")
+    print(f"Training pipeline initialized for version: {version}")
+    print(f"Output directory: {version_dir}")
+    print(f"{'='*60}\n")
+    
     df_model_base = df_features.drop(columns=['open', 'high', 'low', 'close', 'volume', 'turnover'], errors='ignore')
     holdout_size = int(len(df_model_base) * 0.2)
     train_val_df = df_model_base.iloc[:-holdout_size]
@@ -333,7 +341,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
 
     print("\n--- ETAP 1: Rozpoczynanie optymalizacji parametrów etykiet ---")
     print("OPTYMALIZACJA: Zredukowano CV splits (6→3), dodano pruning i równoległe wykonywanie")
-    storage_name_labels = f"sqlite:///optuna/{strategy_id}_labels_study.db"
+    storage_name_labels = f"sqlite:///models/{version}/optuna/{strategy_id}_labels_study.db"
     
     # OPTYMALIZACJA: TPE sampler z mniejszą liczbą startup trials
     sampler_labels = optuna.samplers.TPESampler(
@@ -368,10 +376,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     best_label_params = study_labels.best_params
     print(f"\nNajlepsze parametry etykiet: {best_label_params}")
     
-    # Zapisz label_params do pliku JSON
-    models_dir = "models"
-    os.makedirs(models_dir, exist_ok=True)
-    label_params_path = os.path.join(models_dir, f"{strategy_id}_label_params.json")
+    label_params_path = os.path.join(version_dir, "label_params.json")
     with open(label_params_path, 'w') as f:
         json.dump(best_label_params, f, indent=2)
     print(f"Parametry labelowania zapisane do: {label_params_path}")
@@ -408,13 +413,13 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     else:
         raise ValueError("Parametr 'side' musi być 'long' lub 'short'.")
 
-    selected_features = _run_feature_selection(X_full, y_full, strategy_id)
+    selected_features = _run_feature_selection(X_full, y_full, strategy_id, version_dir)
 
     X_full = X_full[selected_features]
 
     print("\n--- ETAP 2: Rozpoczynanie optymalizacji hiperparametrów modelu binarnego ---")
     print("POPRAWKA #1 & #5: Recall-focused optimization + mocniejsza regularyzacja")
-    best_model_params = _run_model_optimization(X_full, y_full, n_model_trials, strategy_id, side)
+    best_model_params = _run_model_optimization(X_full, y_full, n_model_trials, strategy_id, version, side)
     print(f"Najlepsze parametry modelu: {best_model_params}")
 
     print("\n--- Trenowanie finalnego modelu binarnego ... ---")
@@ -428,15 +433,15 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     final_model = lgb.LGBMClassifier(objective='binary', **best_model_params)
     final_model.fit(X_scaled, y_resampled, feature_name=X_full.columns.to_list())
 
-    model_path = os.path.join(models_dir, f"{strategy_id}_model.joblib")
-    scaler_path = os.path.join(models_dir, f"{strategy_id}_scaler.joblib")
-    features_path = os.path.join(models_dir, f"{strategy_id}_features.joblib")
+    model_path = os.path.join(version_dir, "model.joblib")
+    scaler_path = os.path.join(version_dir, "scaler.joblib")
+    features_path = os.path.join(version_dir, "features.joblib")
 
     joblib.dump(final_model, model_path)
     joblib.dump(final_scaler, scaler_path)
     joblib.dump(selected_features, features_path)
 
-    print(f"Model, skaler i lista cech zostały zapisane w katalogu '{models_dir}'.")
+    print(f"Model, skaler i lista cech zostały zapisane w: {version_dir}")
 
     y_holdout_multi = final_labels.reindex(holdout_df.index).dropna()
     X_holdout_multi = holdout_df.loc[y_holdout_multi.index]
@@ -509,17 +514,37 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     results_df['y_pred_optimized'] = holdout_preds_optimized
     results_df['optimal_threshold'] = optimal_threshold
 
-    results_dir = "results"
-    os.makedirs(results_dir, exist_ok=True)
-    results_path = os.path.join(results_dir, f"{strategy_id}_holdout_predictions.csv")
+    results_path = os.path.join(version_dir, "holdout_predictions.csv")
     results_df.to_csv(results_path)
     print(f"Szczegółowe wyniki ze zbioru holdout zapisano w: {results_path}")
+
+    training_metadata = {
+        "version": version,
+        "ticker": ticker,
+        "timeframe": timeframe,
+        "helper_timeframes": helper_timeframes,
+        "side": side,
+        "n_label_trials": n_label_trials,
+        "n_model_trials": n_model_trials,
+        "best_label_params": best_label_params,
+        "best_model_params": best_model_params,
+        "optimal_threshold": float(optimal_threshold),
+        "n_features_selected": len(selected_features),
+        "n_features_total": len(df_model_base.columns),
+        "n_samples_train": len(X_full),
+        "n_samples_holdout": len(X_holdout)
+    }
+    
+    metadata_path = os.path.join(version_dir, "training_metadata.json")
+    with open(metadata_path, 'w') as f:
+        json.dump(training_metadata, f, indent=2)
+    print(f"Metadata treningu zapisane w: {metadata_path}")
 
     print("\n" + "=" * 60)
     print("--- AUTOMATYCZNE URUCHAMIANIE ANALIZY MODELU ---")
     print("=" * 60)
 
-    analysis_output_dir = os.path.join(strategy_id)
+    analysis_output_dir = os.path.join(version_dir, "analysis")
     os.makedirs(analysis_output_dir, exist_ok=True)
     print(f"Wyniki analizy zostały zapisane w katalogu: {analysis_output_dir}/")
 
@@ -527,13 +552,14 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         from analysis import run_analysis_with_args
 
         class AnalysisArgs:
-            def __init__(self, ticker, timeframe, helper_timeframes, side):
+            def __init__(self, ticker, timeframe, helper_timeframes, side, version):
                 self.ticker = ticker
                 self.timeframe = timeframe
                 self.helper_timeframes = helper_timeframes
                 self.side = side
+                self.version = version
 
-        args = AnalysisArgs(ticker, timeframe, helper_timeframes, side)
+        args = AnalysisArgs(ticker, timeframe, helper_timeframes, side, version)
         run_analysis_with_args(args, output_dir=analysis_output_dir)
 
         print(f"\n✓ Analiza modelu zakończona pomyślnie. Wszystkie wyniki zapisane w: {analysis_output_dir}/")

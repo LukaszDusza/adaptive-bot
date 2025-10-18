@@ -21,6 +21,8 @@ def main():
 
     parser.add_argument('--side', type=str, choices=['long', 'short'],
                         help="Wymagane dla --train: 'long' (BUY/HOLD) lub 'short' (SELL/HOLD).")
+    parser.add_argument('--version', type=str, default='v1.0',
+                        help="Wersja modelu (np. v1.0, v1.1, v2.0). Domyślnie: v1.0")
     parser.add_argument('--label-trials', type=int, default=50)
     parser.add_argument('--model-trials', type=int, default=100)
 
@@ -55,12 +57,12 @@ def main():
         print_header(f"Trening modelu: {args.side.upper()}")
         df_features = fetch_and_prepare_data(ticker=args.ticker, timeframe=args.timeframe, limit=args.limit,
                                              helper_timeframes=args.helper_timeframes, side=args.side,
-                                             date_from=args.date_from)
+                                             date_from=args.date_from, version=args.version)
         if not df_features.empty:
             run_training_pipeline(df_features=df_features, n_label_trials=args.label_trials,
                                   n_model_trials=args.model_trials,
                                   ticker=args.ticker, timeframe=args.timeframe,
-                                  helper_timeframes=args.helper_timeframes, side=args.side)
+                                  helper_timeframes=args.helper_timeframes, side=args.side, version=args.version)
 
     elif args.backtest:
         from backtester import run_backtester_with_args

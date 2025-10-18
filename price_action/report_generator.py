@@ -188,11 +188,12 @@ def generate_trade_visualizations(df_trades):
 
 
 def run_report_generator_with_args(args):
+    version = getattr(args, 'version', 'v1.0')
     base_strategy_id = _get_base_strategy_id(args.ticker, args.timeframe, args.helper_timeframes)
     combined_strategy_id = f"{base_strategy_id}_long_short_combined"
 
-    backtests_dir = "backtests"
-    reports_dir = "reports"
+    backtests_dir = os.path.join("models", version, "backtests")
+    reports_dir = os.path.join("models", version, "reports")
     os.makedirs(reports_dir, exist_ok=True)
 
     trades_path = os.path.join(backtests_dir, f"{combined_strategy_id}_trades.csv")
@@ -240,7 +241,9 @@ def run_report_generator_with_args(args):
 
     print("Renderowanie raportu HTML...")
     context = {
-        'strategy_id': combined_strategy_id, 'generation_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        'strategy_id': combined_strategy_id, 
+        'version': version,
+        'generation_time': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'total_pnl': total_pnl, 'profit_factor': profit_factor, 'total_trades': total_trades,
         'win_rate': win_rate, 'max_drawdown_usd': max_dd_value,
         'equity_chart': equity_chart, 'pnl_dist_chart': pnl_dist_chart, 'monthly_pnl_chart': monthly_pnl_chart,

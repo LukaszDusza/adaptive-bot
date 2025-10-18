@@ -1538,7 +1538,7 @@ def _calculate_helper_features(df: pd.DataFrame):
     return df[key_features]
 
 
-def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timeframes: list = None, side: str = 'long', date_from: str = None):
+def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timeframes: list = None, side: str = 'long', date_from: str = None, version: str = 'v1.0', model_features_to_preserve: list = None):
     logging.info(f"📊 Fetching data: ticker={ticker}, timeframe={timeframe}, limit={limit}, helpers={helper_timeframes}")
     if date_from:
         logging.warning(f"⚠️  UWAGA: Dane będą pobrane wstecz od daty: {date_from}")
@@ -1660,10 +1660,14 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     helpers_str = '_plus_' + '_'.join(helper_timeframes) if helper_timeframes else ""
     strategy_id = f"{ticker}_{timeframe.replace(' ', '')}{helpers_str}_{side}"
     
-    # BACKTEST FIX: Load trained model features EARLY to preserve them
-    model_features_to_preserve = []
-    if side == 'backtest':
-        print("\n🔧 BACKTEST MODE: Loading trained model features to preserve them...")
+    # Use model_features_to_preserve parameter directly (passed from backtester/bot)
+    if not model_features_to_preserve:
+        if model_features_to_preserve is None:
+            model_features_to_preserve = []
+    
+    print(f"🔧 Model features to preserve: {len(model_features_to_preserve)}")
+    if not model_features_to_preserve:
+
         long_features_path = os.path.join("models", f"{strategy_id.replace('_backtest', '_long')}_features.joblib")
         short_features_path = os.path.join("models", f"{strategy_id.replace('_backtest', '_short')}_features.joblib")
         
@@ -1805,7 +1809,8 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             important_features.extend(model_features_to_preserve)
             important_features = list(set(important_features))  # Remove duplicates
             print(f"🔧 Added {len(model_features_to_preserve)} model features to preservation list")
-            print(f"   Total features to preserve: {len(important_features)}\n")
+            print(f"   Total features to preserve: {len(important_features)}")
+            print(f"   Model features sample: {model_features_to_preserve[:10]}\n")
         
         # BACKTEST FIX: Add OHLCV columns to important features for backtest mode
         if side == 'backtest':
@@ -1815,6 +1820,9 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             print(f"🔧 BACKTEST MODE: Added OHLCV columns to preservation list")
             print(f"   Total features to preserve: {len(important_features)}\n")
         
+        print(f"📊 Features before correlation removal: {final_df.shape[1]}")
+        print(f"   Checking if model features exist: hl_spread={('hl_spread' in final_df.columns)}, dist_from_swing_high_50_4h={('dist_from_swing_high_50_4h' in final_df.columns)}\n")
+        
         final_df, removed_corr_features = remove_correlated_features(
             final_df,
             target_col=None,  # Jeśli masz target, podaj tu nazwę kolumny
@@ -1822,11 +1830,14 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             keep_important=important_features
         )
         
+        print(f"\n📊 Features after correlation removal: {final_df.shape[1]}")
+        print(f"   Checking if model features exist: hl_spread={('hl_spread' in final_df.columns)}, dist_from_swing_high_50_4h={('dist_from_swing_high_50_4h' in final_df.columns)}\n")
+        
         # Opcjonalnie: zapisz listę usuniętych cech skorelowanych
         if removed_corr_features:
             helpers_str = '_plus_' + '_'.join(helper_timeframes) if helper_timeframes else ""
-            corr_features_path = os.path.join("models", f"{ticker}_{timeframe.replace(' ', '')}{helpers_str}_{side}_correlated_features.json")
-            os.makedirs("models", exist_ok=True)
+            corr_features_path = os.path.join("models", version, f"{ticker}_{timeframe.replace(' ', '')}{helpers_str}_{side}_correlated_features.json")
+            os.makedirs(os.path.dirname(corr_features_path), exist_ok=True)
             with open(corr_features_path, 'w') as f:
                 json.dump(removed_corr_features, f, indent=2)
             print(f"💾 Zapisano listę {len(removed_corr_features)} skorelowanych cech do: {corr_features_path}")

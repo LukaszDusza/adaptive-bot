@@ -14,6 +14,7 @@ services:
     restart: unless-stopped
     command: >
       python main.py --run-bot
+      --version v.1.0
       --ticker SOLUSDT
       --timeframe 15m
       --helper-timeframes 1h 4h
@@ -22,8 +23,8 @@ services:
       --tsl-pct 0.01
       --tp-pct 0.03
       --trade-size 100.0
-      --leverage 10 
-      --dynamic-tp
+      --leverage 10
+      --partial-tp
 
   bot-luk-sol-dynamic-tp:
     container_name: luk-sol-dynamic-tp
@@ -39,6 +40,7 @@ services:
     restart: unless-stopped
     command: >
       python main.py --run-bot
+      --version v.1.0
       --ticker SOLUSDT
       --timeframe 15m
       --helper-timeframes 1h 4h
@@ -47,7 +49,6 @@ services:
       --tsl-pct 0.01
       --tp-pct 0.03
       --trade-size 300.0
-      --leverage 10 
-      --dynamic-tp
+      --leverage 10
+      --partial-tp
       --hedge-mode
-

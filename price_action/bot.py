@@ -59,8 +59,9 @@ class BotConfig:
 class TradingBot:
     """Trading bot with advanced logging"""
     
-    def __init__(self, config: BotConfig):
+    def __init__(self, config: BotConfig, version: str = 'v1.0'):
         self.config = config
+        self.version = version
         self.adapter = self._init_adapter()
         self.base_id = self._get_strategy_id()
         
@@ -104,22 +105,23 @@ class TradingBot:
         return f"{self.config.TICKER}_{self.config.TIMEFRAME.replace(' ', '')}{helpers}"
     
     def _load_models(self):
+        version = getattr(self, 'version', 'v1.0')
         long_id = f"{self.base_id}_long"
         short_id = f"{self.base_id}_short"
         
         try:
-            m_long = joblib.load(f"models/{long_id}_model.joblib")
-            s_long = joblib.load(f"models/{long_id}_scaler.joblib")
-            f_long = joblib.load(f"models/{long_id}_features.joblib")
+            m_long = joblib.load(f"models/{version}/{long_id}/model.joblib")
+            s_long = joblib.load(f"models/{version}/{long_id}/scaler.joblib")
+            f_long = joblib.load(f"models/{version}/{long_id}/features.joblib")
             
-            m_short = joblib.load(f"models/{short_id}_model.joblib")
-            s_short = joblib.load(f"models/{short_id}_scaler.joblib")
-            f_short = joblib.load(f"models/{short_id}_features.joblib")
+            m_short = joblib.load(f"models/{version}/{short_id}/model.joblib")
+            s_short = joblib.load(f"models/{version}/{short_id}/scaler.joblib")
+            f_short = joblib.load(f"models/{version}/{short_id}/features.joblib")
             
-            logging.info(f"✓ Models loaded (Long: {len(f_long)} features, Short: {len(f_short)} features)")
+            logging.info(f"✓ Models loaded from version {version} (Long: {len(f_long)} features, Short: {len(f_short)} features)")
             return m_long, s_long, f_long, m_short, s_short, f_short
         except FileNotFoundError as e:
-            raise FileNotFoundError(f"Model files not found: {e}")
+            raise FileNotFoundError(f"Model files not found for version {version}: {e}")
     
     def _save_state(self):
         try:
@@ -192,12 +194,17 @@ class TradingBot:
             # Fetch data if not provided
             if df is None:
                 logging.info(f"📥 Fetching market data for {self.config.TICKER}...")
+                # Combine all model features for preservation
+                all_model_features = list(set(self.features_long + self.features_short))
+                
                 df = fetch_and_prepare_data(
                     ticker=self.config.TICKER,
                     timeframe=self.config.TIMEFRAME,
                     limit=self.config.CANDLES_FOR_FEATURES,
                     helper_timeframes=self.config.HELPER_TIMEFRAMES,
-                    side='backtest'  # Use backtest mode to preserve trained model features
+                    side='backtest',
+                    version=self.version,
+                    model_features_to_preserve=all_model_features
                 )
                 logging.info(f"✓ Data fetched successfully ({len(df)} candles)")
             
@@ -874,7 +881,8 @@ def launch_bot(args):
     config.DYNAMIC_TP_ENABLED = getattr(args, 'dynamic_tp', False)
     config.HEDGE_MODE = getattr(args, 'hedge_mode', False)
     
-    # Validate mutual exclusivity
+    version = getattr(args, 'version', 'v1.0')
+    
     if config.PARTIAL_TP_ENABLED and config.DYNAMIC_TP_ENABLED:
         print("\n❌ ERROR: Cannot enable both --partial-tp and --dynamic-tp. Choose only one.\n")
         return
@@ -884,12 +892,12 @@ def launch_bot(args):
     print("="*70)
     print(f"Ticker:            {config.TICKER}")
     print(f"Timeframe:         {config.TIMEFRAME}")
+    print(f"Model Version:     {version}")
     print(f"Trade Size:        ${config.TRADE_SIZE_USD}")
     print(f"TP/TSL:            {config.TP_PCT*100:.2f}% / {config.TSL_PCT*100:.2f}%")
     print(f"Threshold:         {config.PROBABILITY_THRESHOLD:.3f}")
     print(f"Min Proba Diff:    {config.MIN_PROBA_DIFF:.3f}")
     
-    # Display TP mechanism
     if config.PARTIAL_TP_ENABLED:
         print(f"Partial TP:        ON (50% at halfway to TP)")
     elif config.DYNAMIC_TP_ENABLED:
@@ -906,7 +914,7 @@ def launch_bot(args):
     print(f"  - Analytics:     logs/analytics/")
     print("="*70 + "\n")
     
-    bot = TradingBot(config)
+    bot = TradingBot(config, version)
     bot.start()
 
 
@@ -915,6 +923,8 @@ if __name__ == "__main__":
     parser.add_argument('--ticker', required=True)
     parser.add_argument('--timeframe', required=True)
     parser.add_argument('--helper-timeframes', nargs='*', default=None)
+    parser.add_argument('--version', type=str, default='v1.0',
+                        help='Model version to use (e.g., v1.0, v1.1)')
     parser.add_argument('--trade-size', type=float, default=100.0)
     parser.add_argument('--leverage', type=int, default=10)
     parser.add_argument('--tp-pct', type=float, required=True)

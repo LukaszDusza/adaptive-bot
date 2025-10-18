@@ -650,23 +650,24 @@ def calculate_metrics(trades: List[Trade], equity_curve: List[float],
     }
 
 
-def print_results(results: Dict, metrics: Dict, strategy_id: str):
+def print_results(results: Dict, metrics: Dict, strategy_id: str, version: str = 'v1.0'):
     """Print and save backtest results"""
     
-    os.makedirs("backtests", exist_ok=True)
+    backtest_dir = os.path.join("models", version, "backtests")
+    os.makedirs(backtest_dir, exist_ok=True)
     
     if results['trades']:
         df_trades = pd.DataFrame([asdict(t) for t in results['trades']])
-        df_trades.to_csv(f"backtests/{strategy_id}_trades.csv", index=False)
+        df_trades.to_csv(f"{backtest_dir}/{strategy_id}_trades.csv", index=False)
     
     pd.DataFrame({'equity': results['equity_curve']}).to_csv(
-        f"backtests/{strategy_id}_equity.csv", index=False)
+        f"{backtest_dir}/{strategy_id}_equity.csv", index=False)
     
     if results['decision_log']:
         pd.DataFrame(results['decision_log']).to_csv(
-            f"backtests/{strategy_id}_decisions.csv", index=False)
+            f"{backtest_dir}/{strategy_id}_decisions.csv", index=False)
     
-    with open(f"backtests/{strategy_id}_metrics.json", 'w') as f:
+    with open(f"{backtest_dir}/{strategy_id}_metrics.json", 'w') as f:
         json.dump({k: float(v) if isinstance(v, (np.integer, np.floating)) else v 
                   for k, v in metrics.items()}, f, indent=2, default=str)
     
@@ -696,28 +697,44 @@ def _get_strategy_id(ticker, timeframe, helper_timeframes):
 
 
 def main(args):
+    version = getattr(args, 'version', 'v1.0')
+    
     base_id = _get_strategy_id(args.ticker, args.timeframe, args.helper_timeframes)
     long_id = base_id.replace('_long_short_combined', '_long')
     short_id = base_id.replace('_long_short_combined', '_short')
     
     try:
-        model_long = joblib.load(f"models/{long_id}_model.joblib")
-        scaler_long = joblib.load(f"models/{long_id}_scaler.joblib")
-        features_long = joblib.load(f"models/{long_id}_features.joblib")
+        model_long = joblib.load(f"models/{version}/{long_id}/model.joblib")
+        scaler_long = joblib.load(f"models/{version}/{long_id}/scaler.joblib")
+        features_long = joblib.load(f"models/{version}/{long_id}/features.joblib")
         
-        model_short = joblib.load(f"models/{short_id}_model.joblib")
-        scaler_short = joblib.load(f"models/{short_id}_scaler.joblib")
-        features_short = joblib.load(f"models/{short_id}_features.joblib")
+        model_short = joblib.load(f"models/{version}/{short_id}/model.joblib")
+        scaler_short = joblib.load(f"models/{version}/{short_id}/scaler.joblib")
+        features_short = joblib.load(f"models/{version}/{short_id}/features.joblib")
+        
+        logging.info(f"✓ Models loaded from version: {version}")
     except FileNotFoundError as e:
-        logging.error(f"Model files not found: {e}")
+        logging.error(f"Model files not found for version {version}: {e}")
+        logging.error(f"Expected path: models/{version}/{long_id}/")
         return
+    
+    # Combine all model features for preservation
+    all_model_features = list(set(features_long + features_short))
+    
+    print(f"\n🔍 DEBUG: Loaded {len(features_long)} LONG features, {len(features_short)} SHORT features")
+    print(f"🔍 DEBUG: Total unique model features: {len(all_model_features)}")
+    print(f"🔍 DEBUG: hl_spread in features_long: {'hl_spread' in features_long}")
+    print(f"🔍 DEBUG: dist_from_swing_high_50_4h in features_long: {'dist_from_swing_high_50_4h' in features_long}")
+    print(f"🔍 DEBUG: Sample features: {features_long[:5]}\n")
     
     df = fetch_and_prepare_data(
         ticker=args.ticker,
         timeframe=args.timeframe,
         limit=args.limit,
         helper_timeframes=args.helper_timeframes,
-        side='backtest'
+        side='backtest',
+        version=version,
+        model_features_to_preserve=all_model_features
     )
     
     if df.empty:
@@ -752,7 +769,7 @@ def main(args):
     metrics = calculate_metrics(results['trades'], results['equity_curve'], args.initial_capital)
     metrics['initial_capital'] = args.initial_capital
     
-    print_results(results, metrics, base_id)
+    print_results(results, metrics, base_id, version)
 
 
 def run_backtester_with_args(args):
@@ -789,6 +806,8 @@ if __name__ == "__main__":
     parser.add_argument('--ticker', required=True)
     parser.add_argument('--timeframe', required=True)
     parser.add_argument('--helper-timeframes', nargs='*', default=None)
+    parser.add_argument('--version', type=str, default='v1.0',
+                        help='Model version to use for backtesting')
     parser.add_argument('--limit', type=int, default=10000)
     parser.add_argument('--initial-capital', type=float, default=10000.0)
     parser.add_argument('--risk-pct', type=float, default=0.02)
