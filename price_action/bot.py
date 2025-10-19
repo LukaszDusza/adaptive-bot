@@ -81,7 +81,11 @@ class TradingBot:
         
         # Restore trade logging if position was active before restart
         self._restore_trade_logging_if_needed()
-        
+
+        # EPHEMERAL MODE: Auto-recovery from Bybit API
+        # If container restarted without persistent state, detect existing position and restore
+        self._check_existing_position_on_startup()
+
         # Cache for last decision data
         self.last_decision_data = {}
         self.last_candle_data = {}
@@ -175,7 +179,70 @@ class TradingBot:
                 )
                 
                 logging.info("✓ Trade logging restored")
-    
+
+    def _check_existing_position_on_startup(self):
+        """
+        EPHEMERAL MODE: Auto-recovery from Bybit API.
+
+        If container restarted without persistent state (ephemeral volumes),
+        this method detects existing positions from Bybit API and reconstructs
+        minimal state to prevent duplicate position errors.
+        """
+        try:
+            # Skip if state already has position info (normal restoration path)
+            if self.state.get('side'):
+                logging.info("✓ State already loaded, skipping API recovery")
+                return
+
+            # Check Bybit API for existing position
+            position = self.adapter.get_position(self.config.TICKER)
+
+            if not position:
+                logging.info("✓ No existing position detected on Bybit")
+                return
+
+            # Position exists but state is empty - RECOVERY NEEDED
+            side = position['side']  # "Long" or "Short"
+            entry_price = position['entryPrice']
+            size = position['size']
+
+            logging.warning("="*60)
+            logging.warning(f"⚠️  EPHEMERAL RECOVERY: Detected {side} position on Bybit")
+            logging.warning(f"    Entry: {entry_price:.4f} | Size: {size}")
+            logging.warning(f"    Reconstructing state from API...")
+            logging.warning("="*60)
+
+            # Reconstruct minimal state to prevent duplicate positions
+            self.state = {
+                'side': side,
+                'entry_price': entry_price,
+                'initial_tp': entry_price * (1 + self.config.TP_PCT) if side == "Long" else entry_price * (1 - self.config.TP_PCT),
+                'last_sl': 0.0,  # Will be set by first TSL update
+                'partial_tp_taken': False,
+                'dynamic_tp_levels_taken': 0,
+                'highest_price': entry_price if side == "Long" else 0.0,
+                'lowest_price': entry_price if side == "Short" else float('inf')
+            }
+            self._save_state()
+
+            # Start trade logger with recovered position
+            if not self.trade_logger.current_trade:
+                self.trade_logger.start_trade(
+                    ticker=self.config.TICKER,
+                    side=side,
+                    decision_data={
+                        'recovered_from_api': True,
+                        'entry_price': entry_price,
+                        'size': size
+                    }
+                )
+                logging.info(f"✓ Trade logger started for recovered {side} position")
+
+        except Exception as e:
+            logging.error(f"Error during startup position recovery: {e}", exc_info=True)
+            # Non-fatal - bot will continue, but may have duplicate position risk
+            logging.warning("⚠️  Recovery failed - monitor for duplicate positions!")
+
     def _extract_top_indicators(self, df_row, features_list, n=10) -> Dict[str, float]:
         """Extract top N indicator values from dataframe row"""
         indicators = {}

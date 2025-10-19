@@ -13,7 +13,11 @@ COPY bybit_adapter.py .
 COPY data_preparer_pa.py .
 COPY trade_logger.py .
 
-# Create directories for runtime data
-RUN mkdir -p models logs bot_state
+# Copy ML models into the image (self-contained)
+# Models are read-only and don't change during runtime
+COPY models /app/models
+
+# Create directories for runtime data (logs, state)
+RUN mkdir -p logs bot_state
 
 CMD ["python", "main.py", "--run-bot"]

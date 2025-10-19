@@ -7,10 +7,6 @@ services:
       - PYTHONUNBUFFERED=1
     env_file:
       - .env_sylwia
-    volumes:
-      - ./models:/app/models
-      - ./logs:/app/logs
-      - ./bot_state:/app/bot_state
     restart: unless-stopped
     command: >
       python main.py --run-bot
@@ -33,10 +29,6 @@ services:
       - PYTHONUNBUFFERED=1
     env_file:
       - .env_luk
-    volumes:
-      - ./models:/app/models
-      - ./logs:/app/logs
-      - ./bot_state:/app/bot_state
     restart: unless-stopped
     command: >
       python main.py --run-bot
