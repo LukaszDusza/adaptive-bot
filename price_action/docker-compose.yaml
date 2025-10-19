@@ -14,14 +14,14 @@ services:
     restart: unless-stopped
     command: >
       python main.py --run-bot
-      --version v.1.0
+      --version v1.1
       --ticker SOLUSDT
       --timeframe 15m
-      --helper-timeframes 1h 4h
-      --prob-threshold 0.7
-      --min-proba-diff 0.4
-      --tsl-pct 0.01
-      --tp-pct 0.03
+      --helper-timeframes 1h 4h 1D
+      --prob-threshold 0.62
+      --min-proba-diff 0.3
+      --tsl-pct 0.014
+      --tp-pct 0.02
       --trade-size 100.0
       --leverage 10
       --partial-tp
@@ -40,14 +40,14 @@ services:
     restart: unless-stopped
     command: >
       python main.py --run-bot
-      --version v.1.0
+      --version v1.1
       --ticker SOLUSDT
       --timeframe 15m
-      --helper-timeframes 1h 4h
-      --prob-threshold 0.7
-      --min-proba-diff 0.4
-      --tsl-pct 0.01
-      --tp-pct 0.03
+      --helper-timeframes 1h 4h 1D
+      --prob-threshold 0.62
+      --min-proba-diff 0.3
+      --tsl-pct 0.014
+      --tp-pct 0.02
       --trade-size 300.0
       --leverage 10
       --partial-tp

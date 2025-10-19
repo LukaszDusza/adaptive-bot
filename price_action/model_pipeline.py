@@ -10,6 +10,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, f1_score, fbeta_score, precision_recall_curve, precision_score, recall_score
 from numba import njit
 from imblearn.over_sampling import SMOTE
+from typing import Tuple, List
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -41,13 +42,13 @@ def get_triple_barrier_labels(prices: pd.Series, t_events: pd.Index, profit_take
                               time_limit: int, verbose=True):
     if verbose:
         print("Rozpoczynanie etykietowania danych...")
-    
+
     # Handle duplicate index values by keeping the first occurrence
     if not prices.index.is_unique:
         if verbose:
             print(f"Warning: prices index has {prices.index.duplicated().sum()} duplicates. Keeping first occurrence.")
         prices = prices[~prices.index.duplicated(keep='first')]
-    
+
     prices_arr = prices.to_numpy()
     event_indices = prices.index.get_indexer(t_events)
     outcomes = _compute_labels_fast(prices_arr, event_indices, profit_take_pct, stop_loss_pct, time_limit)
@@ -55,6 +56,121 @@ def get_triple_barrier_labels(prices: pd.Series, t_events: pd.Index, profit_take
     if verbose:
         print(f"Etykietowanie zakończone. Rozkład etykiet:\n{labels.value_counts(normalize=True)}")
     return labels
+
+
+def remove_correlated_features(df: pd.DataFrame,
+                               target_col: str = None,
+                               correlation_threshold: float = 0.90,
+                               keep_important: List[str] = None) -> Tuple[pd.DataFrame, List[str]]:
+    """
+    Usuwa cechy silnie skorelowane ze sobą
+
+    Args:
+        df: DataFrame z cechami
+        target_col: Nazwa kolumny targetu (zostanie pominięta w analizie)
+        correlation_threshold: Próg korelacji powyżej którego usuwamy cechy (domyślnie 0.90)
+        keep_important: Lista nazw cech które zawsze zachowujemy
+
+    Returns:
+        Tuple[DataFrame, List[str]]: DataFrame z usuniętymi cechami, lista usuniętych cech
+    """
+    print(f"\n{'='*60}")
+    print("ANALIZA KORELACJI CECH")
+    print(f"{'='*60}")
+    print(f"Próg korelacji: {correlation_threshold}")
+    print(f"Początkowa liczba cech: {df.shape[1]}")
+
+    # Domyślna lista ważnych cech (ICT + kluczowe wskaźniki)
+    if keep_important is None:
+        keep_important = [
+            # Podstawowe wskaźniki
+            'rsi_14', 'volume_vs_ma_20', 'dist_from_vwap', 'atr_normalized',
+            # Wskaźniki kompozytowe
+            'market_state_indicator', 'momentum_regime', 'volume_confirmation_score',
+            'multi_factor_sentiment', 'oversold_overbought_signal',
+            # ICT & SMART MONEY - NAJWYŻSZY PRIORYTET
+            'ict_composite_score', 'fvg_signal', 'fvg_size',
+            'liquidity_sweep', 'liquidity_sweep_strength',
+            'order_block', 'order_block_strength', 'breaker_block',
+            'market_structure_shift', 'market_structure_direction',
+            'institutional_candle', 'institutional_candle_strength',
+            'ob_with_fvg', 'high_conviction_sweep', 'structure_aligned_ob', 'fvg_fill_reversal',
+        ]
+
+    # Cechy numeryczne (bez targetu)
+    cols_to_analyze = df.select_dtypes(include=[np.number]).columns.tolist()
+    if target_col and target_col in cols_to_analyze:
+        cols_to_analyze.remove(target_col)
+
+    # Macierz korelacji
+    print(f"Obliczanie macierzy korelacji dla {len(cols_to_analyze)} cech...")
+    corr_matrix = df[cols_to_analyze].corr().abs()
+
+    # Górny trójkąt
+    upper_triangle = corr_matrix.where(
+        np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+    )
+
+    # Znajdź pary o wysokiej korelacji
+    to_drop = set()
+    high_corr_pairs = []
+
+    for column in upper_triangle.columns:
+        correlated_features = upper_triangle.index[
+            upper_triangle[column] > correlation_threshold
+        ].tolist()
+
+        if correlated_features:
+            for corr_feature in correlated_features:
+                high_corr_pairs.append({
+                    'feature1': column,
+                    'feature2': corr_feature,
+                    'correlation': upper_triangle.loc[corr_feature, column]
+                })
+
+                # Decyzja którą cechę usunąć
+                if column in keep_important and corr_feature in keep_important:
+                    continue
+                elif column in keep_important and corr_feature not in keep_important:
+                    to_drop.add(corr_feature)
+                elif corr_feature in keep_important and column not in keep_important:
+                    to_drop.add(column)
+                else:
+                    # Usuń cechę z niższą wariancją
+                    var_col = df[column].var()
+                    var_corr = df[corr_feature].var()
+                    if var_col < var_corr:
+                        to_drop.add(column)
+                    else:
+                        to_drop.add(corr_feature)
+
+    # Raport
+    print(f"\nZnaleziono {len(high_corr_pairs)} par cech o korelacji > {correlation_threshold}")
+
+    if high_corr_pairs:
+        print("\nTop 10 najwyższych korelacji:")
+        sorted_pairs = sorted(high_corr_pairs, key=lambda x: x['correlation'], reverse=True)
+        for pair in sorted_pairs[:10]:
+            print(f"  {pair['feature1']:40s} <-> {pair['feature2']:40s} : {pair['correlation']:.3f}")
+
+    to_drop_list = list(to_drop)
+    print(f"\nUsuwam {len(to_drop_list)} skorelowanych cech")
+
+    if to_drop_list:
+        print("\nPrzykładowe usunięte cechy (max 20):")
+        for feature in sorted(to_drop_list)[:20]:
+            print(f"  - {feature}")
+        if len(to_drop_list) > 20:
+            print(f"  ... i {len(to_drop_list) - 20} więcej")
+
+    # Usuń
+    df_cleaned = df.drop(columns=to_drop_list, errors='ignore')
+
+    print(f"\nKońcowa liczba cech: {df_cleaned.shape[1]}")
+    print(f"Usunięto: {len(to_drop_list)} cech ({len(to_drop_list)/len(cols_to_analyze)*100:.1f}%)")
+    print(f"{'='*60}\n")
+
+    return df_cleaned, to_drop_list
 
 
 def _get_strategy_id(ticker, timeframe, helper_timeframes, side: str):
@@ -129,13 +245,10 @@ def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, vers
     for idx, row in importance_df.head(10).iterrows():
         print(f"  {row['feature']}: {row['importance']:.4f} (skumulowane: {row['cumulative_importance']:.2%})")
 
+    # UPROSZCZENIE: Nie zapisujemy weak_features.json
+    # Zapisujemy TYLKO selected features do features.joblib
     removed_features = [f for f in X.columns if f not in selected_features]
-    weak_features_path = os.path.join(version_dir, "weak_features.json")
-
-    with open(weak_features_path, 'w') as f:
-        json.dump(removed_features, f, indent=2)
-
-    print(f"\nZapisano {len(removed_features)} słabych cech do: {weak_features_path}")
+    print(f"\nUsunięto {len(removed_features)} słabych cech z feature selection")
     if removed_features:
         print(f"Przykłady usuniętych cech: {removed_features[:5]}")
 
@@ -269,22 +382,46 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     print(f"Training pipeline initialized for version: {version}")
     print(f"Output directory: {version_dir}")
     print(f"{'='*60}\n")
-    
+
+    # KROK 0: Usuń OHLCV (podstawowe kolumny nie są features)
     df_model_base = df_features.drop(columns=['open', 'high', 'low', 'close', 'volume', 'turnover'], errors='ignore')
+    print(f"📊 Features after removing OHLCV: {df_model_base.shape[1]}")
+
+    # KROK 0.5: Usuń skorelowane cechy PRZED feature selection
+    # To zapewnia, że model będzie trenowany na tych samych cechach co używane w produkcji
+    print(f"\n{'='*60}")
+    print("ETAP 0.5: Usuwanie skorelowanych cech (przed feature selection)")
+    print(f"{'='*60}")
+    df_model_base, removed_corr_features = remove_correlated_features(
+        df_model_base,
+        target_col=None,
+        correlation_threshold=0.90,
+        keep_important=None  # Używa domyślnej listy ICT + ważne cechy
+    )
+
+    # Zapisz listę usuniętych skorelowanych cech
+    if removed_corr_features:
+        corr_features_path = os.path.join(version_dir, "correlated_features_removed.json")
+        with open(corr_features_path, 'w') as f:
+            json.dump(removed_corr_features, f, indent=2)
+        print(f"💾 Zapisano listę {len(removed_corr_features)} skorelowanych cech do: {corr_features_path}")
+
     holdout_size = int(len(df_model_base) * 0.2)
     train_val_df = df_model_base.iloc[:-holdout_size]
     holdout_df = df_model_base.iloc[-holdout_size:]
 
     def objective_labels(trial):
-        base_barrier = trial.suggest_float('base_barrier', 0.005, 0.020, log=True)
+        # POPRAWKA ICT: Zwiększone zakresy dla dłuższego horyzontu czasowego i większych TP
+        # ICT sygnały potrzebują więcej czasu na zadziałanie (24-48 świec zamiast 4-24)
+        base_barrier = trial.suggest_float('base_barrier', 0.010, 0.030, log=True)  # Było: 0.005-0.020 (wyższe TP: 2-3%)
 
         if side == 'long':
-            pt_multiplier = trial.suggest_float('pt_multiplier', 1.5, 5.0)
+            pt_multiplier = trial.suggest_float('pt_multiplier', 2.0, 6.0)  # Było: 1.5-5.0 (większe TP dla ICT)
             sl_multiplier = trial.suggest_float('sl_multiplier', 0.5, 1.5)
             pt = base_barrier * pt_multiplier
             sl = base_barrier * sl_multiplier
         elif side == 'short':
-            pt_multiplier = trial.suggest_float('pt_multiplier', 1.5, 5.0)
+            pt_multiplier = trial.suggest_float('pt_multiplier', 2.0, 6.0)  # Było: 1.5-5.0 (większe TP dla ICT)
             sl_multiplier = trial.suggest_float('sl_multiplier', 0.5, 1.5)
             pt = base_barrier * pt_multiplier
             sl = base_barrier * sl_multiplier
@@ -292,7 +429,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
             pt = base_barrier
             sl = base_barrier
 
-        time_limit = trial.suggest_int('time_limit', 4, 24)  # Było: 12-40 (8-24h dla 1h TF)
+        time_limit = trial.suggest_int('time_limit', 12, 48)  # Było: 4-24 → ICT potrzebuje więcej czasu!
         labels = get_triple_barrier_labels(df_features['close'], df_features.index, pt, sl, time_limit, verbose=False)
 
         X = train_val_df.copy()

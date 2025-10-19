@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python main.py --backtest )",
+      "Bash(awk '{print $9, $5}')",
+      "Bash(python build_modules.py)",
+      "Bash(awk '{print $9, \"\"\"\"(\"\"\"\"$5\"\"\"\" bytes)\"\"\"\"}')",
+      "Bash(awk -F',' 'NR>1 {sum+=$9; count++; if($9>0) wins++; else losses++; if($9>max) max=$9; if($9<min||min==0) min=$9} END {print \"\"Total trades:\"\", count; print \"\"Wins:\"\", wins, \"\"Losses:\"\", losses; print \"\"Best trade:\"\", max\"\"%\"\"; print \"\"Worst trade:\"\", min\"\"%\"\"}' /Users/lukasz/projects/adaptive-bot/price_action/models/v1.1/backtests/SOLUSDT_15m_plus_1h_4h_1D_long_short_combined_trades.csv)",
+      "WebSearch",
+      "WebFetch(domain:bybit-exchange.github.io)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

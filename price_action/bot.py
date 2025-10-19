@@ -224,8 +224,23 @@ class TradingBot:
             last_row = df_closed.iloc[-1]
             last_row_df = df_closed.iloc[[-1]]
             
-            # Extract features
+            # Extract features with validation
             logging.info("🤖 Running ML model predictions...")
+
+            # VALIDATION: Check if all required features are present
+            missing_long = set(self.features_long) - set(last_row_df.columns)
+            missing_short = set(self.features_short) - set(last_row_df.columns)
+
+            if missing_long:
+                logging.error(f"❌ Missing {len(missing_long)} LONG features!")
+                logging.error(f"   Examples: {list(missing_long)[:5]}")
+                return "ERROR"
+
+            if missing_short:
+                logging.error(f"❌ Missing {len(missing_short)} SHORT features!")
+                logging.error(f"   Examples: {list(missing_short)[:5]}")
+                return "ERROR"
+
             X_long = last_row_df[self.features_long]
             X_short = last_row_df[self.features_short]
             

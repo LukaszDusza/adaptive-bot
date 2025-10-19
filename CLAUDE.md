@@ -57,16 +57,26 @@ This is an **ML-powered cryptocurrency trading bot** for Bybit that uses LightGB
 
 ### Data Flow
 
-**Training Phase:**
+**Training Phase (v2.0 - Simplified Feature Management):**
 ```
 fetch_and_prepare_data()
+  → Returns ALL features (~300) - NO removal here
+  → Remove OHLCV columns (not features)
+  → remove_correlated_features() - removes ~30 highly correlated features (threshold 0.90)
   → Triple-barrier labeling (get_triple_barrier_labels)
-  → Feature selection (feature importance threshold=0.85)
+  → Feature selection (feature importance threshold=0.85) - selects ~150 top features
   → Walk-forward CV (3 splits, expanding window)
   → SMOTE resampling for class imbalance
-  → Final model + scaler + feature list saved
+  → Final model + scaler + feature list saved (features.joblib is the SINGLE source of truth)
   → Automatic analysis.py execution
 ```
+
+**IMPORTANT - Feature Management (v2.0):**
+- `data_preparer_pa.py` returns ALL features - NO removal/filtering
+- `model_pipeline.py` does ALL feature selection (correlation + importance)
+- `features.joblib` is the SINGLE source of truth - bot/backtest use ONLY these features
+- No more `weak_features.json` - simplified to one file
+- See `FEATURE_REFACTOR_CHANGELOG.md` for details
 
 **Live Bot Phase:**
 ```
@@ -220,6 +230,11 @@ python analyze_trades.py
 - **POPRAWKA #1:** Recall-focused optimization for LONG (60% recall + 40% precision)
 - **POPRAWKA #4:** Threshold tuning targets 55% recall (was 70%)
 - **POPRAWKA #5:** Increased regularization (reg_alpha/lambda: 10-100)
+- **POPRAWKA #6 (ICT-FOCUSED):** Zwiększone zakresy dla ICT features:
+  - `base_barrier`: 0.010-0.030 (było: 0.005-0.020) → Wyższe TP 2-3%
+  - `pt_multiplier`: 2.0-6.0 (było: 1.5-5.0) → Większe profit targets
+  - `time_limit`: 12-48 świec (było: 4-24) → ICT sygnały potrzebują więcej czasu
+  - **CEL:** Dać ICT features szansę na wyższą feature importance poprzez dłuższy horyzont czasowy
 - **Speed optimizations:**
   - Reduced CV splits from 6 to 3 (2x faster)
   - Added MedianPruner for early stopping of weak trials

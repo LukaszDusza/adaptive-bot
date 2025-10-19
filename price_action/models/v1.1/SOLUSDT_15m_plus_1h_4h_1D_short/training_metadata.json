@@ -1,0 +1,35 @@
+{
+  "version": "v1.1",
+  "ticker": "SOLUSDT",
+  "timeframe": "15m",
+  "helper_timeframes": [
+    "1h",
+    "4h",
+    "1D"
+  ],
+  "side": "short",
+  "n_label_trials": 200,
+  "n_model_trials": 250,
+  "best_label_params": {
+    "base_barrier": 0.010120814318711202,
+    "pt_multiplier": 2.0097239913304703,
+    "sl_multiplier": 1.1596846896988977,
+    "time_limit": 14
+  },
+  "best_model_params": {
+    "n_estimators": 407,
+    "learning_rate": 0.03075461853218857,
+    "reg_alpha": 96.93781622459343,
+    "reg_lambda": 44.59950904459794,
+    "num_leaves": 48,
+    "colsample_bytree": 0.6653040108495382,
+    "subsample": 0.8554307637081434,
+    "subsample_freq": 3,
+    "min_child_samples": 82
+  },
+  "optimal_threshold": 0.5630132509317611,
+  "n_features_selected": 34,
+  "n_features_total": 178,
+  "n_samples_train": 79529,
+  "n_samples_holdout": 20527
+}
