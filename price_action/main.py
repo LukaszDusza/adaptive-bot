@@ -42,6 +42,12 @@ def main():
                         help='Enable new dynamic TP mechanism (25%% at each of 4 levels: 25%%, 50%%, 75%%, 100%%)')
     parser.add_argument('--hedge-mode', action='store_true',
                         help='Enable Hedge Mode (positionIdx: 1=Long, 2=Short). Default is One-Way Mode (positionIdx: 0).')
+    parser.add_argument('--limit-order', action='store_true',
+                        help='Use limit orders instead of market orders for better entry prices')
+    parser.add_argument('--max-waiting-limit-order', type=int, default=300,
+                        help='Maximum seconds to wait for limit order execution before cancelling (default: 300s = 5min)')
+    parser.add_argument('--limit-offset-pct', type=float, default=0.005,
+                        help='Price offset for limit orders as percentage (default: 0.005 = 0.5%%). LONG: -offset (buy cheaper), SHORT: +offset (sell higher)')
 
     args = parser.parse_args()
 

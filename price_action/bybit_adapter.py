@@ -271,7 +271,15 @@ class BybitAdapter:
             if abs(sz) > 0:
                 side = p.get("side")
                 entry = float(p.get("avgPrice", 0) or 0)
-                return {"side": "Long" if side == "Buy" else "Short", "size": sz, "entryPrice": entry}
+                stop_loss = float(p.get("stopLoss", 0) or 0)
+                take_profit = float(p.get("takeProfit", 0) or 0)
+                return {
+                    "side": "Long" if side == "Buy" else "Short",
+                    "size": sz,
+                    "entryPrice": entry,
+                    "stopLoss": stop_loss,
+                    "takeProfit": take_profit
+                }
         return {}
 
     def latest_price(self, symbol_u: str) -> float:
@@ -325,12 +333,29 @@ class BybitAdapter:
             else:
                 raise
 
-    def market_close(self, symbol_u: str, side: str, qty: float):
+    def market_close(self, symbol_u: str, side: str, qty: float, position_side: str = None):
+        """
+        Close position with market order (reduceOnly).
+
+        Args:
+            symbol_u: Trading pair
+            side: Order side ("Buy" to close SHORT, "Sell" to close LONG)
+            qty: Quantity to close
+            position_side: Position side ("Long" or "Short") - REQUIRED for hedge mode to get correct positionIdx
+        """
         # Try 2 decimal places first
         safe_qty = round(qty, 2)
-        position_idx = self._get_position_idx(side)
-        log.info(f"Próba zamknięcia pozycji: {qty} zaokrąglona do {safe_qty} (2 miejsca po przecinku) dla {symbol_u} (positionIdx={position_idx})")
-        
+
+        # CRITICAL FIX: For reduceOnly orders in hedge mode, use position side (not order side) to get positionIdx
+        # Example: Closing SHORT position requires positionIdx=2, even though order side is "Buy"
+        if position_side:
+            position_idx = self._get_position_idx(position_side)
+        else:
+            # Fallback for backward compatibility (one-way mode)
+            position_idx = self._get_position_idx(side)
+
+        log.info(f"Próba zamknięcia pozycji: {qty} zaokrąglona do {safe_qty} (2 miejsca po przecinku) dla {symbol_u} (positionIdx={position_idx}, position_side={position_side})")
+
         try:
             resp = self.client.place_order(
                 category=self.category,
@@ -361,26 +386,171 @@ class BybitAdapter:
             else:
                 raise
 
+    def limit_open(self, symbol_u: str, side: str, qty: float, limit_price: float):
+        """
+        Place a limit order to open a position.
+
+        Args:
+            symbol_u: Trading pair (e.g., SOLUSDT)
+            side: "Buy" for LONG, "Sell" for SHORT
+            qty: Order quantity
+            limit_price: Limit price for the order
+
+        Returns:
+            API response with orderId
+        """
+        safe_qty = round(qty, 2)
+        position_idx = self._get_position_idx(side)
+        log.info(f"Placing LIMIT order: {side} {safe_qty} @ {limit_price:.4f} for {symbol_u} (positionIdx={position_idx})")
+
+        try:
+            resp = self.client.place_order(
+                category=self.category,
+                symbol=symbol_u,
+                side=side,
+                orderType="Limit",
+                qty=self._format_qty(safe_qty),
+                price=str(limit_price),
+                timeInForce="GTC",  # Good Till Cancel
+                reduceOnly=False,
+                positionIdx=position_idx,
+            )
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"place_order (LIMIT) -> {resp}")
+
+            order_id = (resp.get("result") or {}).get("orderId")
+            log.info(f"✓ Limit order placed: ID={order_id}")
+            return resp
+
+        except (InvalidRequestError, BybitAPIError) as e:
+            error_msg = str(e)
+            # If "Qty invalid" error, retry with 1 decimal place
+            if "Qty invalid" in error_msg or "10001" in error_msg:
+                safe_qty = round(qty, 1)
+                log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
+                resp = self.client.place_order(
+                    category=self.category,
+                    symbol=symbol_u,
+                    side=side,
+                    orderType="Limit",
+                    qty=self._format_qty(safe_qty),
+                    price=str(limit_price),
+                    timeInForce="GTC",
+                    reduceOnly=False,
+                    positionIdx=position_idx,
+                )
+                if str(resp.get("retCode")) not in ("0",):
+                    raise BybitAPIError(f"place_order (LIMIT) -> {resp}")
+
+                order_id = (resp.get("result") or {}).get("orderId")
+                log.info(f"✓ Limit order placed: ID={order_id}")
+                return resp
+            else:
+                raise
+
+    def get_open_orders(self, symbol_u: str) -> list:
+        """
+        Get all open (unfilled) orders for a symbol.
+
+        Returns:
+            List of open orders with orderId, side, price, qty, etc.
+        """
+        try:
+            resp = self.client.get_open_orders(
+                category=self.category,
+                symbol=symbol_u
+            )
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"get_open_orders -> {resp}")
+
+            orders = (resp.get("result") or {}).get("list", [])
+            return orders
+
+        except Exception as e:
+            log.error(f"Error getting open orders: {e}", exc_info=True)
+            return []
+
+    def cancel_order(self, symbol_u: str, order_id: str):
+        """
+        Cancel a specific order by orderId.
+
+        Args:
+            symbol_u: Trading pair
+            order_id: Order ID to cancel
+        """
+        try:
+            resp = self.client.cancel_order(
+                category=self.category,
+                symbol=symbol_u,
+                orderId=order_id
+            )
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"cancel_order -> {resp}")
+
+            log.info(f"✓ Order cancelled: {order_id}")
+            return resp
+
+        except Exception as e:
+            log.error(f"Error cancelling order {order_id}: {e}", exc_info=True)
+            raise
+
+    def cancel_all_orders(self, symbol_u: str):
+        """
+        Cancel all open orders for a symbol (safety mechanism).
+        """
+        try:
+            resp = self.client.cancel_all_orders(
+                category=self.category,
+                symbol=symbol_u
+            )
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"cancel_all_orders -> {resp}")
+
+            log.info(f"✓ All orders cancelled for {symbol_u}")
+            return resp
+
+        except Exception as e:
+            log.error(f"Error cancelling all orders: {e}", exc_info=True)
+            raise
+
     def set_stop_loss(self, symbol_u: str, price: float, side: str):
         position_idx = self._get_position_idx(side)
-        resp = self.client.set_trading_stop(
-            category=self.category, symbol=symbol_u, stopLoss=str(price), positionIdx=position_idx,
-        )
-        if str(resp.get("retCode")) not in ("0",):
-            raise BybitAPIError(f"set_trading_stop (SL) -> {resp}")
-        return resp
+        try:
+            resp = self.client.set_trading_stop(
+                category=self.category, symbol=symbol_u, stopLoss=str(price), positionIdx=position_idx,
+            )
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"set_trading_stop (SL) -> {resp}")
+            return resp
+        except (InvalidRequestError, BybitAPIError) as e:
+            error_msg = str(e)
+            # Error 34040 = "not modified" - SL already at this price, treat as warning not error
+            if "34040" in error_msg or "not modified" in error_msg.lower():
+                log.warning(f"SL already set to {price:.4f} for {symbol_u} (34040 - not modified)")
+                return {"retCode": "0", "retMsg": "not_modified"}
+            else:
+                raise
 
     def set_take_profit(self, symbol_u: str, price: float, side: str):
         position_idx = self._get_position_idx(side)
-        resp = self.client.set_trading_stop(
-            category=self.category,
-            symbol=symbol_u,
-            takeProfit=str(price),
-            positionIdx=position_idx,
-        )
-        if str(resp.get("retCode")) not in ("0",):
-            raise BybitAPIError(f"set_trading_stop (TP) -> {resp}")
-        return resp
+        try:
+            resp = self.client.set_trading_stop(
+                category=self.category,
+                symbol=symbol_u,
+                takeProfit=str(price),
+                positionIdx=position_idx,
+            )
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"set_trading_stop (TP) -> {resp}")
+            return resp
+        except (InvalidRequestError, BybitAPIError) as e:
+            error_msg = str(e)
+            # Error 34040 = "not modified" - TP already at this price, treat as warning not error
+            if "34040" in error_msg or "not modified" in error_msg.lower():
+                log.warning(f"TP already set to {price:.4f} for {symbol_u} (34040 - not modified)")
+                return {"retCode": "0", "retMsg": "not_modified"}
+            else:
+                raise
 
     def cancel_tpsl(self, symbol_u: str):
         # Get position to determine correct positionIdx

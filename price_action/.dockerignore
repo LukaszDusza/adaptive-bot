@@ -1,0 +1,52 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+.dockerignore
+Dockerfile
+docker-compose.yaml
+
+# Runtime data (will be mounted as volumes)
+logs/*
+bot_state/*
+
+# Environment files (passed via env_file in docker-compose)
+.env*
+
+# Test/development files
+*.md
+*.txt.bak
+*.log
+
+# Jupyter notebooks
+*.ipynb
+
+# Documentation
+docs/
+*.pdf
+
+# Backtest results (not needed in production)
+backtests/
+reports/
+
+# DO NOT IGNORE:
+# models/  <- MUST be copied to image!

@@ -52,6 +52,9 @@ class BotConfig:
     PARTIAL_TP_ENABLED: bool = True
     DYNAMIC_TP_ENABLED: bool = False  # New dynamic TP: 25% at each of 4 levels (25%, 50%, 75%, 100%)
     HEDGE_MODE: bool = False  # Hedge Mode: positionIdx 1=Long, 2=Short. One-Way Mode: positionIdx 0
+    LIMIT_ORDER_MODE: bool = False  # Use limit orders instead of market orders
+    MAX_WAITING_LIMIT_ORDER: int = 300  # Seconds to wait for limit order execution before cancelling
+    LIMIT_OFFSET_PCT: float = 0.005  # Price offset for limit orders (0.5% default)
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 3
 
@@ -89,7 +92,10 @@ class TradingBot:
         # Cache for last decision data
         self.last_decision_data = {}
         self.last_candle_data = {}
-        
+
+        # Limit order tracking (only 1 active order per ticker)
+        self.active_limit_order = None  # {'order_id': str, 'timestamp': float, 'side': str, 'price': float}
+
         logging.info("="*60)
         logging.info(f"Bot V2 initialized with Trade Logger: {self.base_id}")
         logging.info(f"TP: {config.TP_PCT*100:.2f}% | TSL: {config.TSL_PCT*100:.2f}%")
@@ -205,10 +211,13 @@ class TradingBot:
             side = position['side']  # "Long" or "Short"
             entry_price = position['entryPrice']
             size = position['size']
+            stop_loss = position.get('stopLoss', 0.0)
+            take_profit = position.get('takeProfit', 0.0)
 
             logging.warning("="*60)
             logging.warning(f"⚠️  EPHEMERAL RECOVERY: Detected {side} position on Bybit")
             logging.warning(f"    Entry: {entry_price:.4f} | Size: {size}")
+            logging.warning(f"    SL: {stop_loss:.4f} | TP: {take_profit:.4f}")
             logging.warning(f"    Reconstructing state from API...")
             logging.warning("="*60)
 
@@ -216,8 +225,8 @@ class TradingBot:
             self.state = {
                 'side': side,
                 'entry_price': entry_price,
-                'initial_tp': entry_price * (1 + self.config.TP_PCT) if side == "Long" else entry_price * (1 - self.config.TP_PCT),
-                'last_sl': 0.0,  # Will be set by first TSL update
+                'initial_tp': take_profit if take_profit > 0 else (entry_price * (1 + self.config.TP_PCT) if side == "Long" else entry_price * (1 - self.config.TP_PCT)),
+                'last_sl': stop_loss,  # Use actual SL from API
                 'partial_tp_taken': False,
                 'dynamic_tp_levels_taken': 0,
                 'highest_price': entry_price if side == "Long" else 0.0,
@@ -515,31 +524,40 @@ class TradingBot:
         
         # Execute partial close
         logging.warning(f"🎯 PARTIAL TP HIT at {current_price:.4f}")
-        
+
         qty = round(size / 2, 2)
         if qty <= 0:
             return
-        
+
         reduce_side = "Sell" if side == 'Long' else "Buy"
-        
+
         try:
-            self.adapter.market_close(self.config.TICKER, reduce_side, qty)
+            # Pass position_side for correct positionIdx in hedge mode
+            self.adapter.market_close(self.config.TICKER, reduce_side, qty, position_side=side)
             time.sleep(2)
-            
-            # Calculate partial P&L
+
+            # Get actual remaining size after partial close
+            updated_position = self.adapter.get_position(self.config.TICKER)
+            actual_remaining_size = updated_position.get('size', 0) if updated_position else 0
+            actual_qty_closed = size - actual_remaining_size
+
+            logging.info(f"Partial close: requested={qty}, actual_closed={actual_qty_closed}, remaining={actual_remaining_size}")
+
+            # Calculate partial P&L based on actual closed quantity
             if side == 'Long':
                 pnl_pct = (current_price / entry - 1) * 100
             else:
                 pnl_pct = (entry / current_price - 1) * 100
-            
-            pnl_usd = (self.config.TRADE_SIZE_USD * pnl_pct / 100) / 2  # Half position
-            
-            # Log partial TP event
+
+            pnl_usd = (self.config.TRADE_SIZE_USD * pnl_pct / 100) * (actual_qty_closed / size)
+
+            # Log partial TP event with ACTUAL quantities
             self.trade_logger.log_event("PARTIAL_TP", {
                 "trigger_price": float(partial_tp_price),
                 "exit_price": float(current_price),
-                "quantity_closed": float(qty),
-                "quantity_remaining": float(size - qty),
+                "quantity_requested": float(qty),
+                "quantity_closed": float(actual_qty_closed),
+                "quantity_remaining": float(actual_remaining_size),
                 "pnl_pct": float(pnl_pct),
                 "pnl_usd": float(pnl_usd),
                 "new_sl": float(entry),
@@ -573,8 +591,8 @@ class TradingBot:
             
             self.state['partial_tp_taken'] = True
             self._save_state()
-            
-            logging.info(f"✓ Partial TP executed. Remaining: {size - qty}")
+
+            logging.info(f"✓ Partial TP executed. Remaining: {actual_remaining_size} (requested close: {qty}, actual close: {actual_qty_closed})")
             
         except Exception as e:
             logging.error(f"Partial TP failed: {e}")
@@ -632,29 +650,38 @@ class TradingBot:
             return
         
         logging.warning(f"🎯 DYNAMIC TP LEVEL {next_level} HIT ({int(level_pct*100)}%) at {current_price:.4f}")
-        
+
         reduce_side = "Sell" if side == 'Long' else "Buy"
-        
+
         try:
-            self.adapter.market_close(self.config.TICKER, reduce_side, qty)
+            # Pass position_side for correct positionIdx in hedge mode
+            self.adapter.market_close(self.config.TICKER, reduce_side, qty, position_side=side)
             time.sleep(2)
-            
-            # Calculate partial P&L
+
+            # Get actual remaining size after partial close
+            updated_position = self.adapter.get_position(self.config.TICKER)
+            actual_remaining_size = updated_position.get('size', 0) if updated_position else 0
+            actual_qty_closed = size - actual_remaining_size
+
+            logging.info(f"Dynamic TP L{next_level}: requested={qty}, actual_closed={actual_qty_closed}, remaining={actual_remaining_size}")
+
+            # Calculate partial P&L based on actual closed quantity
             if side == 'Long':
                 pnl_pct = (current_price / entry - 1) * 100
             else:
                 pnl_pct = (entry / current_price - 1) * 100
-            
-            pnl_usd = (self.config.TRADE_SIZE_USD * pnl_pct / 100) * 0.25  # 25% of position
-            
-            # Log dynamic TP event
+
+            pnl_usd = (self.config.TRADE_SIZE_USD * pnl_pct / 100) * (actual_qty_closed / initial_size)
+
+            # Log dynamic TP event with ACTUAL quantities
             self.trade_logger.log_event(f"DYNAMIC_TP_L{next_level}", {
                 "level": next_level,
                 "level_percentage": int(level_pct * 100),
                 "trigger_price": float(level_price),
                 "exit_price": float(current_price),
-                "quantity_closed": float(qty),
-                "quantity_remaining": float(size - qty),
+                "quantity_requested": float(qty),
+                "quantity_closed": float(actual_qty_closed),
+                "quantity_remaining": float(actual_remaining_size),
                 "pnl_pct": float(pnl_pct),
                 "pnl_usd": float(pnl_usd),
                 "candle": self.last_candle_data
@@ -687,8 +714,8 @@ class TradingBot:
                     self.state['last_sl'] = entry
             
             self._save_state()
-            
-            logging.info(f"✓ Dynamic TP Level {next_level} executed. Remaining: {size - qty}")
+
+            logging.info(f"✓ Dynamic TP Level {next_level} executed. Remaining: {actual_remaining_size} (requested close: {qty}, actual close: {actual_qty_closed})")
             
         except Exception as e:
             logging.error(f"Dynamic TP Level {next_level} failed: {e}")
@@ -795,23 +822,76 @@ class TradingBot:
             current_price = self.adapter.latest_price(self.config.TICKER)
             if current_price == 0:
                 return
-            
+
             qty = round(self.config.TRADE_SIZE_USD / current_price, 2)
             if qty <= 0:
                 return
-            
+
             side_str = "Buy" if decision == "BUY" else "Sell"
             position_type = "LONG" if decision == "BUY" else "SHORT"
-            
+
+            # ========== LIMIT ORDER MODE ==========
+            if self.config.LIMIT_ORDER_MODE:
+                # Calculate limit price with offset
+                if decision == "BUY":
+                    # LONG: Buy cheaper (limit below current price)
+                    limit_price = current_price * (1 - self.config.LIMIT_OFFSET_PCT)
+                else:
+                    # SHORT: Sell higher (limit above current price)
+                    limit_price = current_price * (1 + self.config.LIMIT_OFFSET_PCT)
+
+                logging.warning(f"📋 Placing LIMIT order: {position_type}")
+                logging.warning(f"   Current: {current_price:.4f} | Limit: {limit_price:.4f} | Offset: {self.config.LIMIT_OFFSET_PCT*100:.2f}%")
+
+                # Start trade logging (will finalize after order fills)
+                self.trade_logger.start_trade(
+                    ticker=self.config.TICKER,
+                    side=position_type,
+                    decision_data=self.last_decision_data
+                )
+
+                # Place limit order
+                resp = self.adapter.limit_open(self.config.TICKER, side_str, qty, limit_price)
+                order_id = (resp.get("result") or {}).get("orderId")
+
+                if not order_id:
+                    logging.error("Failed to place limit order - no orderId returned")
+                    return
+
+                # Track active limit order
+                self.active_limit_order = {
+                    'order_id': order_id,
+                    'timestamp': time.time(),
+                    'side': position_type,
+                    'price': limit_price,
+                    'qty': qty,
+                    'decision': decision
+                }
+
+                # Log event
+                self.trade_logger.log_event("LIMIT_ORDER_PLACED", {
+                    "order_id": order_id,
+                    "order_type": "LIMIT",
+                    "limit_price": float(limit_price),
+                    "current_price": float(current_price),
+                    "quantity": float(qty),
+                    "side": position_type,
+                    "max_wait_seconds": self.config.MAX_WAITING_LIMIT_ORDER
+                })
+
+                logging.info(f"✓ Limit order placed: {order_id} | Wait max {self.config.MAX_WAITING_LIMIT_ORDER}s")
+                return  # Exit - will check order status in run_cycle()
+
+            # ========== MARKET ORDER MODE (original logic) ==========
             logging.warning(f"🚀 Opening {position_type}: {qty} @ ~{current_price:.4f}")
-            
+
             # Start trade logging
             self.trade_logger.start_trade(
                 ticker=self.config.TICKER,
                 side=position_type,
                 decision_data=self.last_decision_data
             )
-            
+
             # Execute
             self.adapter.market_open(self.config.TICKER, side_str, qty)
             time.sleep(self.config.RETRY_DELAY)
@@ -888,27 +968,201 @@ class TradingBot:
                     "type": "ENTRY_FAILED",
                     "error": str(e)
                 })
-    
+
+    def _check_limit_order_status(self) -> bool:
+        """
+        Check status of active limit order.
+
+        Returns:
+            True if order is being processed (still waiting), False if completed/cancelled
+        """
+        if not self.active_limit_order:
+            return False
+
+        try:
+            order_id = self.active_limit_order['order_id']
+            order_timestamp = self.active_limit_order['timestamp']
+            elapsed = time.time() - order_timestamp
+            max_wait = self.config.MAX_WAITING_LIMIT_ORDER
+
+            # Check if order filled by querying position
+            position = self.adapter.get_position(self.config.TICKER)
+            if position:
+                # Position exists - order was filled!
+                logging.warning("="*60)
+                logging.warning(f"✅ LIMIT ORDER FILLED: {order_id}")
+                logging.warning(f"   Entry: {position['entryPrice']:.4f} | Size: {position['size']}")
+                logging.warning("="*60)
+
+                # Finalize entry - set SL/TP and save state
+                self._finalize_limit_order_entry(position)
+
+                # Clear limit order tracking
+                self.active_limit_order = None
+                return False  # Order completed
+
+            # Position doesn't exist - check timeout
+            if elapsed > max_wait:
+                logging.warning("="*60)
+                logging.warning(f"⏰ LIMIT ORDER TIMEOUT: {order_id}")
+                logging.warning(f"   Elapsed: {elapsed:.0f}s / {max_wait}s")
+                logging.warning(f"   Cancelling order...")
+                logging.warning("="*60)
+
+                # Cancel order
+                try:
+                    self.adapter.cancel_order(self.config.TICKER, order_id)
+                    logging.info(f"✓ Order cancelled: {order_id}")
+
+                    # Log event
+                    self.trade_logger.log_event("LIMIT_ORDER_CANCELLED", {
+                        "order_id": order_id,
+                        "reason": "TIMEOUT",
+                        "elapsed_seconds": elapsed,
+                        "max_wait_seconds": max_wait
+                    })
+
+                except Exception as e:
+                    logging.error(f"Failed to cancel order {order_id}: {e}")
+
+                # Clear limit order tracking
+                self.active_limit_order = None
+
+                # End trade logging (order didn't fill)
+                if self.trade_logger.current_trade:
+                    self.trade_logger.end_trade({
+                        "exit_reason": "LIMIT_ORDER_TIMEOUT",
+                        "final_balance": 0.0,
+                        "pnl": 0.0
+                    })
+
+                return False  # Order cancelled
+
+            # Still waiting
+            if int(elapsed) % 30 == 0:  # Log every 30s
+                logging.info(f"⏳ Waiting for limit order: {elapsed:.0f}s / {max_wait}s")
+
+            return True  # Still processing
+
+        except Exception as e:
+            logging.error(f"Error checking limit order status: {e}", exc_info=True)
+            return False
+
+    def _finalize_limit_order_entry(self, position: dict):
+        """
+        Finalize limit order entry after position is filled.
+        Sets SL/TP, saves state, logs entry event.
+        """
+        try:
+            actual_entry = position['entryPrice']
+            side = position['side']  # "Long" or "Short"
+            size = position['size']
+
+            decision = self.active_limit_order['decision']
+            qty = self.active_limit_order['qty']
+            side_str = "Buy" if decision == "BUY" else "Sell"
+            position_type = "LONG" if decision == "BUY" else "SHORT"
+
+            logging.info(f"Finalizing {position_type} entry @ {actual_entry:.4f}")
+
+            # Calculate SL/TP
+            if decision == "BUY":
+                sl = actual_entry * (1 - self.config.TSL_PCT)
+                tp = actual_entry * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+                highest = actual_entry
+                lowest = 999999
+            else:
+                sl = actual_entry * (1 + self.config.TSL_PCT)
+                tp = actual_entry * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+                highest = 999999
+                lowest = actual_entry
+
+            # Set SL
+            position_side = side_str
+            self.adapter.set_stop_loss(self.config.TICKER, sl, position_side)
+
+            # Set TP
+            if tp > 0:
+                self.adapter.set_take_profit(self.config.TICKER, tp, position_side)
+
+            # Log entry event
+            self.trade_logger.log_event("ENTRY", {
+                "order_type": "LIMIT",
+                "entry_price": float(actual_entry),
+                "quantity": float(size),
+                "sl_price": float(sl),
+                "tp_price": float(tp) if tp > 0 else None,
+                "leverage": self.config.LEVERAGE,
+                "candle": self.last_candle_data
+            })
+
+            # Log indicators
+            if 'top_indicators' in self.last_decision_data:
+                self.trade_logger.log_indicators(
+                    indicators=self.last_decision_data['top_indicators'],
+                    model_probas={
+                        'proba_buy': self.last_decision_data['proba_buy'],
+                        'proba_sell': self.last_decision_data['proba_sell']
+                    }
+                )
+
+            # Save state
+            self.state = {
+                'side': position_type.capitalize(),
+                'entry_price': actual_entry,
+                'initial_tp': tp,
+                'original_qty': qty,
+                'initial_size': self.config.TRADE_SIZE_USD,
+                'partial_tp_taken': False,
+                'dynamic_tp_levels_taken': 0,
+                'last_sl': sl,
+                'highest_price': highest,
+                'lowest_price': lowest
+            }
+            self._save_state()
+
+            tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
+            logging.warning(f"✓ Position finalized | SL: {sl:.4f} | TP: {tp_display}")
+
+        except Exception as e:
+            logging.error(f"Failed to finalize limit order entry: {e}", exc_info=True)
+
     def run_cycle(self):
         """Execute one cycle"""
         logging.info("="*60)
         logging.info(f"Cycle start: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logging.info("="*60)
-        
+
         try:
+            # ========== LIMIT ORDER MODE: Check pending order first ==========
+            if self.config.LIMIT_ORDER_MODE and self.active_limit_order:
+                # Check if limit order filled or timeout
+                still_waiting = self._check_limit_order_status()
+
+                if still_waiting:
+                    # Order still pending - skip new signals
+                    logging.info("Limit order pending - skipping new signals this cycle")
+                    return
+                # If not still_waiting, order was filled or cancelled - continue normally
+
             # Always get decision to log model probabilities
             decision = self.get_decision()
-            
+
             # Manage existing position
             if self._manage_position():
                 return
-            
-            # Open new position if signal and no position
+
+            # Open new position if signal and no position (and no active limit order)
             if decision in ["BUY", "SELL"]:
+                # Safety check: Don't place new limit order if one already exists
+                if self.config.LIMIT_ORDER_MODE and self.active_limit_order:
+                    logging.warning("⚠️ Skipping new signal - limit order already active")
+                    return
+
                 self._open_position(decision)
             elif decision == "HOLD":
                 logging.info("No signal. Holding...")
-            
+
         except Exception as e:
             logging.error(f"Cycle error: {e}", exc_info=True)
     
@@ -962,7 +1216,10 @@ def launch_bot(args):
     config.PARTIAL_TP_ENABLED = args.partial_tp
     config.DYNAMIC_TP_ENABLED = getattr(args, 'dynamic_tp', False)
     config.HEDGE_MODE = getattr(args, 'hedge_mode', False)
-    
+    config.LIMIT_ORDER_MODE = getattr(args, 'limit_order', False)
+    config.MAX_WAITING_LIMIT_ORDER = getattr(args, 'max_waiting_limit_order', 300)
+    config.LIMIT_OFFSET_PCT = getattr(args, 'limit_offset_pct', 0.005)
+
     version = getattr(args, 'version', 'v1.0')
     
     if config.PARTIAL_TP_ENABLED and config.DYNAMIC_TP_ENABLED:
@@ -988,6 +1245,12 @@ def launch_bot(args):
         print(f"Partial/Dynamic:   OFF")
     
     print(f"Position Mode:     {'HEDGE (Long=1, Short=2)' if config.HEDGE_MODE else 'ONE-WAY (Idx=0)'}")
+
+    if config.LIMIT_ORDER_MODE:
+        print(f"Order Type:        LIMIT (offset: {config.LIMIT_OFFSET_PCT*100:.2f}%, timeout: {config.MAX_WAITING_LIMIT_ORDER}s)")
+    else:
+        print(f"Order Type:        MARKET")
+
     print(f"")
     print(f"Logs directory:    logs/")
     print(f"  - Trade JSONs:   logs/trades/")
@@ -1020,5 +1283,11 @@ if __name__ == "__main__":
                         help='Enable new dynamic TP mechanism (25%% at each of 4 levels: 25%%, 50%%, 75%%, 100%%)')
     parser.add_argument('--hedge-mode', action='store_true',
                         help='Enable Hedge Mode (positionIdx: 1=Long, 2=Short). Default is One-Way Mode (positionIdx: 0).')
-    
+    parser.add_argument('--limit-order', action='store_true',
+                        help='Use limit orders instead of market orders')
+    parser.add_argument('--limit-offset-pct', type=float, default=0.005,
+                        help='Price offset for limit orders (default: 0.005 = 0.5%%)')
+    parser.add_argument('--max-waiting-limit-order', type=int, default=300,
+                        help='Maximum seconds to wait for limit order execution before cancelling (default: 300)')
+
     launch_bot(parser.parse_args())
