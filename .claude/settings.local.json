@@ -1,17 +1,13 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python main.py --backtest )",
-      "Bash(awk '{print $9, $5}')",
-      "Bash(python build_modules.py)",
-      "Bash(awk '{print $9, \"\"\"\"(\"\"\"\"$5\"\"\"\" bytes)\"\"\"\"}')",
-      "Bash(awk -F',' 'NR>1 {sum+=$9; count++; if($9>0) wins++; else losses++; if($9>max) max=$9; if($9<min||min==0) min=$9} END {print \"\"Total trades:\"\", count; print \"\"Wins:\"\", wins, \"\"Losses:\"\", losses; print \"\"Best trade:\"\", max\"\"%\"\"; print \"\"Worst trade:\"\", min\"\"%\"\"}' /Users/lukasz/projects/adaptive-bot/price_action/models/v1.1/backtests/SOLUSDT_15m_plus_1h_4h_1D_long_short_combined_trades.csv)",
-      "WebSearch",
-      "WebFetch(domain:bybit-exchange.github.io)",
-      "Bash(python main.py --help)",
-      "Bash(python -m py_compile bot.py)",
-      "Bash(python -m py_compile bybit_adapter.py)",
-      "Bash(docker compose build --no-cache)"
+      "Bash(timeout 120 python test_feature_cache.py)",
+      "Bash(python -c \"\nfrom data_preparer_pa import fetch_and_prepare_data\nimport pandas as pd\n\n# Simple test\ndf = fetch_and_prepare_data(\n    ticker=''''SOLUSDT'''',\n    timeframe=''''15'''',\n    limit=100,\n    helper_timeframes=[],\n    side=''''long'''',\n    skip_slow_features=True\n)\n\nprint(''''Success! Test passed'''')\n\")",
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(cat:*)",
+      "Bash(chmod:*)",
+      "Bash(docker compose:*)"
     ],
     "deny": [],
     "ask": []

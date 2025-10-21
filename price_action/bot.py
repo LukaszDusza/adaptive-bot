@@ -24,6 +24,8 @@ from dotenv import load_dotenv
 from bybit_adapter import BybitAdapter, BybitAPIError
 from data_preparer_pa import fetch_and_prepare_data
 from trade_logger import TradeLogger
+from prediction_logger import PredictionLogger
+from feature_cache import FeatureCache
 
 # Logging setup
 logging.basicConfig(
@@ -55,6 +57,7 @@ class BotConfig:
     LIMIT_ORDER_MODE: bool = False  # Use limit orders instead of market orders
     MAX_WAITING_LIMIT_ORDER: int = 300  # Seconds to wait for limit order execution before cancelling
     LIMIT_OFFSET_PCT: float = 0.005  # Price offset for limit orders (0.5% default)
+    PROTECT_PROFIT_ENABLED: bool = False  # Enable profit protection: move SL to BE if profit peaks >0.25% but declines
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 3
 
@@ -81,7 +84,14 @@ class TradingBot:
         
         # Initialize trade logger
         self.trade_logger = TradeLogger(base_dir="logs")
-        
+
+        # Initialize prediction logger
+        self.prediction_logger = PredictionLogger(
+            strategy_id=self.base_id,
+            log_base_dir="/app/prediction_logs",
+            container_name=os.getenv('CONTAINER_NAME', 'unknown')
+        )
+
         # Restore trade logging if position was active before restart
         self._restore_trade_logging_if_needed()
 
@@ -95,6 +105,9 @@ class TradingBot:
 
         # Limit order tracking (only 1 active order per ticker)
         self.active_limit_order = None  # {'order_id': str, 'timestamp': float, 'side': str, 'price': float}
+
+        # PERFORMANCE: Feature cache for incremental updates
+        self.feature_cache = FeatureCache(window_size=self.config.CANDLES_FOR_FEATURES)
 
         logging.info("="*60)
         logging.info(f"Bot V2 initialized with Trade Logger: {self.base_id}")
@@ -272,15 +285,16 @@ class TradingBot:
                 logging.info(f"📥 Fetching market data for {self.config.TICKER}...")
                 # Combine all model features for preservation
                 all_model_features = list(set(self.features_long + self.features_short))
-                
-                df = fetch_and_prepare_data(
+
+                # PERFORMANCE: Use feature cache for incremental updates
+                df = self.feature_cache.get_features(
                     ticker=self.config.TICKER,
                     timeframe=self.config.TIMEFRAME,
-                    limit=self.config.CANDLES_FOR_FEATURES,
                     helper_timeframes=self.config.HELPER_TIMEFRAMES,
                     side='backtest',
                     version=self.version,
-                    model_features_to_preserve=all_model_features
+                    model_features_to_preserve=all_model_features,
+                    skip_slow_features=False  # v1.2 models need pivot S/R features (nearest_resistance_strength, etc.)
                 )
                 logging.info(f"✓ Data fetched successfully ({len(df)} candles)")
             
@@ -348,7 +362,7 @@ class TradingBot:
                     logging.warning(f"⚠️  SELL signal rejected: insufficient confidence gap ({proba_diff:.3f} < {self.config.MIN_PROBA_DIFF:.3f})")
             
             logging.info(f"🎯 Model Decision: {decision}")
-            
+
             # Cache decision data for later use
             self.last_decision_data = {
                 "decision": decision,
@@ -357,7 +371,7 @@ class TradingBot:
                 "threshold": self.config.PROBABILITY_THRESHOLD,
                 "candle_close_time": last_row.name.isoformat() if hasattr(last_row.name, 'isoformat') else str(last_row.name)
             }
-            
+
             # Cache candle data
             self.last_candle_data = {
                 'timestamp': last_row.name.isoformat() if hasattr(last_row.name, 'isoformat') else str(last_row.name),
@@ -368,6 +382,19 @@ class TradingBot:
                 'volume': float(last_row['volume']),
                 'turnover': float(last_row.get('turnover', 0))
             }
+
+            # Log prediction to CSV (for visualization)
+            try:
+                self.prediction_logger.log_prediction(
+                    candle=last_row,
+                    buy_prob=proba_buy,
+                    sell_prob=proba_sell,
+                    threshold=self.config.PROBABILITY_THRESHOLD,
+                    min_proba_diff=self.config.MIN_PROBA_DIFF,
+                    decision=decision
+                )
+            except Exception as e:
+                logging.warning(f"⚠️  Failed to log prediction: {e}")
             
             # Log candle data (even without position)
             position_data = None
@@ -477,7 +504,124 @@ class TradingBot:
                             "type": "TSL_UPDATE_FAILED",
                             "error": str(e)
                         })
-    
+
+    def _check_profit_protection(self, position: Dict, current_price: float):
+        """
+        Protect profit by moving SL to breakeven if profit peaks above threshold
+        but starts declining before hitting partial TP.
+
+        This prevents situations where price reaches good profit (e.g., 0.32%)
+        but reverses before hitting partial TP, potentially resulting in a loss.
+        """
+        if not self.config.PROTECT_PROFIT_ENABLED:
+            return
+
+        # Only activate if partial TP not yet taken (old mechanism)
+        if self.config.PARTIAL_TP_ENABLED and self.state.get('partial_tp_taken', False):
+            return
+
+        # Only activate if no dynamic TP levels taken yet (new mechanism)
+        if self.config.DYNAMIC_TP_ENABLED and self.state.get('dynamic_tp_levels_taken', 0) > 0:
+            return
+
+        side = position.get('side')
+        entry = position.get('entryPrice', 0)
+
+        if entry == 0:
+            return
+
+        # Calculate current profit percentage
+        if side == 'Long':
+            profit_pct = (current_price / entry - 1) * 100
+        else:
+            profit_pct = (entry / current_price - 1) * 100
+
+        # Track highest profit achieved (initialize if not exists)
+        if 'highest_profit_pct' not in self.state:
+            self.state['highest_profit_pct'] = profit_pct
+
+        # Update highest profit if current is higher
+        if profit_pct > self.state['highest_profit_pct']:
+            self.state['highest_profit_pct'] = profit_pct
+            self._save_state()
+
+        # Protection thresholds
+        PROFIT_THRESHOLD = 0.25  # Minimum profit to activate protection (0.25%)
+        PROFIT_DECLINE_TRIGGER = 0.25  # If profit drops to this level, move SL to BE (0.25%)
+
+        # If highest profit was above threshold (e.g., 0.32%) but now declined to trigger level (0.25%)
+        if (self.state['highest_profit_pct'] > PROFIT_THRESHOLD and
+            profit_pct <= PROFIT_DECLINE_TRIGGER):
+
+            # Move SL to breakeven if not already there
+            last_sl = self.state.get('last_sl', 0)
+
+            if side == 'Long':
+                if last_sl < entry:
+                    logging.warning(
+                        f"🛡️ PROFIT PROTECTION: Moving SL to breakeven "
+                        f"(profit peaked at {self.state['highest_profit_pct']:.2f}%, now at {profit_pct:.2f}%)"
+                    )
+
+                    try:
+                        self.adapter.set_stop_loss(self.config.TICKER, entry, "Buy")
+
+                        # Log event
+                        self.trade_logger.log_event("PROFIT_PROTECTION", {
+                            "peak_profit_pct": float(self.state['highest_profit_pct']),
+                            "current_profit_pct": float(profit_pct),
+                            "old_sl": float(last_sl),
+                            "new_sl": float(entry),
+                            "current_price": float(current_price),
+                            "reason": "profit_declined_before_partial_tp",
+                            "candle": self.last_candle_data
+                        })
+
+                        self.state['last_sl'] = entry
+                        self._save_state()
+
+                        logging.info(f"✓ Profit protection activated: SL moved to {entry:.4f}")
+
+                    except Exception as e:
+                        logging.error(f"Failed to activate profit protection: {e}")
+                        self.trade_logger.log_event("ERROR", {
+                            "type": "PROFIT_PROTECTION_FAILED",
+                            "error": str(e)
+                        })
+
+            else:  # Short
+                if last_sl > entry or last_sl == 0:
+                    logging.warning(
+                        f"🛡️ PROFIT PROTECTION: Moving SL to breakeven "
+                        f"(profit peaked at {self.state['highest_profit_pct']:.2f}%, now at {profit_pct:.2f}%)"
+                    )
+
+                    try:
+                        self.adapter.set_stop_loss(self.config.TICKER, entry, "Sell")
+
+                        # Log event
+                        self.trade_logger.log_event("PROFIT_PROTECTION", {
+                            "peak_profit_pct": float(self.state['highest_profit_pct']),
+                            "current_profit_pct": float(profit_pct),
+                            "old_sl": float(last_sl),
+                            "new_sl": float(entry),
+                            "current_price": float(current_price),
+                            "reason": "profit_declined_before_partial_tp",
+                            "candle": self.last_candle_data
+                        })
+
+                        self.state['last_sl'] = entry
+                        self._save_state()
+
+                        logging.info(f"✓ Profit protection activated: SL moved to {entry:.4f}")
+
+                    except Exception as e:
+                        logging.error(f"Failed to activate profit protection: {e}")
+                        self.trade_logger.log_event("ERROR", {
+                            "type": "PROFIT_PROTECTION_FAILED",
+                            "error": str(e)
+                        })
+
     def _handle_partial_tp(self, position: Dict, current_price: float):
         """Handle partial TP with breakeven (old mechanism) or dynamic TP (new mechanism)"""
         # Validate mutual exclusivity
@@ -521,11 +665,19 @@ class TradingBot:
         
         if not hit:
             return
-        
+
         # Execute partial close
         logging.warning(f"🎯 PARTIAL TP HIT at {current_price:.4f}")
 
-        qty = round(size / 2, 2)
+        # Use adapter's round_qty for ticker-specific precision
+        qty = self.adapter.round_qty(self.config.TICKER, size / 2)
+
+        # Validate against minimum order quantity
+        min_qty = self.adapter.get_min_order_qty(self.config.TICKER)
+        if qty < min_qty:
+            logging.warning(f"Calculated qty {qty:.4f} < minOrderQty {min_qty:.4f}, closing entire position instead")
+            qty = size
+
         if qty <= 0:
             return
 
@@ -641,15 +793,35 @@ class TradingBot:
         
         if not hit:
             return
-        
-        # Execute partial close (25% of initial size)
+
+        # Execute partial close
         initial_size = self.state.get('initial_size', size)
-        qty = round(initial_size * 0.25, 2)
-        
+
+        # CRITICAL FIX: Level 4 must close ALL remaining to avoid rounding errors
+        if next_level == 4:
+            # Close entire remaining position
+            qty = size
+            logging.warning(f"🎯 DYNAMIC TP LEVEL 4 HIT (100%) - CLOSING ALL REMAINING at {current_price:.4f}")
+        else:
+            # Levels 1-3: close 25% of initial size with proper rounding
+            qty = self.adapter.round_qty(self.config.TICKER, initial_size * 0.25)
+
+            # Validate against minimum order quantity
+            min_qty = self.adapter.get_min_order_qty(self.config.TICKER)
+            if qty < min_qty:
+                logging.warning(f"Calculated qty {qty:.4f} < minOrderQty {min_qty:.4f}, closing entire position instead")
+                qty = size
+
+            # Ensure we don't try to close more than current position
+            if qty > size:
+                logging.warning(f"Calculated qty {qty:.4f} > current size {size:.4f}, adjusting to {size:.4f}")
+                qty = size
+
+            logging.warning(f"🎯 DYNAMIC TP LEVEL {next_level} HIT ({int(level_pct*100)}%) at {current_price:.4f}")
+
         if qty <= 0:
+            logging.error(f"Invalid qty={qty} for Dynamic TP Level {next_level}, skipping")
             return
-        
-        logging.warning(f"🎯 DYNAMIC TP LEVEL {next_level} HIT ({int(level_pct*100)}%) at {current_price:.4f}")
 
         reduce_side = "Sell" if side == 'Long' else "Buy"
 
@@ -775,7 +947,36 @@ class TradingBot:
             entry = position.get('entryPrice', 0)
             size = position.get('size', 0)
             current_price = self.adapter.latest_price(self.config.TICKER)
-            
+
+            # DUST POSITION CLEANUP: Check if position is too small to close normally
+            min_qty = self.adapter.get_min_order_qty(self.config.TICKER)
+            if size > 0 and size < min_qty:
+                logging.warning(
+                    f"DUST POSITION DETECTED: {size:.4f} < minOrderQty {min_qty:.4f}. "
+                    f"Attempting to close entire position."
+                )
+                try:
+                    reduce_side = "Sell" if side == 'Long' else "Buy"
+                    # Try to close with actual position size
+                    # Bybit may accept closing existing position even if size < minOrderQty
+                    self.adapter.market_close(self.config.TICKER, reduce_side, size, position_side=side)
+                    time.sleep(2)
+
+                    # Log dust cleanup
+                    if self.trade_logger.current_trade:
+                        self.trade_logger.log_event("DUST_CLEANUP", {
+                            "size": float(size),
+                            "min_qty": float(min_qty),
+                            "side": side,
+                            "price": float(current_price),
+                            "reason": "position_too_small_after_partial_closes"
+                        })
+
+                    logging.info(f"Dust position cleanup attempted for {size:.4f} {self.config.TICKER}")
+                except Exception as e:
+                    logging.error(f"Failed to close dust position: {e}")
+                    # Continue execution - don't crash bot
+
             if current_price == 0:
                 return True
             
@@ -799,10 +1000,13 @@ class TradingBot:
             }
             
             self.trade_logger.log_candle(self.last_candle_data, position_data)
-            
+
+            # Check profit protection (BEFORE partial TP)
+            self._check_profit_protection(position, current_price)
+
             # Handle partial TP
             self._handle_partial_tp(position, current_price)
-            
+
             # Update TSL
             self._update_tsl(position, current_price)
             
@@ -1219,6 +1423,7 @@ def launch_bot(args):
     config.LIMIT_ORDER_MODE = getattr(args, 'limit_order', False)
     config.MAX_WAITING_LIMIT_ORDER = getattr(args, 'max_waiting_limit_order', 300)
     config.LIMIT_OFFSET_PCT = getattr(args, 'limit_offset_pct', 0.005)
+    config.PROTECT_PROFIT_ENABLED = getattr(args, 'protect_profit', False)
 
     version = getattr(args, 'version', 'v1.0')
     
@@ -1250,6 +1455,8 @@ def launch_bot(args):
         print(f"Order Type:        LIMIT (offset: {config.LIMIT_OFFSET_PCT*100:.2f}%, timeout: {config.MAX_WAITING_LIMIT_ORDER}s)")
     else:
         print(f"Order Type:        MARKET")
+
+    print(f"Profit Protection: {'ON (BE if profit peaks >0.25% then declines)' if config.PROTECT_PROFIT_ENABLED else 'OFF'}")
 
     print(f"")
     print(f"Logs directory:    logs/")
@@ -1289,5 +1496,7 @@ if __name__ == "__main__":
                         help='Price offset for limit orders (default: 0.005 = 0.5%%)')
     parser.add_argument('--max-waiting-limit-order', type=int, default=300,
                         help='Maximum seconds to wait for limit order execution before cancelling (default: 300)')
+    parser.add_argument('--protect-profit', action='store_true',
+                        help='Enable profit protection: move SL to breakeven if profit peaks >0.25%% but declines before hitting partial TP')
 
     launch_bot(parser.parse_args())

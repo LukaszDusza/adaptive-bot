@@ -27,8 +27,10 @@ def main():
     parser.add_argument('--model-trials', type=int, default=100)
 
     parser.add_argument('--limit', type=int, default=3000, help="Liczba świec do pobrania.")
-    parser.add_argument('--date-from', type=str, default=None, 
+    parser.add_argument('--date-from', type=str, default=None,
                         help="Data końcowa dla danych treningowych (YYYY-MM-DD). Jeśli podana, dane będą pobrane wstecz od tej daty.")
+    parser.add_argument('--fetch-max-history', action='store_true',
+                        help="Fetch MAXIMUM available history from Bybit API (ignores --limit parameter)")
     parser.add_argument('--prob-threshold', type=float, default=0.8)
     parser.add_argument('--min-proba-diff', type=float, default=0.0,
                         help="Minimum probability difference between BUY and SELL (confidence gap)")
@@ -48,6 +50,8 @@ def main():
                         help='Maximum seconds to wait for limit order execution before cancelling (default: 300s = 5min)')
     parser.add_argument('--limit-offset-pct', type=float, default=0.005,
                         help='Price offset for limit orders as percentage (default: 0.005 = 0.5%%). LONG: -offset (buy cheaper), SHORT: +offset (sell higher)')
+    parser.add_argument('--protect-profit', action='store_true',
+                        help='Enable profit protection: move SL to breakeven if profit peaks >0.25%% but declines before hitting partial TP')
 
     args = parser.parse_args()
 
@@ -63,7 +67,8 @@ def main():
         print_header(f"Trening modelu: {args.side.upper()}")
         df_features = fetch_and_prepare_data(ticker=args.ticker, timeframe=args.timeframe, limit=args.limit,
                                              helper_timeframes=args.helper_timeframes, side=args.side,
-                                             date_from=args.date_from, version=args.version)
+                                             date_from=args.date_from, version=args.version,
+                                             fetch_max_history=args.fetch_max_history)
         if not df_features.empty:
             run_training_pipeline(df_features=df_features, n_label_trials=args.label_trials,
                                   n_model_trials=args.model_trials,

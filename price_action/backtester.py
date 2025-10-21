@@ -391,7 +391,7 @@ class BacktestEngine:
         logging.info(f"NEW POSITION: {side} @ {entry_price_with_slippage:.4f}, "
                     f"SL: {stop_loss:.4f}, TP: {take_profit:.4f}, Prob: {probability:.3f}")
     
-    def run(self, df: pd.DataFrame, 
+    def run(self, df: pd.DataFrame,
             model_long, scaler_long, features_long,
             model_short, scaler_short, features_short,
             prob_threshold: float,
@@ -401,9 +401,10 @@ class BacktestEngine:
             tsl_pct: float,
             enable_partial_tp: bool,
             enable_dynamic_tp: bool = False,
+            enable_profit_protection: bool = False,
             min_proba_diff: float = 0.0) -> Dict:
         """Main backtest loop - NO LOOK-AHEAD BIAS"""
-        
+
         # Validate mutual exclusivity
         if enable_partial_tp and enable_dynamic_tp:
             raise ValueError("Cannot enable both --partial-tp and --dynamic-tp. Choose only one.")
@@ -413,9 +414,12 @@ class BacktestEngine:
             logging.info("Dynamic TP enabled: 4 levels at 25%, 50%, 75%, 100% from BE to TP")
         elif enable_partial_tp:
             logging.info("Partial TP enabled: 50% at halfway from BE to TP")
-        
+        if enable_profit_protection:
+            logging.info("Profit Protection enabled: move SL to BE if profit peaks >0.25% then declines")
+
         current_mae_pct = 0.0
         current_mfe_pct = 0.0
+        highest_profit_pct = 0.0  # Track peak profit for profit protection
         
         for i in range(1, len(df)):
             current_candle = df.iloc[i]
@@ -437,7 +441,50 @@ class BacktestEngine:
                 mae, mfe = self.calculate_mae_mfe(self.position, current_candle)
                 current_mae_pct = min(current_mae_pct, mae)
                 current_mfe_pct = max(current_mfe_pct, mfe)
-                
+
+                # ========== PROFIT PROTECTION ==========
+                if enable_profit_protection:
+                    # Only activate if partial TP not yet taken
+                    partial_tp_not_taken = (enable_partial_tp and not self.position.partial_tp_taken) or \
+                                          (enable_dynamic_tp and self.position.dynamic_tp_levels_taken == 0) or \
+                                          (not enable_partial_tp and not enable_dynamic_tp)
+
+                    if partial_tp_not_taken:
+                        # Calculate current profit percentage
+                        if self.position.side == 'Long':
+                            current_profit_pct = (current_candle['close'] / self.position.entry_price - 1) * 100
+                        else:
+                            current_profit_pct = (self.position.entry_price / current_candle['close'] - 1) * 100
+
+                        # Update highest profit if current is higher
+                        highest_profit_pct = max(highest_profit_pct, current_profit_pct)
+
+                        # Protection thresholds
+                        PROFIT_THRESHOLD = 0.25  # Minimum profit to activate protection (0.25%)
+                        PROFIT_DECLINE_TRIGGER = 0.25  # If profit drops to this level, move SL to BE
+
+                        # If profit peaked above threshold but now declined to trigger level
+                        if (highest_profit_pct > PROFIT_THRESHOLD and
+                            current_profit_pct <= PROFIT_DECLINE_TRIGGER):
+
+                            # Move SL to breakeven if not already there
+                            if self.position.side == 'Long':
+                                if self.position.stop_loss < self.position.entry_price:
+                                    logging.warning(
+                                        f"🛡️ PROFIT PROTECTION @ {current_candle.name}: "
+                                        f"Moving SL to BE (profit peaked at {highest_profit_pct:.2f}%, "
+                                        f"now at {current_profit_pct:.2f}%)"
+                                    )
+                                    self.position.stop_loss = self.position.entry_price
+                            else:  # Short
+                                if self.position.stop_loss > self.position.entry_price:
+                                    logging.warning(
+                                        f"🛡️ PROFIT PROTECTION @ {current_candle.name}: "
+                                        f"Moving SL to BE (profit peaked at {highest_profit_pct:.2f}%, "
+                                        f"now at {current_profit_pct:.2f}%)"
+                                    )
+                                    self.position.stop_loss = self.position.entry_price
+
                 # Check partial TP (old mechanism)
                 if enable_partial_tp:
                     partial_hit, partial_price = self.check_partial_tp(current_candle)
@@ -464,10 +511,21 @@ class BacktestEngine:
                         self.partial_tp_hit = True
                         self.partial_tp_time = current_candle.name
                         self.partial_tp_price = dynamic_price
-                        
-                        # Close 25% of initial position size
-                        size_to_close = self.position.initial_size * 0.25
-                        
+
+                        # CRITICAL FIX: Match live bot behavior
+                        # Level 4 closes ALL remaining to avoid rounding error accumulation
+                        if level == 4:
+                            size_to_close = self.position.current_size
+                            logging.info(f"Dynamic TP Level 4: closing ALL remaining {size_to_close:.4f}")
+                        else:
+                            # Levels 1-3: close 25% of initial with rounding (matches live bot)
+                            size_to_close = round(self.position.initial_size * 0.25, 2)
+
+                            # Validate: don't close more than current size
+                            if size_to_close > self.position.current_size:
+                                size_to_close = self.position.current_size
+                                logging.info(f"Dynamic TP L{level}: adjusted qty to current size {size_to_close:.4f}")
+
                         self.close_position(
                             exit_price=dynamic_price,
                             exit_time=current_candle.name,
@@ -572,6 +630,8 @@ class BacktestEngine:
                         tp_pct=tp_pct,
                         sl_pct=sl_pct
                     )
+                    # Reset profit protection tracking for new position
+                    highest_profit_pct = 0.0
         
         # Close any open position at end
         if self.position:
@@ -763,6 +823,7 @@ def main(args):
         tsl_pct=args.tsl_pct,
         enable_partial_tp=args.partial_tp,
         enable_dynamic_tp=args.dynamic_tp,
+        enable_profit_protection=getattr(args, 'protect_profit', False),
         min_proba_diff=args.min_proba_diff
     )
     
@@ -821,8 +882,10 @@ if __name__ == "__main__":
                         help='Enable old partial TP mechanism (50%% at halfway to TP)')
     parser.add_argument('--dynamic-tp', action='store_true',
                         help='Enable new dynamic TP mechanism (25%% at each of 4 levels: 25%%, 50%%, 75%%, 100%%)')
+    parser.add_argument('--protect-profit', action='store_true',
+                        help='Enable profit protection: move SL to breakeven if profit peaks >0.25%% but declines before hitting partial TP')
     parser.add_argument('--maker-fee', type=float, default=0.0002)
     parser.add_argument('--taker-fee', type=float, default=0.00055)
     parser.add_argument('--slippage-pct', type=float, default=0.0001)
-    
+
     main(parser.parse_args())

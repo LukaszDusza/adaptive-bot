@@ -148,8 +148,37 @@ class BybitAdapter:
             log.error(f"Nie udało się pobrać specyfikacji instrumentów: {e}", exc_info=True)
 
     def round_qty(self, symbol: str, qty: float) -> float:
-        # Always round to 1 decimal place for all tickers
-        return round(qty, 1)
+        """
+        Round quantity to ticker-specific precision based on qtyStep.
+
+        Examples:
+        - qtyStep=0.01 → 2 decimals (SOLUSDT, ETHUSDT)
+        - qtyStep=0.001 → 3 decimals (BTCUSDT)
+        - qtyStep=0.1 → 1 decimal
+        - qtyStep=1 → 0 decimals
+        """
+        step = self._lot_step.get(symbol, 0.01)  # Default 0.01 if not found
+
+        if step >= 1:
+            decimals = 0
+        else:
+            # Calculate decimals from step size
+            # 0.01 → 2, 0.001 → 3, 0.0001 → 4
+            decimals = abs(int(math.log10(step)))
+
+        return round(qty, decimals)
+
+    def get_min_order_qty(self, symbol: str) -> float:
+        """
+        Get minimum order quantity for ticker.
+        Returns qtyStep as a proxy for minOrderQty.
+
+        Typical values:
+        - SOLUSDT: 0.01
+        - BTCUSDT: 0.001
+        - ETHUSDT: 0.01
+        """
+        return self._lot_step.get(symbol, 0.01)
 
     def get_position_size(self, symbol: str) -> float:
         try:
@@ -172,18 +201,47 @@ class BybitAdapter:
         except ValueError as e:
             raise ValueError(f"Invalid date format: {date_str}. Expected YYYY-MM-DD. Error: {e}")
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int, end_date: str = None) -> List[List[Any]]:
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int, end_date: str = None, fetch_max: bool = False) -> List[List[Any]]:
+        """
+        Fetch OHLCV candle data from Bybit API.
+
+        Args:
+            symbol: Trading pair (e.g., SOLUSDT)
+            timeframe: Candle interval (e.g., 15m, 1h, 4h)
+            limit: Maximum number of candles to fetch
+            end_date: End date for data (YYYY-MM-DD). If provided, fetches backwards from this date.
+            fetch_max: If True, fetches ALL available history from Bybit (ignores limit)
+
+        Returns:
+            List of OHLCV candles (sorted chronologically, oldest first)
+        """
         sym = _norm_symbol(symbol)
         interval = _tf_to_interval(timeframe)
         step = _bar_ms(interval)
         out: List[List[Any]] = []
+
         # Use provided end_date or default to current time
         end = self._parse_end_date(end_date) if end_date else int(time.time() * 1000)
-        tries = 0
 
-        while len(out) < limit and tries < 20:
-            need = min(1000, limit - len(out))
+        # Track initial end for logging
+        initial_end = end
+
+        # For fetch_max, set limit to a very high number and increase max_empty_tries
+        effective_limit = 999999999 if fetch_max else limit
+        max_empty_tries = 50 if fetch_max else 20
+
+        tries = 0
+        consecutive_empty = 0
+        retries_with_backoff = 0
+        max_retries = 5
+
+        log.info(f"fetch_ohlcv: symbol={sym}, timeframe={timeframe}, limit={limit}, "
+                 f"end_date={end_date}, fetch_max={fetch_max}, effective_limit={effective_limit}")
+
+        while len(out) < effective_limit and consecutive_empty < max_empty_tries:
+            need = min(1000, effective_limit - len(out))  # Bybit API limit: 1000 candles per request
             start = end - need * step
+
             try:
                 resp = self.client.get_kline(
                     category=self.category,
@@ -194,34 +252,96 @@ class BybitAdapter:
                     limit=need,
                 )
             except InvalidRequestError as e:
-                raise BybitAPIError(f"fetch_ohlcv get_kline request error: {e}")
+                error_msg = str(e)
+
+                # Check for rate limit errors (10006 = rate limit exceeded)
+                if "10006" in error_msg or "rate limit" in error_msg.lower():
+                    if retries_with_backoff < max_retries:
+                        backoff_time = 2 ** retries_with_backoff  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                        log.warning(f"Rate limit hit! Backing off for {backoff_time}s (retry {retries_with_backoff+1}/{max_retries})")
+                        time.sleep(backoff_time)
+                        retries_with_backoff += 1
+                        continue
+                    else:
+                        raise BybitAPIError(f"Rate limit exceeded after {max_retries} retries: {e}")
+                else:
+                    raise BybitAPIError(f"fetch_ohlcv get_kline request error: {e}")
 
             if not isinstance(resp, dict) or str(resp.get("retCode")) not in ("0",):
-                raise BybitAPIError(f"fetch_ohlcv -> ret={resp}")
+                ret_code = resp.get("retCode") if isinstance(resp, dict) else "unknown"
+                ret_msg = resp.get("retMsg") if isinstance(resp, dict) else str(resp)
+
+                # Check for specific error codes
+                if ret_code == "10001":  # Invalid parameter
+                    log.error(f"Invalid parameter error: {ret_msg}")
+                    raise BybitAPIError(f"Invalid parameter: {ret_msg}")
+                elif ret_code == "10003":  # Invalid symbol
+                    log.error(f"Invalid symbol: {sym}")
+                    raise BybitAPIError(f"Invalid symbol: {sym}")
+                else:
+                    raise BybitAPIError(f"fetch_ohlcv -> retCode={ret_code}, retMsg={ret_msg}")
 
             data = (((resp.get("result") or {}).get("list")) or [])
+
             if not data:
+                consecutive_empty += 1
                 tries += 1
+
+                if consecutive_empty >= 3:
+                    # If we've hit 3 consecutive empty responses, we've likely reached the limit of available data
+                    log.info(f"Reached limit of available data after {consecutive_empty} empty responses. "
+                            f"Total candles fetched: {len(out)}")
+                    break
+
+                # Move back in time and try again
                 end = start
+                time.sleep(0.5)  # Longer sleep on empty response
                 continue
+
+            # Reset consecutive empty counter on successful fetch
+            consecutive_empty = 0
+            retries_with_backoff = 0
 
             try:
                 data_sorted = sorted(data, key=lambda r: int(r[0]))
             except Exception:
                 data_sorted = sorted(data, key=lambda r: int(r.get("start", 0)))
 
-            out.extend(data_sorted)
+            # Prepend older data to the beginning (we're fetching backwards in time)
+            out = data_sorted + out
+
+            # Move end pointer to before the oldest candle we just fetched
             end = int(data_sorted[0][0]) - step
             tries = 0
-            time.sleep(0.2)
 
-        if len(out) > limit:
+            # Log progress every 10k candles
+            if len(out) % 10000 == 0:
+                log.info(f"Progress: {len(out)} candles fetched...")
+
+            time.sleep(0.2)  # Rate limiting
+
+        # No need to reverse - we prepend older batches to the beginning, so list is already sorted oldest → newest
+
+        # If not fetch_max, trim to requested limit (keep most recent candles)
+        if not fetch_max and len(out) > limit:
             out = out[-limit:]
 
         if not out:
             log.warning(
                 f"fetch_ohlcv: pusta odpowiedź. symbol={sym}, interval={interval}, limit={limit}, base={self.base_url}"
             )
+        else:
+            # Calculate date range
+            from datetime import datetime
+            oldest_ts = int(out[0][0])
+            newest_ts = int(out[-1][0])
+            oldest_date = datetime.fromtimestamp(oldest_ts / 1000).strftime('%Y-%m-%d %H:%M:%S')
+            newest_date = datetime.fromtimestamp(newest_ts / 1000).strftime('%Y-%m-%d %H:%M:%S')
+
+            log.info(f"✓ Successfully fetched {len(out)} candles for {sym} {timeframe}")
+            log.info(f"  Date range: {oldest_date} → {newest_date}")
+            log.info(f"  Requested limit: {limit}, Fetched: {len(out)}")
+
         return out
 
     def get_balance(self, use_available: bool = False) -> float:

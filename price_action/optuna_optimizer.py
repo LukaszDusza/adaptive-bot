@@ -80,8 +80,9 @@ class BacktesterOptimizer:
                  risk_pct: float = 0.02,
                  enable_partial_tp: bool = True,
                  enable_dynamic_tp: bool = False,
+                 enable_profit_protection: bool = False,
                  version: str = 'v1.0'):
-        
+
         self.ticker = ticker
         self.timeframe = timeframe
         self.helper_timeframes = helper_timeframes
@@ -90,6 +91,7 @@ class BacktesterOptimizer:
         self.risk_pct = risk_pct
         self.enable_partial_tp = enable_partial_tp
         self.enable_dynamic_tp = enable_dynamic_tp
+        self.enable_profit_protection = enable_profit_protection
         self.version = version
         
         if self.enable_partial_tp and self.enable_dynamic_tp:
@@ -187,6 +189,7 @@ class BacktesterOptimizer:
                 tsl_pct=tsl_pct,
                 enable_partial_tp=self.enable_partial_tp,
                 enable_dynamic_tp=self.enable_dynamic_tp,
+                enable_profit_protection=self.enable_profit_protection,
                 min_proba_diff=min_proba_diff
             )
             
@@ -365,6 +368,8 @@ class BacktesterOptimizer:
             sl_pct=best_params['tp_pct'] * 0.5,
             tsl_pct=best_params['tsl_pct'],
             enable_partial_tp=self.enable_partial_tp,
+            enable_dynamic_tp=self.enable_dynamic_tp,
+            enable_profit_protection=self.enable_profit_protection,
             min_proba_diff=best_params['min_proba_diff']
         )
         
@@ -493,7 +498,9 @@ def main():
                         help='Enable old partial TP mechanism (50%% at halfway to TP)')
     parser.add_argument('--dynamic-tp', action='store_true',
                         help='Enable new dynamic TP mechanism (25%% at each of 4 levels: 25%%, 50%%, 75%%, 100%%)')
-    
+    parser.add_argument('--protect-profit', action='store_true',
+                        help='Enable profit protection: move SL to breakeven if profit peaks >0.25%% but declines before hitting partial TP')
+
     args = parser.parse_args()
     
     if args.partial_tp and args.dynamic_tp:
@@ -508,6 +515,7 @@ def main():
         risk_pct=args.risk_pct,
         enable_partial_tp=args.partial_tp,
         enable_dynamic_tp=args.dynamic_tp,
+        enable_profit_protection=args.protect_profit,
         version=args.version
     )
     

@@ -1,4 +1,4 @@
-FROM python:3.13
+FROM python:3.12
 
 WORKDIR /app
 
@@ -12,12 +12,14 @@ COPY bot.py .
 COPY bybit_adapter.py .
 COPY data_preparer_pa.py .
 COPY trade_logger.py .
+COPY prediction_logger.py .
+COPY feature_cache.py .
 
 # Copy ML models into the image (self-contained)
 # Models are read-only and don't change during runtime
 COPY models /app/models
 
-# Create directories for runtime data (logs, state)
-RUN mkdir -p logs bot_state
+# Create directories for runtime data (logs, state, prediction logs)
+RUN mkdir -p logs bot_state prediction_logs
 
 CMD ["python", "main.py", "--run-bot"]

@@ -16,25 +16,89 @@ NC='\033[0m' # No Color
 
 TICKER="SOLUSDT"
 TIMEFRAME="15m"
-HELPER_TIMEFRAMES="1h 4h"
+HELPER_TIMEFRAMES="1h 4h 1D"
 VERSION=""
 LIMIT_TRAIN=138240
 LIMIT_BACKTEST=8640 # trzy miesiace do tylu
 DATE_FROM="2025-05-31"
+FETCH_MAX_HISTORY="--fetch-max-history"  # Set to "--fetch-max-history" to fetch ALL available data, or "" to use LIMIT_TRAIN
 LABEL_TRIALS=100
 MODEL_TRIALS=100
-PROB_THRESHOLD=0.7
+PROB_THRESHOLD=0.54
 MIN_PROBA_DIFF=0.3
 TP_PCT=0.02
 TSL_PCT=0.014
 TRADE_SIZE=1000
 OPTUNA_TRIALS=100
 TP_MECHANISM="partial-tp"  # Options: "partial-tp" (50% at halfway) or "dynamic-tp" (25% at 4 levels)
+PROTECT_PROFIT=""  # Options: "" (disabled) or "--protect-profit" (enabled)
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  ML Trading Workflow${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
+
+# Function to auto-detect model parameters from directory structure
+auto_detect_model_params() {
+    local version=$1
+
+    if [ -z "$version" ]; then
+        echo -e "${RED}Version not specified for auto-detection${NC}"
+        return 1
+    fi
+
+    # Check if version directory exists
+    if [ ! -d "models/$version" ]; then
+        echo -e "${RED}Version directory does not exist: models/$version${NC}"
+        return 1
+    fi
+
+    # Find first model directory (either _long or _short)
+    local model_dir=$(ls -d models/$version/*_long 2>/dev/null | head -1)
+    if [ -z "$model_dir" ]; then
+        model_dir=$(ls -d models/$version/*_short 2>/dev/null | head -1)
+    fi
+
+    if [ -z "$model_dir" ]; then
+        echo -e "${YELLOW}No model directories found in models/$version/${NC}"
+        return 1
+    fi
+
+    # Extract directory name (e.g., SOLUSDT_15m_plus_1h_4h_1D_long)
+    local dir_name=$(basename "$model_dir")
+
+    # Parse: TICKER_TIMEFRAME_plus_HELPERS_SIDE
+    # Remove _long or _short suffix
+    local base_name="${dir_name%_long}"
+    base_name="${base_name%_short}"
+
+    # Extract TICKER (everything before first underscore followed by timeframe)
+    # Match pattern: TICKER_TF where TF is like 15m, 1h, 4h, 1D
+    if [[ $base_name =~ ^([A-Z]+)_([0-9]+[mhDW])(.*)$ ]]; then
+        TICKER="${BASH_REMATCH[1]}"
+        TIMEFRAME="${BASH_REMATCH[2]}"
+        local remainder="${BASH_REMATCH[3]}"
+
+        # Extract helper timeframes from "_plus_1h_4h_1D" part
+        if [[ $remainder =~ _plus_(.+)$ ]]; then
+            local helpers_str="${BASH_REMATCH[1]}"
+            # Replace underscores with spaces (1h_4h_1D -> 1h 4h 1D)
+            HELPER_TIMEFRAMES="${helpers_str//_/ }"
+        else
+            HELPER_TIMEFRAMES=""
+        fi
+
+        echo -e "${GREEN}✓ Auto-detected from model directory:${NC}"
+        echo "  Ticker: $TICKER"
+        echo "  Timeframe: $TIMEFRAME"
+        echo "  Helper Timeframes: ${HELPER_TIMEFRAMES:-none}"
+        echo ""
+        return 0
+    else
+        echo -e "${YELLOW}Could not parse model directory name: $dir_name${NC}"
+        return 1
+    fi
+}
 
 # Prompt for version at the beginning
 prompt_version() {
@@ -66,6 +130,9 @@ prompt_version() {
 
 echo -e "${YELLOW}Current Parameters:${NC}"
 echo "  VERSION: $VERSION (will be prompted)"
+echo "  DATE_FROM: $DATE_FROM"
+echo "  FETCH_MAX_HISTORY: ${FETCH_MAX_HISTORY:-disabled}"
+echo "  LIMIT_TRAIN: $LIMIT_TRAIN (ignored if FETCH_MAX_HISTORY enabled)"
 echo "  LABEL_TRIALS: $LABEL_TRIALS"
 echo "  MODEL_TRIALS: $MODEL_TRIALS"
 echo "  PROB_THRESHOLD: $PROB_THRESHOLD"
@@ -73,6 +140,7 @@ echo "  MIN_PROBA_DIFF: $MIN_PROBA_DIFF"
 echo "  TP_PCT: $TP_PCT"
 echo "  TSL_PCT: $TSL_PCT"
 echo "  TP_MECHANISM: $TP_MECHANISM"
+echo "  PROTECT_PROFIT: ${PROTECT_PROFIT:-disabled}"
 echo ""
 
 # Function to display menu
@@ -223,7 +291,8 @@ train_long() {
         --date-from "$DATE_FROM" \
         --label-trials $LABEL_TRIALS \
         --model-trials $MODEL_TRIALS \
-        --version "$VERSION"
+        --version "$VERSION" \
+        $FETCH_MAX_HISTORY
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ LONG model training completed successfully!${NC}"
@@ -282,7 +351,8 @@ train_short() {
         --date-from "$DATE_FROM" \
         --label-trials $LABEL_TRIALS \
         --model-trials $MODEL_TRIALS \
-        --version "$VERSION"
+        --version "$VERSION" \
+        $FETCH_MAX_HISTORY
 
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ SHORT model training completed successfully!${NC}"
@@ -304,19 +374,20 @@ run_analysis() {
         fi
     fi
 
-    # Prompt for ticker selection
-    if ! prompt_ticker; then
-        return
-    fi
+    # Auto-detect model parameters from version directory
+    if ! auto_detect_model_params "$VERSION"; then
+        echo -e "${YELLOW}Auto-detection failed. Please enter parameters manually.${NC}"
 
-    # Prompt for timeframe selection
-    if ! prompt_timeframe; then
-        return
-    fi
-
-    # Prompt for helper timeframes selection
-    if ! prompt_helper_timeframes; then
-        return
+        # Fallback to manual prompts
+        if ! prompt_ticker; then
+            return
+        fi
+        if ! prompt_timeframe; then
+            return
+        fi
+        if ! prompt_helper_timeframes; then
+            return
+        fi
     fi
 
     echo -e "${YELLOW}========================================${NC}"
@@ -329,7 +400,7 @@ run_analysis() {
         --side $side \
         --helper-timeframes $HELPER_TIMEFRAMES \
         --version "$VERSION"
-    
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Analysis completed successfully!${NC}"
     else
@@ -346,19 +417,20 @@ run_backtest() {
         fi
     fi
 
-    # Prompt for ticker selection
-    if ! prompt_ticker; then
-        return
-    fi
+    # Auto-detect model parameters from version directory
+    if ! auto_detect_model_params "$VERSION"; then
+        echo -e "${YELLOW}Auto-detection failed. Please enter parameters manually.${NC}"
 
-    # Prompt for timeframe selection
-    if ! prompt_timeframe; then
-        return
-    fi
-
-    # Prompt for helper timeframes selection
-    if ! prompt_helper_timeframes; then
-        return
+        # Fallback to manual prompts
+        if ! prompt_ticker; then
+            return
+        fi
+        if ! prompt_timeframe; then
+            return
+        fi
+        if ! prompt_helper_timeframes; then
+            return
+        fi
     fi
 
     echo -e "${YELLOW}========================================${NC}"
@@ -388,6 +460,28 @@ run_backtest() {
     esac
     echo ""
 
+    # Prompt for profit protection
+    echo -e "${GREEN}Enable Profit Protection?${NC}"
+    echo "Moves SL to breakeven if profit peaks >0.25% but declines before hitting partial TP"
+    echo ""
+    echo "1) No (disabled)"
+    echo "2) Yes (enabled)"
+    echo ""
+    read -p "Enter your choice [1-2]: " protect_choice
+    echo ""
+
+    case $protect_choice in
+        2)
+            PROTECT_PROFIT="--protect-profit"
+            echo -e "${GREEN}Selected: Profit Protection ENABLED${NC}"
+            ;;
+        *)
+            PROTECT_PROFIT=""
+            echo -e "${YELLOW}Selected: Profit Protection DISABLED${NC}"
+            ;;
+    esac
+    echo ""
+
     echo "Parameters:"
     echo "  - Version: $VERSION"
     echo "  - Probability Threshold: $PROB_THRESHOLD"
@@ -396,6 +490,7 @@ run_backtest() {
     echo "  - Trailing Stop Loss: ${TSL_PCT}%"
     echo "  - Trade Size: \$${TRADE_SIZE}"
     echo "  - TP Mechanism: $SELECTED_TP_MECHANISM"
+    echo "  - Profit Protection: ${PROTECT_PROFIT:-disabled}"
     echo ""
 
     python main.py \
@@ -410,7 +505,8 @@ run_backtest() {
         --tsl-pct $TSL_PCT \
         --trade-size $TRADE_SIZE \
         --version "$VERSION" \
-        --$SELECTED_TP_MECHANISM
+        --$SELECTED_TP_MECHANISM \
+        $PROTECT_PROFIT
     
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Backtest completed successfully!${NC}"
@@ -429,19 +525,20 @@ generate_report() {
         fi
     fi
 
-    # Prompt for ticker selection
-    if ! prompt_ticker; then
-        return
-    fi
+    # Auto-detect model parameters from version directory
+    if ! auto_detect_model_params "$VERSION"; then
+        echo -e "${YELLOW}Auto-detection failed. Please enter parameters manually.${NC}"
 
-    # Prompt for timeframe selection
-    if ! prompt_timeframe; then
-        return
-    fi
-
-    # Prompt for helper timeframes selection
-    if ! prompt_helper_timeframes; then
-        return
+        # Fallback to manual prompts
+        if ! prompt_ticker; then
+            return
+        fi
+        if ! prompt_timeframe; then
+            return
+        fi
+        if ! prompt_helper_timeframes; then
+            return
+        fi
     fi
 
     echo -e "${YELLOW}========================================${NC}"
@@ -454,7 +551,7 @@ generate_report() {
         --timeframe $TIMEFRAME \
         --helper-timeframes $HELPER_TIMEFRAMES \
         --version "$VERSION"
-    
+
     if [ $? -eq 0 ]; then
         echo -e "${GREEN}✓ Report generated successfully!${NC}"
         echo -e "${GREEN}  Check the reports/ directory${NC}"
@@ -465,21 +562,29 @@ generate_report() {
 
 # Function to optimize parameters with Optuna
 optimize_parameters() {
-    # Prompt for ticker selection
-    if ! prompt_ticker; then
-        return
+    # Prompt for version if not set
+    if [[ -z "$VERSION" ]]; then
+        if ! prompt_version; then
+            return
+        fi
     fi
 
-    # Prompt for timeframe selection
-    if ! prompt_timeframe; then
-        return
+    # Auto-detect model parameters from version directory
+    if ! auto_detect_model_params "$VERSION"; then
+        echo -e "${YELLOW}Auto-detection failed. Please enter parameters manually.${NC}"
+
+        # Fallback to manual prompts
+        if ! prompt_ticker; then
+            return
+        fi
+        if ! prompt_timeframe; then
+            return
+        fi
+        if ! prompt_helper_timeframes; then
+            return
+        fi
     fi
 
-    # Prompt for helper timeframes selection
-    if ! prompt_helper_timeframes; then
-        return
-    fi
-    
     echo -e "${YELLOW}========================================${NC}"
     echo -e "${YELLOW}Optimizing Parameters with Optuna${NC}"
     echo -e "${YELLOW}Multi-Objective Optimization${NC}"
@@ -535,10 +640,32 @@ optimize_parameters() {
             ;;
     esac
     echo ""
-    
+
+    # Prompt for profit protection
+    echo -e "${GREEN}Enable Profit Protection?${NC}"
+    echo "Moves SL to breakeven if profit peaks >0.25% but declines before hitting partial TP"
+    echo ""
+    echo "1) No (disabled)"
+    echo "2) Yes (enabled)"
+    echo ""
+    read -p "Enter your choice [1-2]: " protect_choice
+    echo ""
+
+    case $protect_choice in
+        2)
+            PROTECT_PROFIT="--protect-profit"
+            echo -e "${GREEN}Selected: Profit Protection ENABLED${NC}"
+            ;;
+        *)
+            PROTECT_PROFIT=""
+            echo -e "${YELLOW}Selected: Profit Protection DISABLED${NC}"
+            ;;
+    esac
+    echo ""
+
     echo "Number of trials: $OPTUNA_TRIALS"
     echo ""
-    
+
     read -p "Enter number of trials (default: $OPTUNA_TRIALS): " input_trials
     if [[ ! -z "$input_trials" ]]; then
         OPTUNA_TRIALS=$input_trials
@@ -553,9 +680,11 @@ optimize_parameters() {
         --ticker "$TICKER" \
         --timeframe "$TIMEFRAME" \
         --helper-timeframes $HELPER_TIMEFRAMES \
+        --version "$VERSION" \
         --limit $LIMIT_BACKTEST \
         --trials $OPTUNA_TRIALS \
-        --$SELECTED_TP_MECHANISM
+        --$SELECTED_TP_MECHANISM \
+        $PROTECT_PROFIT
     
     if [ $? -eq 0 ]; then
         echo ""
@@ -578,19 +707,42 @@ optimize_parameters() {
 
 # Function to automatically deploy optimized parameters
 auto_deploy_optimized_params() {
+    # Prompt for version if not set
+    if [[ -z "$VERSION" ]]; then
+        if ! prompt_version; then
+            return
+        fi
+    fi
+
+    # Auto-detect model parameters from version directory
+    if ! auto_detect_model_params "$VERSION"; then
+        echo -e "${YELLOW}Auto-detection failed. Please enter parameters manually.${NC}"
+
+        # Fallback to manual prompts
+        if ! prompt_ticker; then
+            return
+        fi
+        if ! prompt_timeframe; then
+            return
+        fi
+        if ! prompt_helper_timeframes; then
+            return
+        fi
+    fi
+
     echo -e "${BLUE}========================================${NC}"
     echo -e "${BLUE}🚀 Optimize & Auto-Deploy${NC}"
     echo -e "${BLUE}========================================${NC}"
     echo ""
     echo "This will:"
-    echo "  1. Run Optuna optimization"
+    echo "  1. Run Optuna optimization for $TICKER $TIMEFRAME (version: $VERSION)"
     echo "  2. Extract best parameters from results"
-    echo "  3. Update docker-compose.yaml for $TICKER"
+    echo "  3. Update docker-compose.yaml"
     echo "  4. Restart Docker container with new parameters"
     echo ""
     echo -e "${YELLOW}⚠️  Warning: This will modify docker-compose.yaml and restart containers!${NC}"
     echo ""
-    
+
     read -p "Do you want to continue? (y/n) " -n 1 -r
     echo ""
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
