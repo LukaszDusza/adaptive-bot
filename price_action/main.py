@@ -21,8 +21,12 @@ def main():
                         help="Wymagane dla --train: 'long' (BUY/HOLD) lub 'short' (SELL/HOLD).")
     parser.add_argument('--version', type=str, default='v1.0',
                         help="Wersja modelu (np. v1.0, v1.1, v2.0). Domyślnie: v1.0")
-    parser.add_argument('--label-trials', type=int, default=50)
-    parser.add_argument('--model-trials', type=int, default=100)
+    parser.add_argument('--label-trials', type=int, default=50,
+                        help="Label optimization trials. Label space jest prosty (tylko 2 params), więc 150-200 często wystarcza. Default: 50")
+    parser.add_argument('--model-trials', type=int, default=100,
+                        help="Model hyperparameter optimization trials. Higher values = better optimization ale dłuższy training. Default: 100")
+    parser.add_argument('--top-n-features', type=int, default=None,
+                        help="Feature pruning: zachowaj tylko top N features (ignores importance threshold). Zalecane: 60-80 dla SOLUSDT")
 
     parser.add_argument('--limit', type=int, default=3000, help="Liczba świec do pobrania.")
     parser.add_argument('--date-from', type=str, default=None,
@@ -71,7 +75,8 @@ def main():
             run_training_pipeline(df_features=df_features, n_label_trials=args.label_trials,
                                   n_model_trials=args.model_trials,
                                   ticker=args.ticker, timeframe=args.timeframe,
-                                  helper_timeframes=args.helper_timeframes, side=args.side, version=args.version)
+                                  helper_timeframes=args.helper_timeframes, side=args.side, version=args.version,
+                                  top_n_features=args.top_n_features)
 
     elif args.backtest:
         from backtester import run_backtester_with_args
@@ -91,5 +96,6 @@ def print_header(title):
 
 
 if __name__ == "__main__":
-    load_dotenv()
+    # Load .env_demo for training/backtesting (demo API for fetching historical data)
+    load_dotenv('.env_demo')
     main()

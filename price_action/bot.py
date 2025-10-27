@@ -235,12 +235,13 @@ class TradingBot:
         return None
 
     def _init_adapter(self):
-        load_dotenv()
+        # Load .env_demo as fallback (Docker containers use env_file in docker-compose.yaml)
+        load_dotenv('.env_demo')
         key = os.getenv("BYBIT_API_KEY")
         secret = os.getenv("BYBIT_API_SECRET")
         base_url = os.getenv("BYBIT_BASE_URL")
         if not key or not secret:
-            raise ValueError("Missing API keys in .env_demo")
+            raise ValueError("Missing API keys - ensure .env file is configured or env vars are set")
         return BybitAdapter(api_key=key, api_secret=secret, base_url=base_url, hedge_mode=self.config.HEDGE_MODE)
     
     def _get_strategy_id(self):

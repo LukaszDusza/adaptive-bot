@@ -16,6 +16,7 @@ risk under control and maintaining good risk-adjusted returns.
 import argparse
 import logging
 import os
+import warnings
 import optuna
 from optuna.visualization import (
     plot_pareto_front,
@@ -33,6 +34,9 @@ from typing import Dict, List
 from tqdm import tqdm
 from backtester import BacktestEngine, calculate_metrics
 from data_preparer_pa import fetch_and_prepare_data
+
+# Suppress Optuna experimental warnings for multivariate parameter
+warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning)
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -437,6 +441,7 @@ class BacktesterOptimizer:
         sampler = optuna.samplers.TPESampler(
             n_startup_trials=20,  # Random exploration first
             multivariate=True,    # Consider parameter correlations
+            warn_independent_sampling=False,  # Suppress warnings for dynamic search space
             seed=42               # Reproducible results
         )
 

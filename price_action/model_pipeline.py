@@ -5,6 +5,8 @@ import optuna
 import joblib
 import os
 import json
+import gc  # ENHANCEMENT #2: Explicit garbage collection
+import warnings
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, f1_score, fbeta_score, precision_recall_curve, precision_score, recall_score
@@ -14,9 +16,152 @@ from typing import Tuple, List
 # POPRAWKA #9: KS test dla feature drift monitoring
 from scipy.stats import ks_2samp
 
+# CRITICAL FIX #1: Import from data_preparer instead of duplicating (removes 113 lines)
+from data_preparer_pa import remove_correlated_features
+
+import logging
+import sys
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
+
+# Suppress Optuna experimental warnings for multivariate parameter
+warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning)
+
+# ============================================================================
+# ETAP 2.1: LOGGING INFRASTRUCTURE SETUP
+# ============================================================================
+
+def setup_logging(log_dir: str = "logs", module_name: str = "model_pipeline"):
+    """
+    Configure logging with file and console handlers.
+
+    ETAP 2.1: Professional logging setup:
+    - File handler: DEBUG+ to logs/training_YYYY-MM-DD_HH-MM-SS.log
+    - Console handler: WARNING+ (clean output for user)
+    - Rotating logs: 10 files × 10MB each
+    - Format: [timestamp] [LEVEL] module:line - message
+
+    Args:
+        log_dir: Directory for log files
+        module_name: Module name for log file naming
+    """
+    # Create logs directory
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
+
+    # Generate log filename with timestamp
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_file = log_path / f"{module_name}_{timestamp}.log"
+
+    # Create formatters
+    file_formatter = logging.Formatter(
+        '[%(asctime)s] [%(levelname)-8s] %(name)s:%(lineno)d - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_formatter = logging.Formatter(
+        '[%(levelname)s] %(message)s'
+    )
+
+    # Get root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)  # Capture everything
+
+    # Remove existing handlers to avoid duplicates
+    logger.handlers.clear()
+
+    # File handler: DEBUG and above (everything)
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=10*1024*1024,  # 10MB per file
+        backupCount=10,  # Keep 10 old files
+        encoding='utf-8'
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+    # Console handler: WARNING and above (clean output)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.WARNING)
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    # Log startup message
+    logger.info("="*80)
+    logger.info(f"Logging initialized for {module_name}")
+    logger.info(f"Log file: {log_file}")
+    logger.info(f"Console level: WARNING+")
+    logger.info(f"File level: DEBUG+")
+    logger.info("="*80)
+
+    return logger
+
+# Initialize logging when module is imported
+_logger = setup_logging(log_dir="logs", module_name="model_pipeline")
+
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 
+def _validate_input_data(df: pd.DataFrame, min_samples: int = 10000) -> None:
+    """
+    Walidacja input data przed treningiem.
+
+    ENHANCEMENT #4: Input validation - fail-fast zamiast cryptic errors
+
+    Args:
+        df: DataFrame do walidacji
+        min_samples: Minimalna liczba sampli (default: 10000)
+
+    Raises:
+        ValueError: Jeśli walidacja nie przejdzie
+    """
+    errors = []
+
+    # 1. Basic checks
+    if df.empty:
+        errors.append("DataFrame is empty")
+    if len(df) < min_samples:
+        errors.append(f"Insufficient samples: {len(df)} < {min_samples}")
+
+    # 2. Index checks
+    if not isinstance(df.index, pd.DatetimeIndex):
+        errors.append("Index must be DatetimeIndex")
+    if df.index.duplicated().any():
+        errors.append(f"Duplicate indices: {df.index.duplicated().sum()}")
+    if not df.index.is_monotonic_increasing:
+        errors.append("Index must be sorted chronologically")
+
+    # 3. Required columns
+    required_cols = ['open', 'high', 'low', 'close', 'volume']
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        errors.append(f"Missing required columns: {missing}")
+
+    # 4. Data quality
+    nan_counts = df.isnull().sum()
+    nan_cols = nan_counts[nan_counts > 0]
+    if len(nan_cols) > 0:
+        nan_pct = (nan_counts[nan_cols] / len(df) * 100).round(2)
+        errors.append(f"NaN values in {len(nan_cols)} columns: {dict(list(nan_pct.items())[:5])}")
+
+    inf_counts = np.isinf(df.select_dtypes(include=[np.number])).sum()
+    inf_cols = inf_counts[inf_counts > 0]
+    if len(inf_cols) > 0:
+        errors.append(f"Inf values in {len(inf_cols)} columns: {dict(list(inf_cols.items())[:5])}")
+
+    # 5. Feature types
+    non_numeric = df.select_dtypes(exclude=[np.number]).columns.tolist()
+    # Remove DatetimeIndex from non-numeric list
+    non_numeric = [col for col in non_numeric if col in df.columns]
+    if non_numeric:
+        errors.append(f"Non-numeric columns (will be dropped): {non_numeric[:10]}")
+
+    if errors:
+        error_msg = "Input validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        raise ValueError(error_msg)
+
+    logging.info(f"✓ Input validation passed: {len(df):,} samples, {df.shape[1]} features")
 def _check_feature_drift(train_df: pd.DataFrame, test_df: pd.DataFrame,
                         selected_features: List[str] = None,
                         drift_threshold: float = 0.05) -> Tuple[List[str], pd.DataFrame]:
@@ -65,12 +210,115 @@ def _check_feature_drift(train_df: pd.DataFrame, test_df: pd.DataFrame,
     return drifted_features, results_df
 
 
+def _check_feature_drift_enhanced(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    selected_features: List[str],
+    target_col: str = None,
+    drift_threshold: float = 0.05,
+    alert_threshold: int = 10
+) -> dict:
+    """
+    ENHANCEMENT #5: Enhanced drift monitoring z alertami i rekomendacjami.
+
+    Rozszerzona wersja _check_feature_drift z:
+    - Target drift detection (distribution shift)
+    - Alert generation
+    - Automatic retraining recommendations
+
+    Args:
+        train_df: Training dataset
+        test_df: Test dataset
+        selected_features: Lista cech do sprawdzenia
+        target_col: Nazwa kolumny target (opcjonalne)
+        drift_threshold: P-value threshold (default: 0.05)
+        alert_threshold: Liczba features z driftem powyżej której generujemy alert
+
+    Returns:
+        Dict z kluczami:
+        - drifted_features: Lista features z driftem
+        - drift_df: DataFrame z wynikami
+        - target_drift: Bool - czy target ma drift
+        - target_drift_pvalue: P-value dla target drift
+        - alerts: Lista alertów (strings)
+        - should_retrain: Bool - czy rekomendowany retraining
+    """
+    from scipy.stats import chisquare
+
+    # 1. Feature drift (existing logic)
+    drifted_features, results_df = _check_feature_drift(
+        train_df, test_df, selected_features, drift_threshold
+    )
+
+    # 2. Target drift
+    target_drift = False
+    target_drift_pvalue = None
+
+    if target_col and target_col in train_df.columns and target_col in test_df.columns:
+        y_train = train_df[target_col]
+        y_test = test_df[target_col]
+
+        # Chi-square test dla dystrybucji kategorycznych
+        train_dist = y_train.value_counts(normalize=True).sort_index()
+        test_dist = y_test.value_counts(normalize=True).sort_index()
+
+        # Align indices (w przypadku różnych klas)
+        all_classes = sorted(set(train_dist.index) | set(test_dist.index))
+        train_dist = train_dist.reindex(all_classes, fill_value=1e-10)
+        test_dist = test_dist.reindex(all_classes, fill_value=1e-10)
+
+        try:
+            chi2_stat, chi2_p = chisquare(test_dist.values, train_dist.values)
+            target_drift = chi2_p < drift_threshold
+            target_drift_pvalue = chi2_p
+        except Exception as e:
+            logging.warning(f"⚠ Could not compute target drift: {e}")
+    # 3. Generate alerts
+    alerts = []
+    if len(drifted_features) > alert_threshold:
+        alerts.append(
+            f"⚠ ALERT: {len(drifted_features)} features have significant drift (> {alert_threshold} threshold)"
+        )
+
+    if target_drift:
+        alerts.append(
+            f"⚠ ALERT: Target distribution has drifted (p={target_drift_pvalue:.4f} < {drift_threshold})"
+        )
+
+    # 4. Retraining recommendation
+    # Retrain if: >alert_threshold features drifted OR target drifted
+    should_retrain = len(drifted_features) > alert_threshold or target_drift
+
+    return {
+        'drifted_features': drifted_features,
+        'drift_df': results_df,
+        'target_drift': target_drift,
+        'target_drift_pvalue': target_drift_pvalue,
+        'alerts': alerts,
+        'should_retrain': should_retrain,
+        'n_drifted': len(drifted_features),
+        'n_total': len(selected_features)
+    }
+
+
 @njit
 def _compute_labels_fast(prices: np.ndarray, event_indices: np.ndarray, profit_take_pct: float, stop_loss_pct: float,
                          time_limit: int):
+    """
+    CRITICAL FIX v2.2: Removed parallel=True to fix crash with Optuna n_jobs=-1.
+
+    PROBLEM: @njit(parallel=True) + Optuna n_jobs=-1 creates nested parallelism:
+      - Optuna spawns multiple Python threads (one per trial)
+      - Each thread calls this function with parallel=True
+      - Numba workqueue threading layer is NOT thread-safe
+      - Result: "Concurrent access has been detected" crash
+
+    SOLUTION: Use sequential Numba + parallel Optuna trials (safer, still fast).
+    Speedup comes from Optuna level parallelism, not Numba level.
+    """
     n_events = len(event_indices)
     outcomes = np.zeros(n_events, dtype=np.int64)
-    for i in range(n_events):
+    for i in range(n_events):  # Sequential loop (Numba JIT still 50-100x faster than Python)
         event_idx = event_indices[i]
         start_price = prices[event_idx]
         upper_barrier = start_price * (1 + profit_take_pct)
@@ -91,12 +339,11 @@ def _compute_labels_fast(prices: np.ndarray, event_indices: np.ndarray, profit_t
 def get_triple_barrier_labels(prices: pd.Series, t_events: pd.Index, profit_take_pct: float, stop_loss_pct: float,
                               time_limit: int, verbose=True):
     if verbose:
-        print("Rozpoczynanie etykietowania danych...")
-
+        logging.info("Rozpoczynanie etykietowania danych...")
     # Handle duplicate index values by keeping the first occurrence
     if not prices.index.is_unique:
         if verbose:
-            print(f"Warning: prices index has {prices.index.duplicated().sum()} duplicates. Keeping first occurrence.")
+            logging.warning(f"Warning: prices index has {prices.index.duplicated().sum()} duplicates. Keeping first occurrence.")
         prices = prices[~prices.index.duplicated(keep='first')]
 
     prices_arr = prices.to_numpy()
@@ -104,128 +351,69 @@ def get_triple_barrier_labels(prices: pd.Series, t_events: pd.Index, profit_take
     outcomes = _compute_labels_fast(prices_arr, event_indices, profit_take_pct, stop_loss_pct, time_limit)
     labels = pd.Series(outcomes, index=t_events)
     if verbose:
-        print(f"Etykietowanie zakończone. Rozkład etykiet:\n{labels.value_counts(normalize=True)}")
+        logging.info(f"Etykietowanie zakończone. Rozkład etykiet:\n{labels.value_counts(normalize=True)}")
     return labels
 
-
-def remove_correlated_features(df: pd.DataFrame,
-                               target_col: str = None,
-                               correlation_threshold: float = 0.90,
-                               keep_important: List[str] = None) -> Tuple[pd.DataFrame, List[str]]:
-    """
-    Usuwa cechy silnie skorelowane ze sobą
-
-    Args:
-        df: DataFrame z cechami
-        target_col: Nazwa kolumny targetu (zostanie pominięta w analizie)
-        correlation_threshold: Próg korelacji powyżej którego usuwamy cechy (domyślnie 0.90)
-        keep_important: Lista nazw cech które zawsze zachowujemy
-
-    Returns:
-        Tuple[DataFrame, List[str]]: DataFrame z usuniętymi cechami, lista usuniętych cech
-    """
-    print(f"\n{'='*60}")
-    print("ANALIZA KORELACJI CECH")
-    print(f"{'='*60}")
-    print(f"Próg korelacji: {correlation_threshold}")
-    print(f"Początkowa liczba cech: {df.shape[1]}")
-
-    # Domyślna lista ważnych cech (ICT + kluczowe wskaźniki)
-    if keep_important is None:
-        keep_important = [
-            # Podstawowe wskaźniki
-            'rsi_14', 'volume_vs_ma_20', 'dist_from_vwap', 'atr_normalized',
-            # Wskaźniki kompozytowe
-            'market_state_indicator', 'momentum_regime', 'volume_confirmation_score',
-            'multi_factor_sentiment', 'oversold_overbought_signal',
-            # ICT & SMART MONEY - NAJWYŻSZY PRIORYTET
-            'ict_composite_score', 'fvg_signal', 'fvg_size',
-            'liquidity_sweep', 'liquidity_sweep_strength',
-            'order_block', 'order_block_strength', 'breaker_block',
-            'market_structure_shift', 'market_structure_direction',
-            'institutional_candle', 'institutional_candle_strength',
-            'ob_with_fvg', 'high_conviction_sweep', 'structure_aligned_ob', 'fvg_fill_reversal',
-        ]
-
-    # Cechy numeryczne (bez targetu)
-    cols_to_analyze = df.select_dtypes(include=[np.number]).columns.tolist()
-    if target_col and target_col in cols_to_analyze:
-        cols_to_analyze.remove(target_col)
-
-    # Macierz korelacji
-    print(f"Obliczanie macierzy korelacji dla {len(cols_to_analyze)} cech...")
-    corr_matrix = df[cols_to_analyze].corr().abs()
-
-    # Górny trójkąt
-    upper_triangle = corr_matrix.where(
-        np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
-    )
-
-    # Znajdź pary o wysokiej korelacji
-    to_drop = set()
-    high_corr_pairs = []
-
-    for column in upper_triangle.columns:
-        correlated_features = upper_triangle.index[
-            upper_triangle[column] > correlation_threshold
-        ].tolist()
-
-        if correlated_features:
-            for corr_feature in correlated_features:
-                high_corr_pairs.append({
-                    'feature1': column,
-                    'feature2': corr_feature,
-                    'correlation': upper_triangle.loc[corr_feature, column]
-                })
-
-                # Decyzja którą cechę usunąć
-                if column in keep_important and corr_feature in keep_important:
-                    continue
-                elif column in keep_important and corr_feature not in keep_important:
-                    to_drop.add(corr_feature)
-                elif corr_feature in keep_important and column not in keep_important:
-                    to_drop.add(column)
-                else:
-                    # Usuń cechę z niższą wariancją
-                    var_col = df[column].var()
-                    var_corr = df[corr_feature].var()
-                    if var_col < var_corr:
-                        to_drop.add(column)
-                    else:
-                        to_drop.add(corr_feature)
-
-    # Raport
-    print(f"\nZnaleziono {len(high_corr_pairs)} par cech o korelacji > {correlation_threshold}")
-
-    if high_corr_pairs:
-        print("\nTop 10 najwyższych korelacji:")
-        sorted_pairs = sorted(high_corr_pairs, key=lambda x: x['correlation'], reverse=True)
-        for pair in sorted_pairs[:10]:
-            print(f"  {pair['feature1']:40s} <-> {pair['feature2']:40s} : {pair['correlation']:.3f}")
-
-    to_drop_list = list(to_drop)
-    print(f"\nUsuwam {len(to_drop_list)} skorelowanych cech")
-
-    if to_drop_list:
-        print("\nPrzykładowe usunięte cechy (max 20):")
-        for feature in sorted(to_drop_list)[:20]:
-            print(f"  - {feature}")
-        if len(to_drop_list) > 20:
-            print(f"  ... i {len(to_drop_list) - 20} więcej")
-
-    # Usuń
-    df_cleaned = df.drop(columns=to_drop_list, errors='ignore')
-
-    print(f"\nKońcowa liczba cech: {df_cleaned.shape[1]}")
-    print(f"Usunięto: {len(to_drop_list)} cech ({len(to_drop_list)/len(cols_to_analyze)*100:.1f}%)")
-    print(f"{'='*60}\n")
-
-    return df_cleaned, to_drop_list
-
+# CRITICAL FIX #1: remove_correlated_features() moved to data_preparer_pa.py (imported above)
+# Removed duplicate (113 lines) - now using single source of truth
 
 def _get_strategy_id(ticker, timeframe, helper_timeframes, side: str):
     helpers_str = '_plus_' + '_'.join(helper_timeframes) if helper_timeframes else ""
     return f"{ticker}_{timeframe.replace(' ', '')}{helpers_str}_{side}"
+
+
+def _get_optuna_storage(version: str, study_type: str = "study") -> str:
+    """
+    ENHANCEMENT #3: PostgreSQL support dla Optuna - eliminuje SQLite bottleneck.
+
+    Zwraca storage URL dla Optuna study bazując na zmiennych środowiskowych.
+
+    Zmienne środowiskowe (opcjonalne):
+        OPTUNA_STORAGE_TYPE: "postgresql" lub "sqlite" (default: "sqlite")
+        OPTUNA_DB_HOST: PostgreSQL host (default: "localhost")
+        OPTUNA_DB_PORT: PostgreSQL port (default: "5432")
+        OPTUNA_DB_NAME: Database name (default: "optuna")
+        OPTUNA_DB_USER: Username (default: "optuna")
+        OPTUNA_DB_PASSWORD: Password (required dla PostgreSQL)
+
+    Args:
+        version: Model version (e.g., "v1.2")
+        study_type: Type of study (default: "study")
+
+    Returns:
+        Storage URL string dla Optuna
+
+    Examples:
+        # SQLite (default):
+        sqlite:///models/v1.2/optuna/study.db
+
+        # PostgreSQL:
+        postgresql://user:pass@localhost:5432/optuna
+    """
+    storage_type = os.environ.get('OPTUNA_STORAGE_TYPE', 'sqlite').lower()
+
+    if storage_type == 'postgresql':
+        # PostgreSQL configuration
+        host = os.environ.get('OPTUNA_DB_HOST', 'localhost')
+        port = os.environ.get('OPTUNA_DB_PORT', '5432')
+        db_name = os.environ.get('OPTUNA_DB_NAME', 'optuna')
+        user = os.environ.get('OPTUNA_DB_USER', 'optuna')
+        password = os.environ.get('OPTUNA_DB_PASSWORD', '')
+
+        if not password:
+            logging.warning("⚠ WARNING: OPTUNA_DB_PASSWORD not set, falling back to SQLite")
+            storage_type = 'sqlite'
+        else:
+            storage_url = f"postgresql://{user}:{password}@{host}:{port}/{db_name}"
+            logging.info(f"✓ Using PostgreSQL storage: {user}@{host}:{port}/{db_name}")
+            return storage_url
+
+    # SQLite (default lub fallback)
+    optuna_dir = os.path.join("models", version, "optuna")
+    os.makedirs(optuna_dir, exist_ok=True)
+    storage_url = f"sqlite:///{optuna_dir}/{study_type}.db"
+    logging.info(f"✓ Using SQLite storage: {storage_url}")
+    return storage_url
 
 
 def walk_forward_split(X, n_splits=6, test_size=0.15, gap_size=0.02):
@@ -275,25 +463,38 @@ def walk_forward_split(X, n_splits=6, test_size=0.15, gap_size=0.02):
         # Debug info dla pierwszego fold:
         if i == 0:
             gap_days = gap_samples * 15 / (60 * 24)  # Assuming 15m candles
-            print(f"   CV Fold {i+1}: Train[0:{train_end}], GAP[{train_end}:{test_start}] ({gap_days:.1f} days), Test[{test_start}:{test_end}]")
-
+            logging.info(f"   CV Fold {i+1}: Train[0:{train_end}], GAP[{train_end}:{test_start}] ({gap_days:.1f} days), Test[{test_start}:{test_end}]")
         yield train_idx, test_idx
 
 
-def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, version_dir: str, importance_threshold: float = 0.90):
+def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, version_dir: str,
+                           importance_threshold: float = 0.90, top_n_features: int = None):
     """
     Selekcja cech oparta na feature importance z LightGBM.
+
     EXPERIMENT 2A: Threshold 0.90 (było: 0.85) → Zachowuje więcej sparse features (ICT)
     POPRAWKA #2: CV-based feature importance (5 folds) → Bardziej stabilne rankings
-    """
-    print("\n--- ETAP 1.5: Rozpoczynanie optymalizowanej selekcji cech (Feature Importance + CV) ---")
-    print(f"Cechy początkowe: {len(X.columns)}")
+    ENHANCEMENT #2: Explicit memory cleanup - prevents memory leaks
+    ENHANCEMENT v2.2: top_n_features parameter - select only top N features (overrides threshold)
 
+    Args:
+        X: Feature DataFrame
+        y: Target Series
+        strategy_id: Strategy identifier
+        version_dir: Directory to save results
+        importance_threshold: Cumulative importance threshold (default 0.90)
+        top_n_features: If set, select only top N features (ignores threshold)
+
+    Returns:
+        List of selected feature names
+    """
+    logging.info("\n--- ETAP 1.5: Rozpoczynanie optymalizowanej selekcji cech (Feature Importance + CV) ---")
+    logging.info(f"Cechy początkowe: {len(X.columns)}")
     # POPRAWKA #2: Zbieranie feature importance z 5 CV folds
     importance_accumulator = np.zeros(len(X.columns))
     n_folds = 5
 
-    print(f"POPRAWKA #2: Uśrednianie feature importance z {n_folds} CV folds...")
+    logging.info(f"POPRAWKA #2: Uśrednianie feature importance z {n_folds} CV folds...")
     for fold_idx, (train_idx, val_idx) in enumerate(walk_forward_split(X, n_splits=n_folds, test_size=0.15)):
         X_train_fold = X.iloc[train_idx]
         y_train_fold = y.iloc[train_idx]
@@ -316,8 +517,12 @@ def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, vers
 
         # Accumulate importances
         importance_accumulator += model.feature_importances_
-        print(f"  Fold {fold_idx+1}/{n_folds} complete")
 
+        # ENHANCEMENT #2: Explicit memory cleanup - critical dla dużych datasets
+        del X_train_fold, y_train_fold, X_scaled, model, scaler
+        gc.collect()
+
+        logging.info(f"  Fold {fold_idx+1}/{n_folds} complete (memory freed)")
     # Average importance across folds
     feature_importances = importance_accumulator / n_folds
 
@@ -328,40 +533,296 @@ def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, vers
 
     importance_df['cumulative_importance'] = importance_df['importance'].cumsum() / importance_df['importance'].sum()
 
-    selected_features = importance_df[importance_df['cumulative_importance'] <= importance_threshold]['feature'].tolist()
+    # ENHANCEMENT v2.2: Choose selection method
+    if top_n_features is not None:
+        # Method 1: Select top N features (explicit count)
+        selected_features = importance_df.head(top_n_features)['feature'].tolist()
+        logging.info(f"\n✂️  FEATURE PRUNING MODE: Selecting top {top_n_features} features")
+        final_cumulative = importance_df.iloc[top_n_features-1]['cumulative_importance']
+        logging.info(f"   → Cumulative importance at position {top_n_features}: {final_cumulative:.1%}")
+    else:
+        # Method 2: Select by cumulative importance threshold (original)
+        selected_features = importance_df[importance_df['cumulative_importance'] <= importance_threshold]['feature'].tolist()
 
-    min_features = max(5, int(len(X.columns) * 0.1))
-    if len(selected_features) < min_features:
-        selected_features = importance_df.head(min_features)['feature'].tolist()
+        min_features = max(5, int(len(X.columns) * 0.1))
+        if len(selected_features) < min_features:
+            selected_features = importance_df.head(min_features)['feature'].tolist()
 
-    print(f"\nSelekcja zakończona. Wybrano {len(selected_features)} z {len(X.columns)} cech.")
-    print(f"Próg skumulowanej ważności: {importance_threshold * 100}%")
-    print(f"Top 10 najważniejszych cech:")
+    logging.info(f"\nSelekcja zakończona. Wybrano {len(selected_features)} z {len(X.columns)} cech ({len(selected_features)/len(X.columns):.1%}).")
+    if top_n_features is None:
+        logging.info(f"Próg skumulowanej ważności: {importance_threshold * 100}%")
+    logging.info(f"Top 10 najważniejszych cech:")
     for idx, row in importance_df.head(10).iterrows():
-        print(f"  {row['feature']}: {row['importance']:.4f} (skumulowane: {row['cumulative_importance']:.2%})")
-
+        logging.info(f"  {row['feature']}: {row['importance']:.4f} (skumulowane: {row['cumulative_importance']:.2%})")
     # UPROSZCZENIE: Nie zapisujemy weak_features.json
     # Zapisujemy TYLKO selected features do features.joblib
     removed_features = [f for f in X.columns if f not in selected_features]
-    print(f"\nUsunięto {len(removed_features)} słabych cech z feature selection")
+    logging.info(f"\nUsunięto {len(removed_features)} słabych cech z feature selection")
     if removed_features:
-        print(f"Przykłady usuniętych cech: {removed_features[:5]}")
+        logging.info(f"Przykłady usuniętych cech: {removed_features[:5]}")
+
+    # ENHANCEMENT #9: Save feature importance rankings for feedback loop
+    importance_rankings_path = os.path.join(version_dir, "feature_importance_rankings.csv")
+    importance_df.to_csv(importance_rankings_path, index=False)
+    logging.info(f"\n💾 ENHANCEMENT #9: Feature importance rankings saved to: {importance_rankings_path}")
+    logging.info(f"   Top features: {', '.join(importance_df.head(5)['feature'].tolist())}")
+    logging.info(f"   Weakest features: {', '.join(importance_df.tail(5)['feature'].tolist())}")
 
     return selected_features
 
 
-def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, strategy_id: str, version: str, side: str = 'long'):
+def _rescue_interaction_features(
+    X: pd.DataFrame,
+    y: pd.Series,
+    selected_features: List[str],
+    improvement_threshold: float = 0.005,
+    max_features_to_test: int = 50
+) -> List[str]:
+    """
+    ENHANCEMENT #8: Rescue features that have low individual importance but critical interactions.
+
+    Problem: Feature A może mieć low importance, ale być critical w kombinacji z Feature B.
+    Przykład: FVG + Order Block mogą razem dawać silny sygnał.
+
+    Args:
+        X: Feature DataFrame
+        y: Target Series
+        selected_features: Lista już wybranych features
+        improvement_threshold: Minimum improvement (accuracy) żeby rescue feature
+        max_features_to_test: Limit ile dropped features testować (dla speedu)
+
+    Returns:
+        Lista rescued features
+    """
+    dropped_features = [f for f in X.columns if f not in selected_features]
+
+    if len(dropped_features) == 0:
+        logging.info("  ✓ No dropped features to check for interactions")
+        return []
+
+    logging.info(f"\n--- ENHANCEMENT #8: Checking feature interactions ---")
+    logging.info(f"  Testing {min(len(dropped_features), max_features_to_test)} dropped features for interactions...")
+    # Train baseline model z selected features
+    X_base = X[selected_features]
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_base)
+    base_model = lgb.LGBMClassifier(
+        n_estimators=100,
+        learning_rate=0.1,
+        max_depth=5,
+        num_leaves=15,
+        random_state=42,
+        verbose=-1
+    )
+    base_model.fit(X_scaled, y)
+    base_score = base_model.score(X_scaled, y)
+
+    # Test każdej dropped feature + base
+    rescue_candidates = []
+    features_to_test = dropped_features[:max_features_to_test]  # Limit dla speedu
+
+    for i, feat in enumerate(features_to_test):
+        if (i + 1) % 10 == 0:
+            logging.info(f"    Progress: {i+1}/{len(features_to_test)} features tested")
+        X_test = X[selected_features + [feat]]
+        X_test_scaled = scaler.fit_transform(X_test)
+        test_model = lgb.LGBMClassifier(
+            n_estimators=100,
+            learning_rate=0.1,
+            max_depth=5,
+            num_leaves=15,
+            random_state=42,
+            verbose=-1
+        )
+        test_model.fit(X_test_scaled, y)
+        test_score = test_model.score(X_test_scaled, y)
+
+        improvement = test_score - base_score
+        if improvement > improvement_threshold:
+            rescue_candidates.append((feat, improvement))
+
+    # Sort by improvement
+    rescue_candidates = sorted(rescue_candidates, key=lambda x: x[1], reverse=True)
+
+    if rescue_candidates:
+        logging.info(f"\n  ✓ Rescued {len(rescue_candidates)} features due to interaction effects:")
+        for feat, imp in rescue_candidates[:10]:  # Show top 10
+            logging.info(f"      {feat}: +{imp:.4f} accuracy")
+        if len(rescue_candidates) > 10:
+            logging.info(f"      ... and {len(rescue_candidates)-10} more")
+        rescued_features = [f for f, _ in rescue_candidates]
+        return rescued_features
+    else:
+        logging.info(f"  ✓ No features rescued (no significant interactions detected)")
+        return []
+
+
+def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close: pd.Series = None, ticker: str = None, timeframe: str = '15m') -> dict:
+    """
+    ENHANCEMENT #6: Adaptive hyperparameter ranges bazując na charakterystykach datasetu.
+    ENHANCEMENT #17: Computed volatility zamiast hardcoded ticker lists.
+
+    Różne datasety wymagają różnych ranges:
+    - Małe datasets → silniejsza regularyzacja
+    - Duże datasets → więcej trees, bardziej złożone modele
+    - High-dimensional → więcej feature sampling
+    - Volatile assets → szersze barriers, krótszy time limit (computed z historical data)
+
+    Args:
+        n_samples: Liczba sampli w datasecie
+        n_features: Liczba features
+        df_close: Series z close prices (dla computed volatility)
+        ticker: Ticker symbol (opcjonalne, fallback jeśli df_close brak)
+        timeframe: Timeframe string (e.g., '15m', '1h', '4h') for volatility calculation
+
+    Returns:
+        Dict z ranges dla każdego hyperparametra
+    """
+    # Base ranges (conservative defaults)
+    ranges = {
+        # Model params
+        'n_estimators': (300, 1200),
+        'learning_rate': (0.005, 0.05),
+        'reg_alpha': (5.0, 80.0),
+        'reg_lambda': (5.0, 80.0),
+        'num_leaves': (15, 50),
+        'colsample_bytree': (0.6, 0.8),
+        'subsample': (0.7, 0.9),
+        'subsample_freq': (1, 5),
+        'min_child_samples': (50, 200),
+
+        # Label params
+        # ENHANCEMENT v2.2: Zwiększone dolne granice barrier_size (0.015 min)
+        # Powód: Dla SOLUSDT 1.17% było za niskie - traciliśmy większe ruchy
+        'barrier_size': (0.015, 0.040),  # Zwiększone z (0.008, 0.035)
+        'time_limit': (12, 48)
+    }
+
+    # Adjust for dataset size
+    if n_samples < 30000:  # Small dataset
+        logging.info(f"  ➤ Small dataset detected ({n_samples:,} samples) - increasing regularization")
+        ranges['reg_alpha'] = (20.0, 150.0)  # Stronger regularization
+        ranges['reg_lambda'] = (20.0, 150.0)
+        ranges['num_leaves'] = (10, 30)  # Simpler trees
+        ranges['min_child_samples'] = (100, 300)  # Larger leaf size
+        ranges['n_estimators'] = (200, 800)  # Fewer trees
+    elif n_samples > 100000:  # Large dataset
+        logging.info(f"  ➤ Large dataset detected ({n_samples:,} samples) - increasing model capacity")
+        ranges['n_estimators'] = (500, 2000)  # More trees
+        ranges['num_leaves'] = (20, 80)  # More complex
+        ranges['reg_alpha'] = (1.0, 50.0)  # Less regularization
+        ranges['reg_lambda'] = (1.0, 50.0)
+
+    # Adjust for feature count
+    if n_features > 200:  # High-dimensional
+        logging.info(f"  ➤ High-dimensional dataset ({n_features} features) - increasing feature sampling")
+        ranges['colsample_bytree'] = (0.4, 0.7)  # More aggressive feature sampling
+
+    # ENHANCEMENT #17: Computed volatility zamiast hardcoded ticker lists
+    volatility = None
+    volatility_classification = "medium"  # Default
+
+    if df_close is not None and len(df_close) > 100:
+        # Parse timeframe to get minutes per candle
+        try:
+            if timeframe.endswith('m'):
+                minutes_per_candle = int(timeframe[:-1])
+            elif timeframe.endswith('h'):
+                minutes_per_candle = int(timeframe[:-1]) * 60
+            elif timeframe.endswith('D'):
+                minutes_per_candle = int(timeframe[:-1]) * 1440
+            elif timeframe.endswith('W'):
+                minutes_per_candle = int(timeframe[:-1]) * 10080
+            else:
+                logging.warning(f"Unknown timeframe format: {timeframe}, defaulting to 15m")
+                minutes_per_candle = 15
+        except:
+            logging.warning(f"Failed to parse timeframe: {timeframe}, defaulting to 15m")
+            minutes_per_candle = 15
+
+        # Calculate candles per year (24/7 trading)
+        candles_per_year = (365 * 24 * 60) / minutes_per_candle
+
+        # Calculate 30-day rolling volatility (annualized)
+        # Use last 30 days for recent market conditions
+        candles_per_day = (24 * 60) / minutes_per_candle
+        lookback_days = min(30, int(len(df_close) / candles_per_day))
+        lookback_candles = int(lookback_days * candles_per_day)
+        recent_close = df_close.iloc[-lookback_candles:] if lookback_candles < len(df_close) else df_close
+
+        # Compute returns volatility (annualized)
+        returns = recent_close.pct_change().dropna()
+        candle_vol = returns.std()
+
+        # Annualize: sqrt(number of candles per year)
+        volatility = candle_vol * np.sqrt(candles_per_year)
+
+        # Classify volatility
+        # Thresholds based on typical crypto volatility:
+        # - High: >100% annualized (memecoins, small caps)
+        # - Medium: 50-100% annualized (most altcoins)
+        # - Low: <50% annualized (BTC, ETH, stablecoins)
+        if volatility > 1.0:  # >100% annualized
+            volatility_classification = "high"
+        elif volatility < 0.5:  # <50% annualized
+            volatility_classification = "low"
+        else:
+            volatility_classification = "medium"
+
+        logging.info(f"  ➤ Computed volatility: {volatility*100:.1f}% annualized (classification: {volatility_classification})")
+    elif ticker:
+        # FALLBACK: Use hardcoded lists jako backup (deprecated)
+        volatile_tickers = ['DOGEUSDT', 'SHIBUSDT', 'PEPEUSDT', 'FLOKIUSDT']
+        stable_tickers = ['BTCUSDT', 'ETHUSDT']
+
+        if ticker in volatile_tickers:
+            volatility_classification = "high"
+            logging.info(f"  ➤ Ticker-based classification: {ticker} → high volatility (DEPRECATED: use df_close)")
+        elif ticker in stable_tickers:
+            volatility_classification = "low"
+            logging.info(f"  ➤ Ticker-based classification: {ticker} → low volatility (DEPRECATED: use df_close)")
+        else:
+            logging.info(f"  ➤ Unknown ticker {ticker}, using medium volatility defaults")
+    # Adjust ranges based on volatility
+    if volatility_classification == "high":
+        logging.info(f"  ➤ High volatility detected - wider barriers, shorter time limits")
+        ranges['barrier_size'] = (0.015, 0.050)  # Zwiększone z (0.012, 0.045)
+        ranges['time_limit'] = (8, 36)  # Shorter time limits (faster signals)
+    elif volatility_classification == "low":
+        logging.info(f"  ➤ Low volatility detected - tighter barriers, longer time limits")
+        ranges['barrier_size'] = (0.012, 0.030)  # Zwiększone z (0.006, 0.025)
+        ranges['time_limit'] = (16, 60)  # Longer time limits (patient trades)
+
+    return ranges
+
+
+def _failed_trial_callback(study, trial):
+    """
+    ENHANCEMENT #1: Callback dla failed trials - logging i diagnostyka.
+    """
+    if trial.state == optuna.trial.TrialState.FAIL:
+        logging.error(f"⚠ Trial {trial.number} FAILED with exception")
+        if trial.user_attrs:
+            logging.info(f"  Last known state: {trial.user_attrs}")
+def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, strategy_id: str, version: str, side: str = 'long', ticker: str = 'SOLUSDT', df_close: pd.Series = None, timeframe: str = '15m'):
     """
     POPRAWKA #1: RECALL-FOCUSED OPTIMIZATION dla LONG
     Zmieniono objective function aby priorytetyzować recall (łapanie okazji)
     przy zachowaniu minimum 50% precision (jakość sygnałów).
-    
+
     OPTYMALIZACJA SZYBKOŚCI:
     - Zredukowano liczbę CV splits z 6 do 3 (2x szybciej)
     - Dodano pruning dla słabych trials (early stopping)
     - Włączono równoległe wykonywanie trials (n_jobs=-1)
     - Zoptymalizowano sampler (fewer startup trials)
+
+    ENHANCEMENT #1: Failed trials handling - kontynuacja mimo błędów
+    ENHANCEMENT #6 + #17: Adaptive hyperparameter ranges z computed volatility
     """
+    # ENHANCEMENT #6 + #17: Get adaptive ranges z computed volatility
+    logging.info("\n--- ENHANCEMENT #6 + #17: Computing adaptive hyperparameter ranges ---")
+    ranges = get_adaptive_hyperparameter_ranges(len(X), len(X.columns), df_close=df_close, ticker=ticker, timeframe=timeframe)
+
     def objective_model(trial):
         params = {
             'objective': 'binary',
@@ -369,16 +830,16 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
             'verbosity': -1,
             'boosting_type': 'gbdt',
             'class_weight': 'balanced',
-            # POPRAWKA #5 & #8: Zbalansowana regularyzacja (było zbyt mocna)
-            'n_estimators': trial.suggest_int('n_estimators', 300, 1200),  # Było: 200-1000
-            'learning_rate': trial.suggest_float('learning_rate', 0.005, 0.05, log=True),  # Było: 0.01-0.1
-            'reg_alpha': trial.suggest_float('reg_alpha', 5.0, 80.0, log=True),  # Było: 10-100 (zbyt wysoka)
-            'reg_lambda': trial.suggest_float('reg_lambda', 5.0, 80.0, log=True),  # Było: 10-100 (zbyt wysoka)
-            'num_leaves': trial.suggest_int('num_leaves', 15, 50),  # Było: 20-90 (prostsze drzewa)
-            'colsample_bytree': trial.suggest_float('colsample_bytree', 0.6, 0.8),  # Było: 0.5-0.9
-            'subsample': trial.suggest_float('subsample', 0.7, 0.9),  # Było: 0.6-0.9
-            'subsample_freq': trial.suggest_int('subsample_freq', 1, 5),  # Było: 1-7
-            'min_child_samples': trial.suggest_int('min_child_samples', 50, 200),  # Było: 30-150
+            # ENHANCEMENT #6: Adaptive ranges zamiast hardcoded
+            'n_estimators': trial.suggest_int('n_estimators', *ranges['n_estimators']),
+            'learning_rate': trial.suggest_float('learning_rate', *ranges['learning_rate'], log=True),
+            'reg_alpha': trial.suggest_float('reg_alpha', *ranges['reg_alpha'], log=True),
+            'reg_lambda': trial.suggest_float('reg_lambda', *ranges['reg_lambda'], log=True),
+            'num_leaves': trial.suggest_int('num_leaves', *ranges['num_leaves']),
+            'colsample_bytree': trial.suggest_float('colsample_bytree', *ranges['colsample_bytree']),
+            'subsample': trial.suggest_float('subsample', *ranges['subsample']),
+            'subsample_freq': trial.suggest_int('subsample_freq', *ranges['subsample_freq']),
+            'min_child_samples': trial.suggest_int('min_child_samples', *ranges['min_child_samples']),
         }
         
         scores = []
@@ -439,12 +900,14 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
             return 0.0
         return np.mean(scores)
 
-    storage_name = f"sqlite:///models/{version}/optuna/{strategy_id}_model_study.db"
-    
+    # ENHANCEMENT #3: Adaptive storage (PostgreSQL lub SQLite)
+    storage_name = _get_optuna_storage(version, f"{strategy_id}_model_study")
+
     # OPTYMALIZACJA: TPE sampler z mniejszą liczbą startup trials
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=5,  # Było domyślnie 10
         multivariate=True,
+        warn_independent_sampling=False,  # Suppress warnings for dynamic search space
         seed=42
     )
     
@@ -465,38 +928,50 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
     )
     
     # OPTYMALIZACJA: Równoległe wykonywanie trials (n_jobs=-1 = wszystkie CPU)
+    # ENHANCEMENT #1: catch=(Exception,) - kontynuuj mimo błędów w trials
     study.optimize(
         objective_model,
         n_trials=n_model_trials,
         n_jobs=-1,  # Wszystkie dostępne CPU cores
-        show_progress_bar=True
+        show_progress_bar=True,
+        catch=(Exception,),  # Kontynuuj mimo błędów
+        callbacks=[_failed_trial_callback]
     )
+
+    # Log summary of failed trials
+    failed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
+    if failed_trials:
+        logging.error(f"\n⚠ {len(failed_trials)} trials failed during optimization (continued anyway)")
     return study.best_params
 
 
 def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_model_trials: int, ticker: str,
                           timeframe: str, helper_timeframes: list = None, side: str = 'long', version: str = 'v1.0',
-                          min_recall_target: float = 0.55):
+                          min_recall_target: float = 0.55, top_n_features: int = None):
     strategy_id = _get_strategy_id(ticker, timeframe, helper_timeframes, side)
-    
+
     version_dir = os.path.join("models", version, strategy_id)
     os.makedirs(version_dir, exist_ok=True)
     os.makedirs(os.path.join("models", version, "optuna"), exist_ok=True)
-    
-    print(f"\n{'='*60}")
-    print(f"Training pipeline initialized for version: {version}")
-    print(f"Output directory: {version_dir}")
-    print(f"{'='*60}\n")
 
+    logging.info(f"\n{'='*60}")
+    logging.info(f"Training pipeline initialized for version: {version}")
+    logging.info(f"Output directory: {version_dir}")
+    logging.info(f"{'='*60}\n")
+    # ENHANCEMENT #4: Input validation - fail-fast
+    logging.info(f"\n{'='*60}")
+    logging.info("ENHANCEMENT #4: Input Data Validation")
+    logging.info(f"{'='*60}")
+    _validate_input_data(df_features, min_samples=10000)
+    logging.info("")
     # KROK 0: Usuń OHLCV (podstawowe kolumny nie są features)
     df_model_base = df_features.drop(columns=['open', 'high', 'low', 'close', 'volume', 'turnover'], errors='ignore')
-    print(f"📊 Features after removing OHLCV: {df_model_base.shape[1]}")
-
+    logging.info(f"📊 Features after removing OHLCV: {df_model_base.shape[1]}")
     # KROK 0.5: Usuń skorelowane cechy PRZED feature selection
     # To zapewnia, że model będzie trenowany na tych samych cechach co używane w produkcji
-    print(f"\n{'='*60}")
-    print("ETAP 0.5: Usuwanie skorelowanych cech (przed feature selection)")
-    print(f"{'='*60}")
+    logging.info(f"\n{'='*60}")
+    logging.info("ETAP 0.5: Usuwanie skorelowanych cech (przed feature selection)")
+    logging.info(f"{'='*60}")
     df_model_base, removed_corr_features = remove_correlated_features(
         df_model_base,
         target_col=None,
@@ -509,8 +984,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         corr_features_path = os.path.join(version_dir, "correlated_features_removed.json")
         with open(corr_features_path, 'w') as f:
             json.dump(removed_corr_features, f, indent=2)
-        print(f"💾 Zapisano listę {len(removed_corr_features)} skorelowanych cech do: {corr_features_path}")
-
+        logging.info(f"💾 Zapisano listę {len(removed_corr_features)} skorelowanych cech do: {corr_features_path}")
     # ============================================================================
     # FIX #5 (HIGH): 3-WAY SPLIT - train/calibration/holdout
     # ============================================================================
@@ -533,11 +1007,14 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     calibration_df = df_model_base.iloc[train_val_size:train_val_size+calibration_size]
     holdout_df = df_model_base.iloc[train_val_size+calibration_size:]
 
-    print(f"\n📊 FIX #5: 3-way data split (80/10/10 - UPDATED v1.2):")
-    print(f"  Train/Val: {len(train_val_df):,} samples ({len(train_val_df)/len(df_model_base)*100:.1f}%)")
-    print(f"  Calibration: {len(calibration_df):,} samples ({len(calibration_df)/len(df_model_base)*100:.1f}%)")
-    print(f"  Holdout: {len(holdout_df):,} samples ({len(holdout_df)/len(df_model_base)*100:.1f}%)")
-    print(f"  ✅ Model trenuje na 80% (było 60%) = ~7 więcej miesięcy recent data")
+    logging.info(f"\n📊 FIX #5: 3-way data split (80/10/10 - UPDATED v1.2):")
+    logging.info(f"  Train/Val: {len(train_val_df):,} samples ({len(train_val_df)/len(df_model_base)*100:.1f}%)")
+    logging.info(f"  Calibration: {len(calibration_df):,} samples ({len(calibration_df)/len(df_model_base)*100:.1f}%)")
+    logging.info(f"  Holdout: {len(holdout_df):,} samples ({len(holdout_df)/len(df_model_base)*100:.1f}%)")
+    logging.info(f"  ✅ Model trenuje na 80% (było 60%) = ~7 więcej miesięcy recent data")
+    # ENHANCEMENT #6 + #17: Get adaptive ranges z computed volatility dla label optimization
+    logging.info("\n--- ENHANCEMENT #6 + #17: Computing adaptive ranges for label optimization ---")
+    label_ranges = get_adaptive_hyperparameter_ranges(len(train_val_df), len(train_val_df.columns), df_close=df_features['close'], ticker=ticker, timeframe=timeframe)
 
     def objective_labels(trial):
         # ============================================================================
@@ -553,8 +1030,8 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         # - Live win rate: 38% → 48% (HIGHER, less overfit)
         # ============================================================================
 
-        # POPRAWKA #8: Rozszerzono zakresy dla większej elastyczności
-        barrier_size = trial.suggest_float('barrier_size', 0.008, 0.035, log=True)  # Było: 0.010-0.025
+        # ENHANCEMENT #6: Adaptive ranges zamiast hardcoded
+        barrier_size = trial.suggest_float('barrier_size', *label_ranges['barrier_size'], log=True)
 
         # SYMMETRIC barriers - fair dla random walk, eliminują mathematical bias
         pt = barrier_size  # e.g., 1.5%
@@ -563,8 +1040,8 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         # Note: If you want asymmetric R:R, adjust POSITION SIZE, not barriers:
         # Example: 2:1 R:R = trade 2x bigger position (same $ risk, 2x $ reward)
 
-        # POPRAWKA #8: Rozszerzono time_limit dla ICT patterns (mogą potrzebować więcej czasu)
-        time_limit = trial.suggest_int('time_limit', 12, 48)  # Było: 12-30, teraz 3-12h @ 15m
+        # ENHANCEMENT #6: Adaptive time_limit range
+        time_limit = trial.suggest_int('time_limit', *label_ranges['time_limit'])
         labels = get_triple_barrier_labels(df_features['close'], df_features.index, pt, sl, time_limit, verbose=False)
 
         X = train_val_df.copy()
@@ -629,14 +1106,16 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         trial.set_user_attr("f1_score", final_score)
         return final_score
 
-    print("\n--- ETAP 1: Rozpoczynanie optymalizacji parametrów etykiet ---")
-    print("OPTYMALIZACJA: Zredukowano CV splits (6→3), dodano pruning i równoległe wykonywanie")
-    storage_name_labels = f"sqlite:///models/{version}/optuna/{strategy_id}_labels_study.db"
-    
+    logging.info("\n--- ETAP 1: Rozpoczynanie optymalizacji parametrów etykiet ---")
+    logging.info("OPTYMALIZACJA: Zredukowano CV splits (6→3), dodano pruning i równoległe wykonywanie")
+    # ENHANCEMENT #3: Adaptive storage (PostgreSQL lub SQLite)
+    storage_name_labels = _get_optuna_storage(version, f"{strategy_id}_labels_study")
+
     # OPTYMALIZACJA: TPE sampler z mniejszą liczbą startup trials
     sampler_labels = optuna.samplers.TPESampler(
         n_startup_trials=5,
         multivariate=True,
+        warn_independent_sampling=False,  # Suppress warnings for dynamic search space
         seed=42
     )
     
@@ -657,20 +1136,26 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     )
     
     # OPTYMALIZACJA: Równoległe wykonywanie trials (n_jobs=-1)
+    # ENHANCEMENT #1: catch=(Exception,) - kontynuuj mimo błędów w trials
     study_labels.optimize(
         objective_labels,
         n_trials=n_label_trials,
         n_jobs=-1,
-        show_progress_bar=True
+        show_progress_bar=True,
+        catch=(Exception,),  # Kontynuuj mimo błędów
+        callbacks=[_failed_trial_callback]
     )
+
+    # Log summary of failed trials
+    failed_trials = [t for t in study_labels.trials if t.state == optuna.trial.TrialState.FAIL]
+    if failed_trials:
+        logging.error(f"\n⚠ {len(failed_trials)} trials failed during label optimization (continued anyway)")
     best_label_params = study_labels.best_params
-    print(f"\nNajlepsze parametry etykiet: {best_label_params}")
-    
+    logging.info(f"\nNajlepsze parametry etykiet: {best_label_params}")
     label_params_path = os.path.join(version_dir, "label_params.json")
     with open(label_params_path, 'w') as f:
         json.dump(best_label_params, f, indent=2)
-    print(f"Parametry labelowania zapisane do: {label_params_path}")
-
+    logging.info(f"Parametry labelowania zapisane do: {label_params_path}")
     # ============================================================================
     # FIX #1: Use symmetric barrier_size (no separate PT/SL multipliers)
     # ============================================================================
@@ -678,16 +1163,15 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     pt = barrier_size  # Symmetric barriers
     sl = barrier_size  # PT = SL (eliminates positive bias)
 
-    print(f"\n📊 FIX #1: Symmetric barriers applied:")
-    print(f"  Profit Target: {pt*100:.2f}%")
-    print(f"  Stop Loss: {sl*100:.2f}%")
-    print(f"  Time Limit: {best_label_params['time_limit']} candles")
-    print(f"  Expected 50% win rate on random walk (unbiased)")
-
+    logging.info(f"\n📊 FIX #1: Symmetric barriers applied:")
+    logging.info(f"  Profit Target: {pt*100:.2f}%")
+    logging.info(f"  Stop Loss: {sl*100:.2f}%")
+    logging.info(f"  Time Limit: {best_label_params['time_limit']} candles")
+    logging.info(f"  Expected 50% win rate on random walk (unbiased)")
     final_labels = get_triple_barrier_labels(df_features['close'], df_features.index, pt, sl,
                                              best_label_params['time_limit'])
 
-    print(f"\n--- Przygotowywanie binarnego zestawu danych dla modelu '{side.upper()}' ---")
+    logging.info(f"\n--- Przygotowywanie binarnego zestawu danych dla modelu '{side.upper()}' ---")
     X_full_multi = train_val_df.copy()
     y_full_multi = final_labels.reindex(train_val_df.index)
 
@@ -695,26 +1179,37 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         is_long_or_hold = y_full_multi.isin([0, 1])
         X_full, y_full = X_full_multi[is_long_or_hold], y_full_multi[is_long_or_hold]
         target_names = ['HOLD (0)', 'BUY (1)']
-        print(f"Zachowano {len(y_full)} etykiet (HOLD i BUY). Nowy rozkład:\n{y_full.value_counts(normalize=True)}")
+        logging.info(f"Zachowano {len(y_full)} etykiet (HOLD i BUY). Nowy rozkład:\n{y_full.value_counts(normalize=True)}")
     elif side == 'short':
         is_short_or_hold = y_full_multi.isin([0, 2])
         X_full, y_full = X_full_multi[is_short_or_hold], y_full_multi[is_short_or_hold]
         y_full = y_full.replace(2, 1)
         target_names = ['HOLD (0)', 'SELL (1)']
-        print(f"Zachowano {len(y_full)} etykiet (HOLD i SELL). Nowy rozkład:\n{y_full.value_counts(normalize=True)}")
+        logging.info(f"Zachowano {len(y_full)} etykiet (HOLD i SELL). Nowy rozkład:\n{y_full.value_counts(normalize=True)}")
     else:
         raise ValueError("Parametr 'side' musi być 'long' lub 'short'.")
 
-    selected_features = _run_feature_selection(X_full, y_full, strategy_id, version_dir)
+    selected_features = _run_feature_selection(X_full, y_full, strategy_id, version_dir, top_n_features=top_n_features)
 
+    # ENHANCEMENT #8: Check for interaction effects w dropped features
+    rescued_features = _rescue_interaction_features(
+        X_full, y_full,
+        selected_features,
+        improvement_threshold=0.005,
+        max_features_to_test=50
+    )
+
+    # Add rescued features to selected features
+    if rescued_features:
+        selected_features = selected_features + rescued_features
+        logging.info(f"\n✓ Final feature count: {len(selected_features)} (including {len(rescued_features)} rescued)")
     X_full = X_full[selected_features]
 
-    print("\n--- ETAP 2: Rozpoczynanie optymalizacji hiperparametrów modelu binarnego ---")
-    print("POPRAWKA #1 & #5: Recall-focused optimization + mocniejsza regularyzacja")
-    best_model_params = _run_model_optimization(X_full, y_full, n_model_trials, strategy_id, version, side)
-    print(f"Najlepsze parametry modelu: {best_model_params}")
-
-    print("\n--- Trenowanie finalnego modelu binarnego ... ---")
+    logging.info("\n--- ETAP 2: Rozpoczynanie optymalizacji hiperparametrów modelu binarnego ---")
+    logging.info("POPRAWKA #1 & #5 + ENHANCEMENT #6 + #17: Recall-focused optimization + computed volatility")
+    best_model_params = _run_model_optimization(X_full, y_full, n_model_trials, strategy_id, version, side, ticker, df_features['close'], timeframe)
+    logging.info(f"Najlepsze parametry modelu: {best_model_params}")
+    logging.info("\n--- Trenowanie finalnego modelu binarnego ... ---")
     # ============================================================================
     # FIX #2 (CRITICAL): REMOVE SMOTE from final model training
     # ============================================================================
@@ -742,8 +1237,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
         feature_name=X_train_final.columns.to_list()
     )
-    print(f"✓ Final model trained with early stopping. Best iteration: {final_model.best_iteration_}")
-
+    logging.info(f"✓ Final model trained with early stopping. Best iteration: {final_model.best_iteration_}")
     model_path = os.path.join(version_dir, "model.joblib")
     scaler_path = os.path.join(version_dir, "scaler.joblib")
     features_path = os.path.join(version_dir, "features.joblib")
@@ -752,13 +1246,11 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     joblib.dump(final_scaler, scaler_path)
     joblib.dump(selected_features, features_path)
 
-    print(f"Model, skaler i lista cech zostały zapisane w: {version_dir}")
-
+    logging.info(f"Model, skaler i lista cech zostały zapisane w: {version_dir}")
     # ============================================================================
     # FIX #5: Use CALIBRATION set for threshold tuning (not holdout!)
     # ============================================================================
-    print("\n--- Przygotowanie zbiorów CALIBRATION i HOLDOUT ---")
-
+    logging.info("\n--- Przygotowanie zbiorów CALIBRATION i HOLDOUT ---")
     # CALIBRATION SET - used ONLY for threshold tuning
     y_calib_multi = final_labels.reindex(calibration_df.index).dropna()
     X_calib_multi = calibration_df.loc[y_calib_multi.index]
@@ -792,53 +1284,78 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     holdout_preds = final_model.predict(X_holdout_scaled)
     holdout_probas = final_model.predict_proba(X_holdout_scaled)
 
-    print(f"Calibration set: {len(y_calib):,} samples (for threshold tuning)")
-    print(f"Holdout set: {len(y_holdout):,} samples (for final evaluation)")
-
+    logging.info(f"Calibration set: {len(y_calib):,} samples (for threshold tuning)")
+    logging.info(f"Holdout set: {len(y_holdout):,} samples (for final evaluation)")
     # ============================================================================
-    # POPRAWKA #9: Feature drift monitoring (KS test)
+    # POPRAWKA #9 + ENHANCEMENT #5: Enhanced feature drift monitoring
     # ============================================================================
-    print("\n--- POPRAWKA #9: Sprawdzanie feature drift (KS test) ---")
+    logging.info("\n--- POPRAWKA #9 + ENHANCEMENT #5: Enhanced Feature Drift Monitoring ---")
     # Pobierz top 20 features z importance_df (jeśli dostępne)
     top_20_features = selected_features[:20] if len(selected_features) >= 20 else selected_features
 
-    # Check drift: train/val vs calibration
-    drifted_calib, drift_calib_df = _check_feature_drift(
-        X_full[selected_features], X_calib[selected_features],
-        selected_features=top_20_features, drift_threshold=0.05
+    # ENHANCEMENT #5: Use enhanced drift monitoring z alertami
+    # Prepare DataFrames with target for drift checking
+    X_full_with_target = X_full[selected_features].copy()
+    X_full_with_target['target'] = y_full
+
+    X_calib_with_target = X_calib[selected_features].copy()
+    X_calib_with_target['target'] = y_calib
+
+    X_holdout_with_target = X_holdout[selected_features].copy()
+    X_holdout_with_target['target'] = y_holdout
+
+    # Check drift: train/val vs calibration (ENHANCED)
+    drift_calib_result = _check_feature_drift_enhanced(
+        X_full_with_target, X_calib_with_target,
+        selected_features=top_20_features,
+        target_col='target',
+        drift_threshold=0.05,
+        alert_threshold=10
     )
 
-    # Check drift: train/val vs holdout
-    drifted_holdout, drift_holdout_df = _check_feature_drift(
-        X_full[selected_features], X_holdout[selected_features],
-        selected_features=top_20_features, drift_threshold=0.05
+    # Check drift: train/val vs holdout (ENHANCED)
+    drift_holdout_result = _check_feature_drift_enhanced(
+        X_full_with_target, X_holdout_with_target,
+        selected_features=top_20_features,
+        target_col='target',
+        drift_threshold=0.05,
+        alert_threshold=10
     )
 
-    print(f"✓ Drift monitoring complete:")
-    print(f"  Train → Calibration: {len(drifted_calib)}/{len(top_20_features)} features with drift (p<0.05)")
-    print(f"  Train → Holdout: {len(drifted_holdout)}/{len(top_20_features)} features with drift (p<0.05)")
-
-    if len(drifted_calib) > 0:
-        print(f"\n⚠ WARNING: {len(drifted_calib)} features have significant drift in calibration set:")
-        for feat in drifted_calib[:5]:
-            p_val = drift_calib_df[drift_calib_df['feature'] == feat]['p_value'].values[0]
-            print(f"    - {feat}: p={p_val:.4f}")
-        if len(drifted_calib) > 5:
-            print(f"    ... and {len(drifted_calib)-5} more")
-
-    # Save drift report
+    logging.info(f"✓ Enhanced drift monitoring complete:")
+    logging.info(f"  Train → Calibration: {drift_calib_result['n_drifted']}/{drift_calib_result['n_total']} features with drift")
+    if drift_calib_result['target_drift']:
+        logging.warning(f"    ⚠ Target drift detected (p={drift_calib_result['target_drift_pvalue']:.4f})")
+    logging.info(f"  Train → Holdout: {drift_holdout_result['n_drifted']}/{drift_holdout_result['n_total']} features with drift")
+    if drift_holdout_result['target_drift']:
+        logging.warning(f"    ⚠ Target drift detected (p={drift_holdout_result['target_drift_pvalue']:.4f})")
+    # Display alerts
+    if drift_calib_result['alerts']:
+        logging.info(f"\n📢 CALIBRATION SET ALERTS:")
+        for alert in drift_calib_result['alerts']:
+            logging.info(f"  {alert}")
+    if drift_holdout_result['alerts']:
+        logging.info(f"\n📢 HOLDOUT SET ALERTS:")
+        for alert in drift_holdout_result['alerts']:
+            logging.info(f"  {alert}")
+    # Retraining recommendation
+    if drift_calib_result['should_retrain'] or drift_holdout_result['should_retrain']:
+        logging.info(f"\n🚨 RETRAINING RECOMMENDED 🚨")
+        logging.info(f"  Significant drift detected - consider retraining model with fresh data")
+    # Save enhanced drift report
     drift_report_path = os.path.join(version_dir, "feature_drift_report.csv")
+    drift_calib_df = drift_calib_result['drift_df'].copy()
     drift_calib_df['set'] = 'calibration'
+    drift_holdout_df = drift_holdout_result['drift_df'].copy()
     drift_holdout_df['set'] = 'holdout'
     pd.concat([drift_calib_df, drift_holdout_df]).to_csv(drift_report_path, index=False)
-    print(f"💾 Drift report saved to: {drift_report_path}")
-
+    logging.info(f"💾 Drift report saved to: {drift_report_path}")
     # ============================================================================
     # FIX #5: Threshold tuning on CALIBRATION set (not holdout!)
     # ============================================================================
-    print("\n--- ANALIZA PROGÓW DECYZYJNYCH (Threshold Tuning na CALIBRATION) ---")
-    print(f"POPRAWKA #4 & #6: Threshold optimization - target {min_recall_target*100:.0f}% recall")
-    print("FIX #5: Using CALIBRATION set (never seen by model during training)")
+    logging.info("\n--- ANALIZA PROGÓW DECYZYJNYCH (Threshold Tuning na CALIBRATION) ---")
+    logging.info(f"POPRAWKA #4 & #6: Threshold optimization - target {min_recall_target*100:.0f}% recall")
+    logging.info("FIX #5: Using CALIBRATION set (never seen by model during training)")
     precisions, recalls, thresholds = precision_recall_curve(y_calib, calib_probas[:, 1])
 
     # POPRAWKA #6: Parametryzowany min_recall (domyślnie 0.55, było hardcoded)
@@ -860,16 +1377,14 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     default_precision = precisions[default_idx]
     default_recall = recalls[default_idx]
 
-    print(f"Próg domyślny (0.5):")
-    print(f"  Precision: {default_precision:.3f}, Recall: {default_recall:.3f}, F1: {2 * default_precision * default_recall / (default_precision + default_recall + 1e-8):.3f}")
-    print(f"\nPróg optymalny ({optimal_threshold:.3f}) dla recall >= {min_recall}:")
-    print(f"  Precision: {optimal_precision:.3f}, Recall: {optimal_recall:.3f}, F1: {2 * optimal_precision * optimal_recall / (optimal_precision + optimal_recall + 1e-8):.3f}")
-
+    logging.info(f"Próg domyślny (0.5):")
+    logging.info(f"  Precision: {default_precision:.3f}, Recall: {default_recall:.3f}, F1: {2 * default_precision * default_recall / (default_precision + default_recall + 1e-8):.3f}")
+    logging.info(f"\nPróg optymalny ({optimal_threshold:.3f}) dla recall >= {min_recall}:")
+    logging.info(f"  Precision: {optimal_precision:.3f}, Recall: {optimal_recall:.3f}, F1: {2 * optimal_precision * optimal_recall / (optimal_precision + optimal_recall + 1e-8):.3f}")
     if optimal_recall >= min_recall:
-        print(f"✓ Osiągnięto minimalny recall {min_recall}")
+        logging.info(f"✓ Osiągnięto minimalny recall {min_recall}")
     else:
-        print(f"⚠ Nie udało się osiągnąć recall >= {min_recall}. Najlepszy recall: {optimal_recall:.3f}")
-
+        logging.warning(f"⚠ Nie udało się osiągnąć recall >= {min_recall}. Najlepszy recall: {optimal_recall:.3f}")
     # ============================================================================
     # POPRAWKA #1: Heurystyczna rekomendacja dla min_proba_diff
     # ============================================================================
@@ -881,25 +1396,21 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     # Przykład: threshold=0.60 → min_proba_diff=0.30
     # Uzasadnienie: Jeśli long=0.70, short=0.40 → diff=0.30 (70% sure LONG vs 40% SHORT)
     recommended_min_proba_diff = round(optimal_threshold * 0.5, 2)
-    print(f"\n--- POPRAWKA #1: Rekomendacja min_proba_diff ---")
-    print(f"  Recommended min_proba_diff: {recommended_min_proba_diff:.2f}")
-    print(f"  (Heurystyka: 50% of optimal_threshold)")
-    print(f"  ⚠ Dla pełnej optymalizacji użyj optuna_optimizer.py z DUAL models")
-
+    logging.info(f"\n--- POPRAWKA #1: Rekomendacja min_proba_diff ---")
+    logging.info(f"  Recommended min_proba_diff: {recommended_min_proba_diff:.2f}")
+    logging.info(f"  (Heurystyka: 50% of optimal_threshold)")
+    logging.warning(f"  ⚠ Dla pełnej optymalizacji użyj optuna_optimizer.py z DUAL models")
     holdout_preds_optimized = (holdout_probas[:, 1] >= optimal_threshold).astype(int)
 
-    print(f"\nRaport klasyfikacji na zbiorze holdout dla modelu '{side.upper()}':")
-
+    logging.info(f"\nRaport klasyfikacji na zbiorze holdout dla modelu '{side.upper()}':")
     if y_holdout.nunique() < 2:
-        print("Nie można wygenerować raportu: zbiór testowy holdout zawiera tylko jedną klasę.")
-        print(f"Unikalne klasy w y_holdout: {y_holdout.unique()}")
+        logging.info("Nie można wygenerować raportu: zbiór testowy holdout zawiera tylko jedną klasę.")
+        logging.info(f"Unikalne klasy w y_holdout: {y_holdout.unique()}")
     else:
-        print("Próg domyślny (0.5):")
-        print(classification_report(y_holdout, holdout_preds, target_names=target_names))
-
-        print(f"\nPróg optymalny ({optimal_threshold:.3f}):")
-        print(classification_report(y_holdout, holdout_preds_optimized, target_names=target_names))
-
+        logging.info("Próg domyślny (0.5):")
+        logging.info(classification_report(y_holdout, holdout_preds, target_names=target_names))
+        logging.info(f"\nPróg optymalny ({optimal_threshold:.3f}):")
+        logging.info(classification_report(y_holdout, holdout_preds_optimized, target_names=target_names))
     results_df = pd.DataFrame(holdout_probas, columns=[f'proba_{target_names[0]}', f'proba_{target_names[1]}'],
                               index=X_holdout.index)
     results_df['y_true'] = y_holdout
@@ -909,8 +1420,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
 
     results_path = os.path.join(version_dir, "holdout_predictions.csv")
     results_df.to_csv(results_path)
-    print(f"Szczegółowe wyniki ze zbioru holdout zapisano w: {results_path}")
-
+    logging.info(f"Szczegółowe wyniki ze zbioru holdout zapisano w: {results_path}")
     training_metadata = {
         "version": version,
         "ticker": ticker,
@@ -952,16 +1462,13 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     metadata_path = os.path.join(version_dir, "training_metadata.json")
     with open(metadata_path, 'w') as f:
         json.dump(training_metadata, f, indent=2)
-    print(f"Metadata treningu zapisane w: {metadata_path}")
-
-    print("\n" + "=" * 60)
-    print("--- AUTOMATYCZNE URUCHAMIANIE ANALIZY MODELU ---")
-    print("=" * 60)
-
+    logging.info(f"Metadata treningu zapisane w: {metadata_path}")
+    logging.info("\n" + "=" * 60)
+    logging.info("--- AUTOMATYCZNE URUCHAMIANIE ANALIZY MODELU ---")
+    logging.info("=" * 60)
     analysis_output_dir = os.path.join(version_dir, "analysis")
     os.makedirs(analysis_output_dir, exist_ok=True)
-    print(f"Wyniki analizy zostały zapisane w katalogu: {analysis_output_dir}/")
-
+    logging.info(f"Wyniki analizy zostały zapisane w katalogu: {analysis_output_dir}/")
     try:
         from analysis import run_analysis_with_args
 
@@ -976,8 +1483,8 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         args = AnalysisArgs(ticker, timeframe, helper_timeframes, side, version)
         run_analysis_with_args(args, output_dir=analysis_output_dir)
 
-        print(f"\n✓ Analiza modelu zakończona pomyślnie. Wszystkie wyniki zapisane w: {analysis_output_dir}/")
+        logging.info(f"\n✓ Analiza modelu zakończona pomyślnie. Wszystkie wyniki zapisane w: {analysis_output_dir}/")
     except Exception as e:
-        print(f"\n⚠ Błąd podczas automatycznej analizy: {e}")
-        print("Model został wytrenowany poprawnie, ale analiza nie powiodła się.")
-        print(f"Możesz uruchomić analizę ręcznie używając: python analysis.py --side {side} --ticker {ticker} --timeframe {timeframe}")
+        logging.warning(f"\n⚠ Błąd podczas automatycznej analizy: {e}")
+        logging.info("Model został wytrenowany poprawnie, ale analiza nie powiodła się.")
+        logging.info(f"Możesz uruchomić analizę ręcznie używając: python analysis.py --side {side} --ticker {ticker} --timeframe {timeframe}")
