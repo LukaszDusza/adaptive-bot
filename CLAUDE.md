@@ -54,6 +54,33 @@ This is an **ML-powered cryptocurrency trading bot** for Bybit that uses LightGB
 - `report_generator.py` - HTML reports with equity curves and trade statistics
 - `optuna_optimizer.py` - Multi-objective optimization for live parameters
 - `analyze_trades.py` - Post-trade analysis from logged data
+- `analysis.py` - Post-training analysis (automatically executed after model training)
+
+**Support Modules:**
+- `prediction_logger.py` - Logs predictions from live bot for analysis
+- `feature_cache.py` - Caches computed features to reduce API calls
+
+### Directory Structure
+
+```
+price_action/
+├── *.py                   # Core pipeline files (13 files)
+├── experiments/           # Standalone analysis & comparison tools (7 files)
+│   ├── README.md         # Documentation for experimental scripts
+│   ├── compare_*.py      # Model/feature comparison tools
+│   └── analyze_*.py      # Ad-hoc analysis scripts
+├── archive/              # Legacy code & proposals (3 files)
+│   ├── README.md         # Documentation for archived files
+│   ├── enhanced_features_proposal.py
+│   ├── post_training_analysis.py
+│   └── optuna_ict_optimizer.py
+├── models/               # Trained models organized by version
+├── logs/                 # Bot logs (trades, candles, indicators)
+├── bot_state/            # Bot state persistence (survives restarts)
+└── run_model_workflow.sh # Interactive workflow menu
+```
+
+**Important**: Only files in the main `price_action/` directory are part of the active pipeline. Files in `experiments/` and `archive/` are not integrated into the workflow and should be used manually if needed.
 
 ### Data Flow
 
@@ -106,7 +133,7 @@ _open_position() - If signal:
 cd price_action
 
 # Interactive workflow script (recommended)
-./run_solusdt_workflow.sh
+./run_model_workflow.sh
 
 # Or use main.py directly:
 python main.py --train --side long \
@@ -156,14 +183,33 @@ python main.py --report \
 
 ```bash
 # Multi-objective optimization (PnL, Drawdown, Trade Count)
+# NEW FEATURES v2.0:
+#   - 3-fold time-based CV (prevents overfitting to single period)
+#   - Parallel execution with n_jobs=-1 (4-8x speedup)
+#   - Automatic visualization generation (Pareto front, param importance, etc.)
+#   - Narrowed parameter ranges for crypto (tp_pct: 2-6% instead of 2-15%)
+
 python optuna_optimizer.py \
   --ticker SOLUSDT --timeframe 15m \
   --helper-timeframes 1h 4h \
   --trials 100 \
   --partial-tp
 
-# Results saved to: models/{version}/optuna/optimization_results_*.txt
-# Includes: PROB_THRESHOLD, MIN_PROBA_DIFF, TP_PCT, TSL_PCT
+# Results saved to:
+#   - models/{version}/optuna/optimization_results_*.txt (best params)
+#   - models/{version}/optuna/plots/ (interactive HTML visualizations)
+#     * pareto_front.html - Multi-objective trade-offs
+#     * param_importances.html - Which params matter most
+#     * optimization_history.html - Progress over trials
+#     * slice_plot.html - Parameter relationships
+#     * parallel_coordinate.html - Pareto solutions
+
+# OPTIONAL: Use Optuna Dashboard for real-time monitoring
+# Install: pip install optuna-dashboard
+# Run dashboard:
+optuna-dashboard sqlite:///models/v1.2/optuna/optuna_SOLUSDT_15m_1h_4h.db
+# Open browser: http://localhost:8080
+# Benefits: Real-time monitoring, interactive plots, compare multiple studies
 ```
 
 ### Running Live Bot
@@ -261,18 +307,71 @@ Models are organized by version string (e.g., `v1.0`, `v1.1`):
 models/
   v1.0/
     SOLUSDT_15m_plus_1h_4h_long/
-      model.joblib
-      scaler.joblib
-      features.joblib
-      label_params.json
-      training_metadata.json
+      # Core model files
+      model.joblib                    # Trained LightGBM classifier
+      scaler.joblib                   # StandardScaler for features
+      features.joblib                 # List of selected features
+
+      # Training configuration
+      label_params.json               # Triple-barrier parameters
+      training_metadata.json          # Full training config + optimal_threshold
+      correlated_features_removed.json # Features removed during correlation analysis
+      holdout_predictions.csv         # Out-of-sample predictions
+
+      # Deployment configuration (NEW in v2.0)
+      recommended_live_params.json    # 🔥 Optuna-optimized live parameters
+      deployment_config.json          # 🚀 Complete deployment config (READY TO USE)
+
+      # Analysis outputs
       analysis/
+        feature_importance.png
+        confusion_matrix.png
+        ...
+
     SOLUSDT_15m_plus_1h_4h_short/
+      # Same structure as LONG
       ...
+
   optuna/
+    # Optuna optimization databases
     {strategy_id}_labels_study.db
     {strategy_id}_model_study.db
-    optimization_results_*.txt
+
+    # Optimization results
+    optimization_results_*.txt        # Text summary (legacy)
+
+    # Visualizations (NEW in v2.0)
+    plots/
+      pareto_front.html               # Multi-objective trade-offs
+      param_importances.html          # Which params matter most
+      optimization_history.html       # Progress over trials
+      slice_plot.html                 # Parameter relationships
+      parallel_coordinate.html        # Pareto solutions
+```
+
+**Key deployment files:**
+
+1. **`deployment_config.json`** - Single source of truth for deployment
+   - Contains: prob_threshold, min_proba_diff, tp_pct, tsl_pct, tp_mechanism
+   - Includes expected performance metrics (PnL, DD, WR)
+   - Ready-to-use docker-compose command template
+   - Created automatically after Optuna optimization
+
+2. **`recommended_live_params.json`** - Optuna optimization results
+   - Raw optimization data from 3-fold CV backtest
+   - Includes trial number, objective values
+   - Source data for deployment_config.json
+
+3. **`training_metadata.json`** - Training configuration
+   - optimal_threshold: Probability threshold from threshold tuning (training phase)
+   - best_label_params: Triple-barrier parameters
+   - best_model_params: LightGBM hyperparameters
+   - NOTE: Use prob_threshold from deployment_config.json (more recent, optimized on live-like conditions)
+
+**View all deployment configs:**
+```bash
+./show_deployment_configs.sh
+# Shows all available deployment configs with parameters and expected performance
 ```
 
 ### Environment Variables (.env files)

@@ -122,12 +122,12 @@ class TradeLogger:
         """
         candle = {
             "timestamp": candle_data.get('timestamp', datetime.now().isoformat()),
-            "open": candle_data['open'],
-            "high": candle_data['high'],
-            "low": candle_data['low'],
-            "close": candle_data['close'],
-            "volume": candle_data['volume'],
-            "turnover": candle_data.get('turnover', 0)
+            "open": candle_data.get('open', 0.0),
+            "high": candle_data.get('high', 0.0),
+            "low": candle_data.get('low', 0.0),
+            "close": candle_data.get('close', 0.0),
+            "volume": candle_data.get('volume', 0.0),
+            "turnover": candle_data.get('turnover', 0.0)
         }
         
         # Add position data if in trade

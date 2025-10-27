@@ -729,7 +729,7 @@ cython_debug/
 /daily_charts/
 /old_model/.env
 /old_model/.env_sylwia
-/price_action/.env
+/price_action/.env_demo
 /price_action/.env_sylwia
 /price_action/results/
 /price_action/backtests/
@@ -750,3 +750,7 @@ cython_debug/
 /price_action/models/v.1.0/SOLUSDT_15m_plus_1h_4h_long/analysis/
 /price_action/after_training/
 /price_action/models/v1.0/SOLUSDT_15m_plus_1h_4h_1D_long/analysis/
+/price_action/.env_demo
+/.claude/
+/price_action/.claude/
+/.claude/

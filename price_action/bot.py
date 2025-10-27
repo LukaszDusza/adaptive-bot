@@ -17,6 +17,7 @@ import joblib
 import time
 import logging
 import json
+import numpy as np
 from datetime import datetime
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
@@ -44,22 +45,45 @@ class BotConfig:
     TIMEFRAME: str = "15m"
     HELPER_TIMEFRAMES: list = ["1h", "4h"]
     TRADE_SIZE_USD: float = 100.0
+    TRADE_SIZE_PCT: float = 0.0  # If > 0, use % of available balance (e.g., 0.01 = 1%). Overrides TRADE_SIZE_USD
     LEVERAGE: int = 10
+    MAX_POSITIONS: int = 0  # Maximum number of concurrent positions (0 = no limit). Checked via API before opening position.
     TP_PCT: float = 0.03
     TSL_PCT: float = 0.01
     PROBABILITY_THRESHOLD: float = 0.7
     MIN_PROBA_DIFF: float = 0.2  # Minimum difference between BUY and SELL probabilities
-    LOOP_SLEEP_SECONDS: int = 60
+    LOOP_SLEEP_SECONDS: int = 300  # 5 minutes - optimized for 15m timeframe (reduces cache hits from 93% to 67%)
     CANDLES_FOR_FEATURES: int = 5000  # Reduced from 10000 to avoid Bybit API data availability issues
     PARTIAL_TP_ENABLED: bool = True
     DYNAMIC_TP_ENABLED: bool = False  # New dynamic TP: 25% at each of 4 levels (25%, 50%, 75%, 100%)
     HEDGE_MODE: bool = False  # Hedge Mode: positionIdx 1=Long, 2=Short. One-Way Mode: positionIdx 0
     LIMIT_ORDER_MODE: bool = False  # Use limit orders instead of market orders
-    MAX_WAITING_LIMIT_ORDER: int = 300  # Seconds to wait for limit order execution before cancelling
+    MAX_WAITING_LIMIT_ORDER: int = 300  # Seconds to wait for limit order execution before cancelling (will be auto-calculated if LIMIT_ORDER_CANDLES is set)
+    LIMIT_ORDER_CANDLES: int = 5  # How many candles to wait for limit order (default: 5 candles). Auto-calculates MAX_WAITING_LIMIT_ORDER based on TIMEFRAME
     LIMIT_OFFSET_PCT: float = 0.005  # Price offset for limit orders (0.5% default)
     PROTECT_PROFIT_ENABLED: bool = False  # Enable profit protection: move SL to BE if profit peaks >0.25% but declines
+    COOLDOWN_AFTER_LOSS_MINUTES: int = 30  # Minutes to wait before opening new position after ANY closed position (30min = 2x 15m candles, prevents re-entry on same candle)
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 3
+    # DCA (Dollar Cost Averaging) Mode - 3 limit orders at different levels
+    DCA_ENABLED: bool = False  # Enable DCA mode (requires LIMIT_ORDER_MODE=True)
+    DCA_LEVEL1_PCT: float = 0.003  # Level 1: Fixed offset (-0.3% for LONG, +0.3% for SHORT)
+    DCA_ATR_MULTIPLIER: float = 0.55  # Level 2: ATR-based (ATR * 0.5)
+    DCA_MAX_SWING_DISTANCE_PCT: float = 1.6  # Level 3: Max distance to swing level (%)
+    # FIX #5: Magic numbers moved to config
+    FEE_PCT: float = 0.0006  # 0.06% round-trip fees (maker+taker conservative estimate)
+    PROFIT_PROTECTION_THRESHOLD: float = 0.0025  # 0.25% - minimum profit to activate protection
+    PROFIT_PROTECTION_TRIGGER: float = 0.0025  # 0.25% - if profit drops to this, move SL to BE
+    API_RETRY_INITIAL_SLEEP: float = 0.5  # Initial sleep for API retries (exponential backoff)
+    API_RETRY_MAX_ATTEMPTS: int = 5  # Max retry attempts for API calls
+    POSITION_UPDATE_SLEEP: float = 2.0  # Sleep after order execution before checking position
+    DCA_MIN_LEVEL_DISTANCE_PCT: float = 0.001  # 0.1% - minimum distance between DCA levels
+
+    # ICT Context Mode - Dynamic threshold adjustment based on Smart Money signals
+    ICT_CONTEXT_MODE: bool = False  # Enable ICT context-aware decision making (OPCJA 3)
+    ICT_MIN_STRENGTH: float = 0.3  # Minimum ICT strength to apply threshold reduction (0.0-1.0)
+    ICT_MAX_THRESHOLD_REDUCTION: float = 0.20  # Max % reduction in thresholds when ICT strong (e.g., 0.20 = 20%)
+    REGIME_SENSITIVITY: float = 1.0  # Multiplier for regime adjustments (1.0 = normal, 0.5 = less sensitive, 2.0 = more sensitive)
 
 
 class TradingBot:
@@ -68,9 +92,16 @@ class TradingBot:
     def __init__(self, config: BotConfig, version: str = 'v1.0'):
         self.config = config
         self.version = version
+
+        # Auto-calculate MAX_WAITING_LIMIT_ORDER based on LIMIT_ORDER_CANDLES and TIMEFRAME
+        if self.config.LIMIT_ORDER_CANDLES > 0:
+            timeframe_minutes = self._parse_timeframe_to_minutes(self.config.TIMEFRAME)
+            self.config.MAX_WAITING_LIMIT_ORDER = self.config.LIMIT_ORDER_CANDLES * timeframe_minutes * 60
+            logging.info(f"🕐 Auto-calculated limit order timeout: {self.config.LIMIT_ORDER_CANDLES} candles × {timeframe_minutes}min = {self.config.MAX_WAITING_LIMIT_ORDER}s ({self.config.MAX_WAITING_LIMIT_ORDER/60:.1f} minutes)")
+
         self.adapter = self._init_adapter()
         self.base_id = self._get_strategy_id()
-        
+
         # Load models
         (self.model_long, self.scaler_long, self.features_long,
          self.model_short, self.scaler_short, self.features_short) = self._load_models()
@@ -95,16 +126,22 @@ class TradingBot:
         # Restore trade logging if position was active before restart
         self._restore_trade_logging_if_needed()
 
-        # EPHEMERAL MODE: Auto-recovery from Bybit API
-        # If container restarted without persistent state, detect existing position and restore
-        self._check_existing_position_on_startup()
-
         # Cache for last decision data
         self.last_decision_data = {}
         self.last_candle_data = {}
 
-        # Limit order tracking (only 1 active order per ticker)
-        self.active_limit_order = None  # {'order_id': str, 'timestamp': float, 'side': str, 'price': float}
+        # Limit order tracking
+        # Single mode: 1 order, DCA mode: 3 orders
+        # IMPORTANT: Initialize BEFORE _check_existing_position_on_startup() so recovery can populate it
+        self.active_limit_orders = []  # List of {'order_id': str, 'timestamp': float, 'side': str, 'price': float, 'qty': float, 'level': int}
+
+        # Store df for DCA level calculations
+        self.last_df = None
+
+        # EPHEMERAL MODE: Auto-recovery from Bybit API
+        # If container restarted without persistent state, detect existing position and restore
+        # IMPORTANT: This must come AFTER self.active_limit_orders initialization
+        self._check_existing_position_on_startup()
 
         # PERFORMANCE: Feature cache for incremental updates
         self.feature_cache = FeatureCache(window_size=self.config.CANDLES_FOR_FEATURES)
@@ -113,14 +150,97 @@ class TradingBot:
         logging.info(f"Bot V2 initialized with Trade Logger: {self.base_id}")
         logging.info(f"TP: {config.TP_PCT*100:.2f}% | TSL: {config.TSL_PCT*100:.2f}%")
         logging.info("="*60)
-    
+
+    def _parse_timeframe_to_minutes(self, timeframe: str) -> int:
+        """
+        Parse timeframe string to minutes.
+        Examples: '15m' → 15, '1h' → 60, '4h' → 240, '1D' → 1440
+        """
+        timeframe = timeframe.strip().replace(' ', '')
+        if timeframe.endswith('m'):
+            return int(timeframe[:-1])
+        elif timeframe.endswith('h'):
+            return int(timeframe[:-1]) * 60
+        elif timeframe.endswith('D') or timeframe.endswith('d'):
+            return int(timeframe[:-1]) * 1440
+        else:
+            raise ValueError(f"Unsupported timeframe format: {timeframe}. Use formats like '15m', '1h', '4h', '1D'")
+
+    # ========== FIX #9: Helper methods for API retry with exponential backoff ==========
+
+    def _retry_with_backoff(self, func, *args, max_attempts=None, **kwargs):
+        """
+        Execute function with exponential backoff retry.
+
+        Args:
+            func: Function to execute
+            *args: Positional arguments for func
+            max_attempts: Max retry attempts (default: from config)
+            **kwargs: Keyword arguments for func
+
+        Returns:
+            Function result or None if all retries failed
+        """
+        if max_attempts is None:
+            max_attempts = self.config.API_RETRY_MAX_ATTEMPTS
+
+        for attempt in range(max_attempts):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                if attempt == max_attempts - 1:
+                    # Last attempt failed
+                    logging.error(f"All {max_attempts} retry attempts failed for {func.__name__}: {e}")
+                    return None
+
+                # Calculate exponential backoff: 0.5s, 0.75s, 1.12s, 1.69s, 2.53s
+                sleep_time = self.config.API_RETRY_INITIAL_SLEEP * (1.5 ** attempt)
+                logging.warning(f"Retry {attempt + 1}/{max_attempts} for {func.__name__} after {sleep_time:.2f}s: {e}")
+                time.sleep(sleep_time)
+
+        return None
+
+    def _wait_for_position_update(self, expected_change: str = None, max_attempts: int = None) -> Optional[Dict]:
+        """
+        Wait for Bybit to update position info with exponential backoff.
+
+        FIX #9: Replaces hardcoded time.sleep(2) with intelligent retry.
+
+        Args:
+            expected_change: Description of expected change (for logging)
+            max_attempts: Max retry attempts (default: from config)
+
+        Returns:
+            Position dict or None if not found after max attempts
+        """
+        if max_attempts is None:
+            max_attempts = self.config.API_RETRY_MAX_ATTEMPTS
+
+        change_msg = f" (expecting: {expected_change})" if expected_change else ""
+        logging.debug(f"Waiting for position update{change_msg}...")
+
+        for attempt in range(max_attempts):
+            sleep_time = self.config.API_RETRY_INITIAL_SLEEP * (1.5 ** attempt)
+            time.sleep(sleep_time)
+
+            try:
+                position = self.adapter.get_position(self.config.TICKER)
+                if position:
+                    logging.debug(f"Position found after {attempt + 1} attempt(s)")
+                    return position
+            except Exception as e:
+                logging.warning(f"Position check attempt {attempt + 1}/{max_attempts} failed: {e}")
+
+        logging.warning(f"Position not found after {max_attempts} attempts{change_msg}")
+        return None
+
     def _init_adapter(self):
         load_dotenv()
         key = os.getenv("BYBIT_API_KEY")
         secret = os.getenv("BYBIT_API_SECRET")
         base_url = os.getenv("BYBIT_BASE_URL")
         if not key or not secret:
-            raise ValueError("Missing API keys in .env")
+            raise ValueError("Missing API keys in .env_demo")
         return BybitAdapter(api_key=key, api_secret=secret, base_url=base_url, hedge_mode=self.config.HEDGE_MODE)
     
     def _get_strategy_id(self):
@@ -147,11 +267,29 @@ class TradingBot:
             raise FileNotFoundError(f"Model files not found for version {version}: {e}")
     
     def _save_state(self):
+        """
+        Save bot state to JSON file with deep copy for thread safety.
+
+        FIX #3: Changed from shallow copy to deep copy to prevent race conditions
+        when state is modified during JSON serialization.
+        """
         try:
-            state_copy = self.state.copy()
+            import copy
+            # Deep copy for thread safety (prevents RuntimeError if dict changes during iteration)
+            state_copy = copy.deepcopy(self.state)
             state_copy['last_updated'] = datetime.now().isoformat()
-            with open(self.state_file, 'w') as f:
+
+            # Write with atomic rename to prevent corruption
+            temp_file = f"{self.state_file}.tmp"
+            with open(temp_file, 'w') as f:
                 json.dump(state_copy, f, indent=2)
+
+            # Atomic rename (prevents partial writes if crash during save)
+            os.replace(temp_file, self.state_file)
+
+            # Set restricted permissions (owner read/write only)
+            os.chmod(self.state_file, 0o600)
+
         except Exception as e:
             logging.error(f"Failed to save state: {e}")
     
@@ -204,13 +342,15 @@ class TradingBot:
         EPHEMERAL MODE: Auto-recovery from Bybit API.
 
         If container restarted without persistent state (ephemeral volumes),
-        this method detects existing positions from Bybit API and reconstructs
-        minimal state to prevent duplicate position errors.
+        this method detects existing positions AND open limit orders from Bybit API
+        and reconstructs minimal state to prevent duplicate position errors.
         """
         try:
             # Skip if state already has position info (normal restoration path)
             if self.state.get('side'):
                 logging.info("✓ State already loaded, skipping API recovery")
+                # Still check for open orders even if position state exists
+                self._restore_open_orders_from_bybit()
                 return
 
             # Check Bybit API for existing position
@@ -218,6 +358,8 @@ class TradingBot:
 
             if not position:
                 logging.info("✓ No existing position detected on Bybit")
+                # Check for open limit orders even without position
+                self._restore_open_orders_from_bybit()
                 return
 
             # Position exists but state is empty - RECOVERY NEEDED
@@ -233,6 +375,51 @@ class TradingBot:
             logging.warning(f"    SL: {stop_loss:.4f} | TP: {take_profit:.4f}")
             logging.warning(f"    Reconstructing state from API...")
             logging.warning("="*60)
+
+            # ========== CRITICAL FIX: Set SL/TP if missing ==========
+            # This happens when limit order fills but bot restarts before _finalize_limit_order_entry()
+            # can set SL/TP. Position is unprotected - MUST set SL/TP immediately.
+            position_side = "Buy" if side == "Long" else "Sell"
+            sl_tp_set = False
+
+            # Check if SL is missing (0 or very close to 0)
+            if stop_loss == 0.0:
+                # Calculate SL based on entry price and config
+                if side == "Long":
+                    calculated_sl = entry_price * (1 - self.config.TSL_PCT)
+                else:
+                    calculated_sl = entry_price * (1 + self.config.TSL_PCT)
+
+                try:
+                    logging.warning(f"    ⚠️  MISSING SL DETECTED - Setting SL: {calculated_sl:.4f}")
+                    self.adapter.set_stop_loss(self.config.TICKER, calculated_sl, position_side)
+                    stop_loss = calculated_sl
+                    sl_tp_set = True
+                    logging.warning(f"    ✓ SL set successfully: {calculated_sl:.4f}")
+                except Exception as e:
+                    logging.error(f"    ❌ Failed to set SL: {e}")
+
+            # Check if TP is missing (0 or very close to 0)
+            if take_profit == 0.0 and self.config.TP_PCT > 0:
+                # Calculate TP based on entry price and config
+                if side == "Long":
+                    calculated_tp = entry_price * (1 + self.config.TP_PCT)
+                else:
+                    calculated_tp = entry_price * (1 - self.config.TP_PCT)
+
+                try:
+                    logging.warning(f"    ⚠️  MISSING TP DETECTED - Setting TP: {calculated_tp:.4f}")
+                    self.adapter.set_take_profit(self.config.TICKER, calculated_tp, position_side)
+                    take_profit = calculated_tp
+                    sl_tp_set = True
+                    logging.warning(f"    ✓ TP set successfully: {calculated_tp:.4f}")
+                except Exception as e:
+                    logging.error(f"    ❌ Failed to set TP: {e}")
+
+            if sl_tp_set:
+                logging.warning("    ✅ Position protection restored (SL/TP set)")
+            else:
+                logging.info("    ✓ SL/TP already set on Bybit")
 
             # Reconstruct minimal state to prevent duplicate positions
             self.state = {
@@ -260,10 +447,86 @@ class TradingBot:
                 )
                 logging.info(f"✓ Trade logger started for recovered {side} position")
 
+            # Also check for any open limit orders
+            self._restore_open_orders_from_bybit()
+
         except Exception as e:
             logging.error(f"Error during startup position recovery: {e}", exc_info=True)
             # Non-fatal - bot will continue, but may have duplicate position risk
             logging.warning("⚠️  Recovery failed - monitor for duplicate positions!")
+
+    def _restore_open_orders_from_bybit(self):
+        """
+        Restore open limit orders from Bybit API after restart.
+
+        This ensures that if bot restarts while limit orders are pending,
+        it will continue monitoring them and process fills correctly.
+
+        Critical for ensuring SL/TP is set after order fills post-restart.
+        """
+        if not self.config.LIMIT_ORDER_MODE:
+            return  # Not in limit order mode
+
+        try:
+            # Get open orders from Bybit
+            existing_orders = self.adapter.get_open_orders(self.config.TICKER)
+
+            if not existing_orders:
+                logging.info("✓ No open limit orders detected on Bybit")
+                return
+
+            # We have open orders - restore them to tracking
+            logging.warning("="*60)
+            logging.warning(f"🔄 LIMIT ORDER RECOVERY: Found {len(existing_orders)} open orders on Bybit")
+
+            # Clear any stale in-memory state
+            self.active_limit_orders = []
+
+            # Populate self.active_limit_orders from Bybit
+            for idx, bybit_order in enumerate(existing_orders, start=1):
+                order_id = bybit_order.get('orderId')
+                side = bybit_order.get('side')  # "Buy" or "Sell"
+                price = float(bybit_order.get('price', 0))
+                qty = float(bybit_order.get('qty', 0))
+                created_time = bybit_order.get('createdTime', 0)
+
+                # Convert to timestamp (Bybit uses milliseconds)
+                timestamp = int(created_time) / 1000 if created_time else time.time()
+
+                # Reconstruct order tracking
+                self.active_limit_orders.append({
+                    'order_id': order_id,
+                    'timestamp': timestamp,
+                    'side': 'LONG' if side == 'Buy' else 'SHORT',
+                    'price': price,
+                    'qty': qty,
+                    'decision': 'BUY' if side == 'Buy' else 'SELL',
+                    'level': idx  # Assign sequential level (original level unknown)
+                })
+
+                logging.warning(f"   ✓ Restored: {order_id} | {side} @ {price:.4f} | Qty: {qty:.4f}")
+
+            logging.warning(f"   Total: {len(self.active_limit_orders)} orders restored to monitoring")
+            logging.warning(f"   Bot will now track these orders and process fills")
+            logging.warning("="*60)
+
+            # Start trade logger if not already started
+            if not self.trade_logger.current_trade and self.active_limit_orders:
+                side = self.active_limit_orders[0]['side']
+                self.trade_logger.start_trade(
+                    ticker=self.config.TICKER,
+                    side=side,
+                    decision_data={
+                        'recovered_orders': True,
+                        'order_count': len(self.active_limit_orders),
+                        'timestamp': datetime.now().isoformat()
+                    }
+                )
+                logging.info(f"✓ Trade logger started for recovered limit orders")
+
+        except Exception as e:
+            logging.error(f"Failed to restore open orders from Bybit: {e}", exc_info=True)
+            logging.warning("⚠️  Order recovery failed - monitor for missing SL/TP after fills!")
 
     def _extract_top_indicators(self, df_row, features_list, n=10) -> Dict[str, float]:
         """Extract top N indicator values from dataframe row"""
@@ -276,6 +539,325 @@ class TradingBot:
                     value = value.item()
                 indicators[feat] = float(value) if value is not None else None
         return indicators
+
+    def _find_nearest_swing_low(self, df, current_price: float, max_distance_pct: float = 1.5) -> Optional[float]:
+        """
+        Find nearest swing low below current price within max_distance_pct.
+
+        Swing low = local minimum where low[i] < low[i-1] AND low[i] < low[i+1]
+        """
+        try:
+            if df is None or len(df) < 5:
+                return None
+
+            # Use closed candles only (exclude last forming candle)
+            df_closed = df.iloc[:-1]
+
+            # Look back last 50 candles for swing lows
+            lookback = min(50, len(df_closed) - 2)
+            swing_lows = []
+
+            for i in range(len(df_closed) - lookback, len(df_closed) - 1):
+                if i <= 0:
+                    continue
+
+                # Check if this is a swing low (local minimum)
+                if df_closed.iloc[i]['low'] < df_closed.iloc[i-1]['low'] and \
+                   df_closed.iloc[i]['low'] < df_closed.iloc[i+1]['low']:
+                    swing_low_price = df_closed.iloc[i]['low']
+
+                    # Only consider swing lows below current price
+                    if swing_low_price < current_price:
+                        distance_pct = abs((current_price - swing_low_price) / current_price) * 100
+
+                        # Within max distance
+                        if distance_pct <= max_distance_pct:
+                            swing_lows.append((swing_low_price, distance_pct))
+
+            # Return nearest swing low (smallest distance)
+            if swing_lows:
+                swing_lows.sort(key=lambda x: x[1])  # Sort by distance
+                return swing_lows[0][0]
+
+            return None
+
+        except Exception as e:
+            logging.error(f"Error finding swing low: {e}")
+            return None
+
+    def _find_nearest_swing_high(self, df, current_price: float, max_distance_pct: float = 1.5) -> Optional[float]:
+        """
+        Find nearest swing high above current price within max_distance_pct.
+
+        Swing high = local maximum where high[i] > high[i-1] AND high[i] > high[i+1]
+        """
+        try:
+            if df is None or len(df) < 5:
+                return None
+
+            # Use closed candles only (exclude last forming candle)
+            df_closed = df.iloc[:-1]
+
+            # Look back last 50 candles for swing highs
+            lookback = min(50, len(df_closed) - 2)
+            swing_highs = []
+
+            for i in range(len(df_closed) - lookback, len(df_closed) - 1):
+                if i <= 0:
+                    continue
+
+                # Check if this is a swing high (local maximum)
+                if df_closed.iloc[i]['high'] > df_closed.iloc[i-1]['high'] and \
+                   df_closed.iloc[i]['high'] > df_closed.iloc[i+1]['high']:
+                    swing_high_price = df_closed.iloc[i]['high']
+
+                    # Only consider swing highs above current price
+                    if swing_high_price > current_price:
+                        distance_pct = abs((swing_high_price - current_price) / current_price) * 100
+
+                        # Within max distance
+                        if distance_pct <= max_distance_pct:
+                            swing_highs.append((swing_high_price, distance_pct))
+
+            # Return nearest swing high (smallest distance)
+            if swing_highs:
+                swing_highs.sort(key=lambda x: x[1])  # Sort by distance
+                return swing_highs[0][0]
+
+            return None
+
+        except Exception as e:
+            logging.error(f"Error finding swing high: {e}")
+            return None
+
+    def _calculate_dca_levels(self, decision: str, current_price: float, df=None) -> list:
+        """
+        Calculate 3 DCA limit order levels using Hybrid approach:
+        - Level 1: Fixed offset (DCA_LEVEL1_PCT)
+        - Level 2: ATR-based (ATR * DCA_ATR_MULTIPLIER)
+        - Level 3: Nearest swing low/high (within max DCA_MAX_SWING_DISTANCE_PCT)
+
+        Returns list of 3 prices: [level1_price, level2_price, level3_price]
+        """
+        try:
+            # Get ATR from last closed candle if available
+            atr = None
+            if df is not None and len(df) > 1:
+                df_closed = df.iloc[:-1]
+                last_row = df_closed.iloc[-1]
+                if 'atr_14' in last_row.index:
+                    atr = last_row['atr_14']
+
+            levels = []
+
+            # LEVEL 1: Fixed percentage offset
+            if decision == "BUY":
+                level1 = current_price * (1 - self.config.DCA_LEVEL1_PCT)
+            else:  # SELL
+                level1 = current_price * (1 + self.config.DCA_LEVEL1_PCT)
+            levels.append(level1)
+
+            # LEVEL 2: ATR-based
+            if atr and atr > 0:
+                if decision == "BUY":
+                    level2 = current_price - (atr * self.config.DCA_ATR_MULTIPLIER)
+                else:  # SELL
+                    level2 = current_price + (atr * self.config.DCA_ATR_MULTIPLIER)
+            else:
+                # Fallback if ATR not available: use 2x level1 offset
+                if decision == "BUY":
+                    level2 = current_price * (1 - self.config.DCA_LEVEL1_PCT * 2)
+                else:
+                    level2 = current_price * (1 + self.config.DCA_LEVEL1_PCT * 2)
+            levels.append(level2)
+
+            # LEVEL 3: Swing-based (quality zone)
+            if decision == "BUY":
+                swing_level = self._find_nearest_swing_low(df, current_price, self.config.DCA_MAX_SWING_DISTANCE_PCT)
+                if swing_level:
+                    level3 = swing_level
+                else:
+                    # Fallback: 5x level1 offset (~1.5% for level1=0.3%)
+                    level3 = current_price * (1 - self.config.DCA_LEVEL1_PCT * 5)
+            else:  # SELL
+                swing_level = self._find_nearest_swing_high(df, current_price, self.config.DCA_MAX_SWING_DISTANCE_PCT)
+                if swing_level:
+                    level3 = swing_level
+                else:
+                    # Fallback: 5x level1 offset (~1.5% for level1=0.3%)
+                    level3 = current_price * (1 + self.config.DCA_LEVEL1_PCT * 5)
+            levels.append(level3)
+
+            # Sort levels to ensure proper ordering (LONG: descending, SHORT: ascending)
+            if decision == "BUY":
+                levels.sort(reverse=True)  # Highest first (closest to current)
+            else:
+                levels.sort()  # Lowest first (closest to current)
+
+            # FIX #8: Ensure DCA levels are distinct (min 0.1% apart)
+            # This prevents Bybit from rejecting duplicate price levels
+            for i in range(len(levels) - 1):
+                distance_pct = abs(levels[i] - levels[i+1]) / levels[i]
+
+                if distance_pct < self.config.DCA_MIN_LEVEL_DISTANCE_PCT:
+                    logging.warning(f"⚠️  DCA levels too close: L{i+1}={levels[i]:.4f} vs L{i+2}={levels[i+1]:.4f} (distance: {distance_pct*100:.3f}%)")
+
+                    # Force minimum spacing (0.3% = 3x the minimum)
+                    if decision == "BUY":
+                        levels[i+1] = levels[i] * (1 - 0.003)  # Force -0.3% spacing for LONG
+                        logging.warning(f"   Adjusted L{i+2} to {levels[i+1]:.4f} (forced -0.3% spacing)")
+                    else:
+                        levels[i+1] = levels[i] * (1 + 0.003)  # Force +0.3% spacing for SHORT
+                        logging.warning(f"   Adjusted L{i+2} to {levels[i+1]:.4f} (forced +0.3% spacing)")
+
+            # Log DCA levels
+            logging.info(f"DCA Levels calculated for {decision}:")
+            logging.info(f"  Current: {current_price:.4f}")
+            logging.info(f"  Level 1 (Fixed): {levels[0]:.4f} ({abs((levels[0]/current_price - 1)*100):.2f}%)")
+            logging.info(f"  Level 2 (ATR):   {levels[1]:.4f} ({abs((levels[1]/current_price - 1)*100):.2f}%)")
+            logging.info(f"  Level 3 (Swing): {levels[2]:.4f} ({abs((levels[2]/current_price - 1)*100):.2f}%)")
+
+            return levels
+
+        except Exception as e:
+            logging.error(f"Error calculating DCA levels: {e}", exc_info=True)
+            # Fallback: simple fixed percentage levels
+            if decision == "BUY":
+                return [
+                    current_price * (1 - 0.003),  # -0.3%
+                    current_price * (1 - 0.006),  # -0.6%
+                    current_price * (1 - 0.010)   # -1.0%
+                ]
+            else:
+                return [
+                    current_price * (1 + 0.003),  # +0.3%
+                    current_price * (1 + 0.006),  # +0.6%
+                    current_price * (1 + 0.010)   # +1.0%
+                ]
+
+    def _cancel_unfilled_limit_orders_safe(self, orders_to_cancel: list, reason: str = "position_closed"):
+        """
+        FIX #1: Safe cancellation of specific unfilled limit orders.
+
+        This method only cancels orders that have been verified to be open on Bybit,
+        preventing race conditions where orders fill between check and cancel.
+
+        Args:
+            orders_to_cancel: List of order dicts to cancel (pre-filtered)
+            reason: Reason for cancellation (for logging)
+        """
+        if not orders_to_cancel:
+            return
+
+        cancelled_count = 0
+        total_count = len(orders_to_cancel)
+        logging.warning(f"🚫 Cancelling {total_count} verified unfilled order(s) (reason: {reason})")
+
+        for order_info in orders_to_cancel:
+            try:
+                order_id = order_info['order_id']
+                resp = self.adapter.cancel_order(self.config.TICKER, order_id)
+
+                logging.info(f"   ✓ Cancelled order {order_id} (Level {order_info.get('level', 'N/A')})")
+                cancelled_count += 1
+
+                # Log cancellation event
+                if self.trade_logger.current_trade:
+                    self.trade_logger.log_event(f"LIMIT_ORDER_CANCELLED", {
+                        "order_id": order_id,
+                        "level": order_info.get('level'),
+                        "price": float(order_info.get('price', 0)),
+                        "reason": reason
+                    })
+
+            except Exception as e:
+                # This can still fail if order fills between our check and this cancel
+                # But it's much less likely than without the pre-check
+                logging.warning(f"   ⚠️  Failed to cancel order {order_id}: {e} (may have filled concurrently)")
+
+        # Clear active limit orders list
+        self.active_limit_orders.clear()
+        logging.warning(f"   ✅ Cancelled {cancelled_count}/{total_count} orders")
+
+    def _cancel_unfilled_limit_orders(self, reason: str = "position_closed"):
+        """
+        Cancel all unfilled limit orders (DCA mode).
+
+        CRITICAL: This prevents unfilled DCA orders from executing AFTER
+        position is closed (e.g., after hitting TP), which would open
+        a new unwanted position.
+
+        Args:
+            reason: Reason for cancellation (for logging)
+        """
+        if not self.active_limit_orders:
+            return
+
+        cancelled_count = 0
+        total_count = len(self.active_limit_orders)
+        logging.warning(f"🚫 Cancelling {total_count} unfilled limit order(s) (reason: {reason})")
+
+        for order_info in self.active_limit_orders[:]:  # Use slice copy to avoid modification during iteration
+            try:
+                order_id = order_info['order_id']
+                resp = self.adapter.cancel_order(self.config.TICKER, order_id)
+
+                logging.info(f"   ✓ Cancelled order {order_id} (Level {order_info.get('level', 'N/A')})")
+                cancelled_count += 1
+
+                # Log cancellation event
+                if self.trade_logger.current_trade:
+                    self.trade_logger.log_event(f"LIMIT_ORDER_CANCELLED", {
+                        "order_id": order_id,
+                        "level": order_info.get('level'),
+                        "price": float(order_info.get('price', 0)),
+                        "reason": reason
+                    })
+
+            except Exception as e:
+                logging.error(f"   ✗ Failed to cancel order {order_id}: {e}")
+
+        # Clear active limit orders list
+        self.active_limit_orders.clear()
+        logging.warning(f"   ✅ Cancelled {cancelled_count}/{total_count} orders")
+
+    def _is_in_cooldown_period(self) -> bool:
+        """
+        Check if bot is in cooldown period after ANY closed position.
+
+        This prevents bot from immediately re-entering on the same 15m candle
+        when it checks every 60s (e.g., after manual close or TP/SL hit).
+
+        Returns True if cooldown is active, False otherwise.
+        """
+        if not self.state:
+            return False
+
+        last_close_time_str = self.state.get('last_position_closed_at')
+        if not last_close_time_str:
+            return False
+
+        try:
+            last_close_time = datetime.fromisoformat(last_close_time_str)
+            cooldown_minutes = self.state.get('cooldown_minutes', self.config.COOLDOWN_AFTER_LOSS_MINUTES)
+            elapsed_minutes = (datetime.now() - last_close_time).total_seconds() / 60
+
+            if elapsed_minutes < cooldown_minutes:
+                remaining_minutes = cooldown_minutes - elapsed_minutes
+                last_pnl = self.state.get('last_pnl_usd', 0)
+                pnl_info = f" (last PnL: {last_pnl:+.2f} USD)" if last_pnl != 0 else ""
+                logging.info(f"⏰ COOLDOWN ACTIVE: {remaining_minutes:.1f} min remaining{pnl_info}")
+                return True
+            else:
+                # Cooldown expired - clear state
+                logging.info(f"✅ Cooldown expired ({elapsed_minutes:.1f} min). Ready for new positions.")
+                self.state = {}
+                self._save_state()
+                return False
+
+        except Exception as e:
+            logging.error(f"Error checking cooldown: {e}")
+            return False
     
     def get_decision(self, df=None) -> str:
         """Get ML model decision with full logging"""
@@ -287,16 +869,20 @@ class TradingBot:
                 all_model_features = list(set(self.features_long + self.features_short))
 
                 # PERFORMANCE: Use feature cache for incremental updates
-                df = self.feature_cache.get_features(
+                df, is_new_candle = self.feature_cache.get_features(
                     ticker=self.config.TICKER,
                     timeframe=self.config.TIMEFRAME,
                     helper_timeframes=self.config.HELPER_TIMEFRAMES,
                     side='backtest',
                     version=self.version,
-                    model_features_to_preserve=all_model_features,
-                    skip_slow_features=False  # v1.2 models need pivot S/R features (nearest_resistance_strength, etc.)
+                    model_features_to_preserve=all_model_features
                 )
                 logging.info(f"✓ Data fetched successfully ({len(df)} candles)")
+
+                # OPTIMIZATION: Skip ML prediction if same candle (cache hit)
+                if not is_new_candle:
+                    logging.info("⏭️  Skipping ML prediction - no new closed candle (cache hit)")
+                    return "HOLD"
             
             if df.empty:
                 logging.error("❌ Empty dataframe received!")
@@ -345,23 +931,110 @@ class TradingBot:
             
             logging.info(f"📊 Model Probabilities: BUY={proba_buy:.3f}, SELL={proba_sell:.3f} (threshold={self.config.PROBABILITY_THRESHOLD:.3f})")
             logging.info(f"📏 Probability Difference: {proba_diff:.3f} (min_required={self.config.MIN_PROBA_DIFF:.3f})")
-            
-            # Determine decision
+
+            # ========== ICT CONTEXT MODE (OPCJA 3) ==========
+            # Dynamic threshold adjustment based on Smart Money signals
+            # When ICT signals are strong → lower thresholds (catch more opportunities)
+            # When market regime is unstable → higher thresholds (filter noise)
+
+            if self.config.ICT_CONTEXT_MODE:
+                # Extract ICT features from last closed candle
+                ict_composite = last_row.get('ict_composite_score', 0.5)  # Default: neutral
+                liquidity_sweep = last_row.get('liquidity_sweep', 0.0)
+                fvg_signal = last_row.get('fvg_signal', 0.0)
+                order_block = last_row.get('order_block', 0.0)
+                market_structure_shift = last_row.get('market_structure_shift', 0.0)
+
+                # Extract market regime features
+                rsi = last_row.get('rsi_14', 50)
+                atr_norm = last_row.get('atr_normalized', 1.0)
+                volume_ratio = last_row.get('volume_vs_ma_20', 1.0)
+
+                # 1. Calculate ICT Strength (0-1 scale)
+                ict_strength = 0.0
+
+                # High-value ICT signals (weighted sum)
+                if ict_composite > 0.6:  # Strong composite score
+                    ict_strength += 0.3
+                if liquidity_sweep > 0:  # Liquidity grab detected
+                    ict_strength += 0.2
+                if abs(fvg_signal) > 0:  # Fair Value Gap present
+                    ict_strength += 0.2
+                if abs(order_block) > 0:  # Order Block identified
+                    ict_strength += 0.2
+                if abs(market_structure_shift) > 0:  # Structure break
+                    ict_strength += 0.1
+
+                ict_strength = min(ict_strength, 1.0)  # Cap at 1.0
+
+                # 2. Calculate Market Regime Multiplier
+                regime_multiplier = 1.0
+
+                # Trending market (easier to trade) → lower thresholds
+                if (rsi > 60 and proba_buy > proba_sell) or (rsi < 40 and proba_sell > proba_buy):
+                    regime_multiplier *= (1.0 - 0.1 * self.config.REGIME_SENSITIVITY)  # -10% threshold
+
+                # High volatility with volume confirmation → lower thresholds
+                if atr_norm > 1.2 and volume_ratio > 1.3:
+                    regime_multiplier *= (1.0 - 0.15 * self.config.REGIME_SENSITIVITY)  # -15% threshold
+
+                # Low volatility OR low volume → LEKKO OBNIŻ (więcej okazji w spokojnym rynku)
+                # FIX: Było 1.0 + 0.15 (podnosiło), teraz 1.0 - 0.05 (lekko obniża)
+                if atr_norm < 0.7 or volume_ratio < 0.6:
+                    regime_multiplier *= (1.0 - 0.05 * self.config.REGIME_SENSITIVITY)  # -5% threshold (neutral/slightly lower)
+
+                # Extreme RSI without volume → LEKKO PODNOSI (ale mniej niż wcześniej)
+                # FIX: Było 1.0 + 0.25 (mocno podnosiło), teraz 1.0 + 0.10 (lekko podnosi)
+                if (rsi > 75 or rsi < 25) and volume_ratio < 0.8:
+                    regime_multiplier *= (1.0 + 0.10 * self.config.REGIME_SENSITIVITY)  # +10% threshold (was +25%)
+
+                # 3. Dynamic Threshold Adjustment
+                base_prob_threshold = self.config.PROBABILITY_THRESHOLD
+                base_diff_threshold = self.config.MIN_PROBA_DIFF
+
+                # Apply ICT strength reduction (only if above minimum strength)
+                if ict_strength >= self.config.ICT_MIN_STRENGTH:
+                    ict_adjustment = 1.0 - (ict_strength * self.config.ICT_MAX_THRESHOLD_REDUCTION)
+                else:
+                    ict_adjustment = 1.0  # No reduction if ICT too weak
+
+                # Apply adjustments
+                dynamic_prob_threshold = base_prob_threshold * regime_multiplier * ict_adjustment
+                dynamic_diff_threshold = base_diff_threshold * regime_multiplier * ict_adjustment
+
+                # Safety bounds (never go too extreme)
+                dynamic_prob_threshold = np.clip(dynamic_prob_threshold, 0.45, 0.85)
+                dynamic_diff_threshold = np.clip(dynamic_diff_threshold, 0.08, 0.35)
+
+                # Enhanced logging
+                logging.info(f"🎯 ICT Context: composite={ict_composite:.2f}, strength={ict_strength:.2f}")
+                logging.info(f"📈 Regime: RSI={rsi:.1f}, ATR={atr_norm:.2f}, Vol={volume_ratio:.2f}, mult={regime_multiplier:.2f}")
+                logging.info(f"🔧 Dynamic Thresholds: prob={dynamic_prob_threshold:.3f} (base={base_prob_threshold:.2f}), diff={dynamic_diff_threshold:.3f} (base={base_diff_threshold:.2f})")
+            else:
+                # Use static thresholds (original behavior)
+                dynamic_prob_threshold = self.config.PROBABILITY_THRESHOLD
+                dynamic_diff_threshold = self.config.MIN_PROBA_DIFF
+
+            # Determine decision with dynamic thresholds
             decision = "HOLD"
-            if proba_buy > self.config.PROBABILITY_THRESHOLD and proba_buy > proba_sell:
+            if proba_buy > dynamic_prob_threshold and proba_buy > proba_sell:
                 # Check if confidence gap is sufficient
-                if proba_diff >= self.config.MIN_PROBA_DIFF:
+                if proba_diff >= dynamic_diff_threshold:
                     decision = "BUY"
+                    if self.config.ICT_CONTEXT_MODE:
+                        logging.info(f"✅ BUY signal accepted (ICT-adjusted threshold: {dynamic_prob_threshold:.3f})")
                 else:
-                    logging.warning(f"⚠️  BUY signal rejected: insufficient confidence gap ({proba_diff:.3f} < {self.config.MIN_PROBA_DIFF:.3f})")
-            elif proba_sell > self.config.PROBABILITY_THRESHOLD and proba_sell > proba_buy:
+                    logging.warning(f"⚠️  BUY signal rejected: insufficient confidence gap ({proba_diff:.3f} < {dynamic_diff_threshold:.3f})")
+            elif proba_sell > dynamic_prob_threshold and proba_sell > proba_buy:
                 # Check if confidence gap is sufficient
-                if proba_diff >= self.config.MIN_PROBA_DIFF:
+                if proba_diff >= dynamic_diff_threshold:
                     decision = "SELL"
+                    if self.config.ICT_CONTEXT_MODE:
+                        logging.info(f"✅ SELL signal accepted (ICT-adjusted threshold: {dynamic_prob_threshold:.3f})")
                 else:
-                    logging.warning(f"⚠️  SELL signal rejected: insufficient confidence gap ({proba_diff:.3f} < {self.config.MIN_PROBA_DIFF:.3f})")
-            
-            logging.info(f"🎯 Model Decision: {decision}")
+                    logging.warning(f"⚠️  SELL signal rejected: insufficient confidence gap ({proba_diff:.3f} < {dynamic_diff_threshold:.3f})")
+
+            logging.info(f"🎯 Final Decision: {decision}")
 
             # Cache decision data for later use
             self.last_decision_data = {
@@ -408,16 +1081,19 @@ class TradingBot:
                     'highest_price': self.state.get('highest_price'),
                     'lowest_price': self.state.get('lowest_price')
                 }
-            
+
             self.trade_logger.log_candle(self.last_candle_data, position_data)
-            
+
             # Extract top indicators if signal
             if decision in ["BUY", "SELL"]:
                 features_to_use = self.features_long if decision == "BUY" else self.features_short
                 top_indicators = self._extract_top_indicators(last_row, features_to_use, n=15)
-                
+
                 self.last_decision_data['top_indicators'] = top_indicators
-            
+
+            # Cache df for DCA level calculations
+            self.last_df = df
+
             return decision
             
         except Exception as e:
@@ -425,13 +1101,25 @@ class TradingBot:
             return "ERROR"
     
     def _update_tsl(self, position: Dict, current_price: float):
-        """Update TSL - ONLY when in profit"""
+        """Update TSL - ONLY when in profit AND all DCA limit orders filled/expired"""
         side = position.get('side')
         entry = position.get('entryPrice', 0)
-        
+
         if entry == 0:
             return
-        
+
+        # DCA MODE: TSL completely disabled
+        # Reason: Partial TP moves SL to BE+fees, which is safer and simpler
+        # than tracking TSL with multiple unfilled orders
+        if self.config.LIMIT_ORDER_MODE and self.config.DCA_ENABLED:
+            logging.debug(f"TSL disabled for DCA mode (SL managed by partial TP)")
+            return
+
+        # SINGLE LIMIT ORDER MODE: Block TSL if waiting for limit order to fill
+        if self.config.LIMIT_ORDER_MODE and self.active_limit_orders:
+            logging.debug(f"TSL blocked: waiting for limit order to fill/expire")
+            return
+
         # Track highest/lowest
         if side == 'Long':
             highest = self.state.get('highest_price', entry)
@@ -439,18 +1127,24 @@ class TradingBot:
                 highest = current_price
                 self.state['highest_price'] = highest
                 self._save_state()
-            
+
             # TSL ONLY if in profit
             if highest > entry:
                 new_sl = highest * (1 - self.config.TSL_PCT)
                 last_sl = self.state.get('last_sl', 0)
-                
+
                 if new_sl > last_sl:
-                    try:
-                        logging.info(f"📈 TSL update: {last_sl:.4f} → {new_sl:.4f}")
-                        self.adapter.set_stop_loss(self.config.TICKER, new_sl, "Buy")
-                        
-                        # Log TSL event
+                    # FIX #4: Retry TSL update with exponential backoff
+                    logging.info(f"📈 TSL update: {last_sl:.4f} → {new_sl:.4f}")
+
+                    result = self._retry_with_backoff(
+                        self.adapter.set_stop_loss,
+                        self.config.TICKER, new_sl, "Buy",
+                        max_attempts=3  # 3 attempts should be enough for SL update
+                    )
+
+                    if result is not None:
+                        # Success
                         self.trade_logger.log_event("TSL_UPDATE", {
                             "old_sl": float(last_sl),
                             "new_sl": float(new_sl),
@@ -459,14 +1153,17 @@ class TradingBot:
                             "reason": "in_profit",
                             "candle": self.last_candle_data
                         })
-                        
+
                         self.state['last_sl'] = new_sl
                         self._save_state()
-                    except Exception as e:
-                        logging.error(f"TSL update failed: {e}")
+                    else:
+                        # All retries failed - CRITICAL
+                        logging.error(f"❌ CRITICAL: TSL update failed after 3 retries - position may be unprotected!")
                         self.trade_logger.log_event("ERROR", {
-                            "type": "TSL_UPDATE_FAILED",
-                            "error": str(e)
+                            "type": "TSL_UPDATE_FAILED_ALL_RETRIES",
+                            "old_sl": float(last_sl),
+                            "intended_new_sl": float(new_sl),
+                            "error": "All retry attempts exhausted"
                         })
         
         elif side == 'Short':
@@ -482,11 +1179,17 @@ class TradingBot:
                 last_sl = self.state.get('last_sl', 999999)
                 
                 if new_sl < last_sl:
-                    try:
-                        logging.info(f"📉 TSL update: {last_sl:.4f} → {new_sl:.4f}")
-                        self.adapter.set_stop_loss(self.config.TICKER, new_sl, "Sell")
-                        
-                        # Log TSL event
+                    # FIX #4: Retry TSL update with exponential backoff
+                    logging.info(f"📉 TSL update: {last_sl:.4f} → {new_sl:.4f}")
+
+                    result = self._retry_with_backoff(
+                        self.adapter.set_stop_loss,
+                        self.config.TICKER, new_sl, "Sell",
+                        max_attempts=3
+                    )
+
+                    if result is not None:
+                        # Success
                         self.trade_logger.log_event("TSL_UPDATE", {
                             "old_sl": float(last_sl),
                             "new_sl": float(new_sl),
@@ -495,14 +1198,17 @@ class TradingBot:
                             "reason": "in_profit",
                             "candle": self.last_candle_data
                         })
-                        
+
                         self.state['last_sl'] = new_sl
                         self._save_state()
-                    except Exception as e:
-                        logging.error(f"TSL update failed: {e}")
+                    else:
+                        # All retries failed - CRITICAL
+                        logging.error(f"❌ CRITICAL: TSL update failed after 3 retries - position may be unprotected!")
                         self.trade_logger.log_event("ERROR", {
-                            "type": "TSL_UPDATE_FAILED",
-                            "error": str(e)
+                            "type": "TSL_UPDATE_FAILED_ALL_RETRIES",
+                            "old_sl": float(last_sl),
+                            "intended_new_sl": float(new_sl),
+                            "error": "All retry attempts exhausted"
                         })
 
     def _check_profit_protection(self, position: Dict, current_price: float):
@@ -684,6 +1390,10 @@ class TradingBot:
         reduce_side = "Sell" if side == 'Long' else "Buy"
 
         try:
+            # CRITICAL: Cancel any unfilled limit orders (DCA mode)
+            # This prevents unfilled orders from executing after partial TP hit
+            self._cancel_unfilled_limit_orders(reason="partial_tp_hit")
+
             # Pass position_side for correct positionIdx in hedge mode
             self.adapter.market_close(self.config.TICKER, reduce_side, qty, position_side=side)
             time.sleep(2)
@@ -697,11 +1407,26 @@ class TradingBot:
 
             # Calculate partial P&L based on actual closed quantity
             if side == 'Long':
-                pnl_pct = (current_price / entry - 1) * 100
+                pnl_pct = (current_price / entry - 1) * 100 if entry > 0 else 0
             else:
-                pnl_pct = (entry / current_price - 1) * 100
+                pnl_pct = (entry / current_price - 1) * 100 if (entry > 0 and current_price > 0) else 0
 
-            pnl_usd = (self.config.TRADE_SIZE_USD * pnl_pct / 100) * (actual_qty_closed / size)
+            # FIX #6: Guard against division by zero
+            # FIX #7: Use initial_size from state (works with both fixed and percentage-based sizing)
+            initial_size = self.state.get('initial_size', self.config.TRADE_SIZE_USD)
+            if size > 0 and initial_size > 0:
+                pnl_usd = (initial_size * pnl_pct / 100) * (actual_qty_closed / size)
+            else:
+                logging.error(f"❌ CRITICAL: size=0 or initial_size=0 during PnL calculation (partial TP)")
+                pnl_usd = 0
+
+            # Calculate SL at BE + fees (0.06% for maker+taker)
+            # This ensures we don't lose money on remaining position
+            FEE_PCT = 0.0006  # 0.06% (conservative estimate for round-trip)
+            if side == 'Long':
+                new_sl = entry * (1 + FEE_PCT)
+            else:
+                new_sl = entry * (1 - FEE_PCT)
 
             # Log partial TP event with ACTUAL quantities
             self.trade_logger.log_event("PARTIAL_TP", {
@@ -712,35 +1437,35 @@ class TradingBot:
                 "quantity_remaining": float(actual_remaining_size),
                 "pnl_pct": float(pnl_pct),
                 "pnl_usd": float(pnl_usd),
-                "new_sl": float(entry),
-                "reason": "breakeven",
+                "new_sl": float(new_sl),
+                "reason": "breakeven_plus_fees",
                 "candle": self.last_candle_data
             })
-            
-            # Move SL to breakeven if it was below breakeven
+
+            # Move SL to BE + fees
             last_sl = self.state.get('last_sl', 0)
             should_update_sl = False
-            
+
             if side == 'Long':
-                # For Long: move SL to breakeven if it was below entry
-                if last_sl < entry:
+                # For Long: move SL to BE+fees if it was below
+                if last_sl < new_sl:
                     should_update_sl = True
-                    logging.info(f"TSL was below breakeven ({last_sl:.4f}), moving to breakeven: {entry:.4f}")
+                    logging.info(f"TSL was below BE+fees ({last_sl:.4f}), moving to BE+fees: {new_sl:.4f}")
             else:  # Short
-                # For Short: move SL to breakeven if it was above entry
-                if last_sl > entry or last_sl == 0:
+                # For Short: move SL to BE+fees if it was above
+                if last_sl > new_sl or last_sl == 0:
                     should_update_sl = True
-                    logging.info(f"TSL was above breakeven ({last_sl:.4f}), moving to breakeven: {entry:.4f}")
-            
+                    logging.info(f"TSL was above BE+fees ({last_sl:.4f}), moving to BE+fees: {new_sl:.4f}")
+
             if should_update_sl:
-                logging.info(f"Moving SL to breakeven: {entry:.4f}")
+                logging.info(f"Moving SL to BE + fees: {new_sl:.4f} (entry: {entry:.4f} + {FEE_PCT*100:.2f}%)")
                 if side == 'Long':
-                    self.adapter.set_stop_loss(self.config.TICKER, entry, "Buy")
+                    self.adapter.set_stop_loss(self.config.TICKER, new_sl, "Buy")
                 else:
-                    self.adapter.set_stop_loss(self.config.TICKER, entry, "Sell")
-                
-                self.state['last_sl'] = entry
-            
+                    self.adapter.set_stop_loss(self.config.TICKER, new_sl, "Sell")
+
+                self.state['last_sl'] = new_sl
+
             self.state['partial_tp_taken'] = True
             self._save_state()
 
@@ -799,6 +1524,9 @@ class TradingBot:
 
         # CRITICAL FIX: Level 4 must close ALL remaining to avoid rounding errors
         if next_level == 4:
+            # CRITICAL: Cancel unfilled limit orders before closing position
+            self._cancel_unfilled_limit_orders(reason="dynamic_tp_level_4_closing_position")
+
             # Close entire remaining position
             qty = size
             logging.warning(f"🎯 DYNAMIC TP LEVEL 4 HIT (100%) - CLOSING ALL REMAINING at {current_price:.4f}")
@@ -839,11 +1567,18 @@ class TradingBot:
 
             # Calculate partial P&L based on actual closed quantity
             if side == 'Long':
-                pnl_pct = (current_price / entry - 1) * 100
+                pnl_pct = (current_price / entry - 1) * 100 if entry > 0 else 0
             else:
-                pnl_pct = (entry / current_price - 1) * 100
+                pnl_pct = (entry / current_price - 1) * 100 if (entry > 0 and current_price > 0) else 0
 
-            pnl_usd = (self.config.TRADE_SIZE_USD * pnl_pct / 100) * (actual_qty_closed / initial_size)
+            # FIX #6: Guard against division by zero
+            # FIX #7: Use initial_size from state (already retrieved above)
+            trade_size_usd = self.state.get('initial_size', self.config.TRADE_SIZE_USD)
+            if initial_size > 0 and trade_size_usd > 0:
+                pnl_usd = (trade_size_usd * pnl_pct / 100) * (actual_qty_closed / initial_size)
+            else:
+                logging.error(f"❌ CRITICAL: initial_size=0 during PnL calculation (dynamic TP L{next_level})")
+                pnl_usd = 0
 
             # Log dynamic TP event with ACTUAL quantities
             self.trade_logger.log_event(f"DYNAMIC_TP_L{next_level}", {
@@ -903,20 +1638,50 @@ class TradingBot:
             position = self.adapter.get_position(self.config.TICKER)
             
             if not position or position.get('size', 0) == 0:
+                # FIX #1: CRITICAL RACE CONDITION FIX
+                # Cancel ONLY unfilled orders that are ACTUALLY open on Bybit
+                # This prevents attempting to cancel already-filled orders (race condition)
+                if self.active_limit_orders:
+                    try:
+                        # Get current open orders from Bybit (source of truth)
+                        open_orders_on_bybit = self.adapter.get_open_orders(self.config.TICKER)
+                        open_order_ids = {o['orderId'] for o in open_orders_on_bybit}
+
+                        # Filter: only cancel orders that are BOTH in our tracking AND open on Bybit
+                        orders_to_cancel = [
+                            o for o in self.active_limit_orders
+                            if o['order_id'] in open_order_ids
+                        ]
+
+                        if orders_to_cancel:
+                            logging.info(f"Position closed - cancelling {len(orders_to_cancel)}/{len(self.active_limit_orders)} unfilled orders")
+                            self._cancel_unfilled_limit_orders_safe(orders_to_cancel, reason="position_closed_sl_or_tp")
+                        else:
+                            logging.info(f"Position closed - no unfilled orders to cancel (all {len(self.active_limit_orders)} already filled/cancelled)")
+                            # Clear tracking since all orders processed
+                            self.active_limit_orders.clear()
+
+                    except Exception as e:
+                        logging.error(f"Failed to check open orders before cancellation: {e}")
+                        # Fallback: try to cancel all tracked orders (may fail for already-filled)
+                        self._cancel_unfilled_limit_orders(reason="position_closed_sl_or_tp")
+
                 # Position was closed - end trade logging if active
                 if self.state and self.trade_logger.current_trade:
                     entry = self.state.get('entry_price', 0)
                     current_price = self.adapter.latest_price(self.config.TICKER)
-                    
+
                     # Calculate final P&L
                     side = self.state.get('side')
                     if side == 'Long':
                         pnl_pct = (current_price / entry - 1) * 100 if entry > 0 else 0
                     else:
                         pnl_pct = (entry / current_price - 1) * 100 if entry > 0 else 0
-                    
-                    pnl_usd = self.config.TRADE_SIZE_USD * pnl_pct / 100
-                    
+
+                    # FIX #7: Use initial_size from state (works with both fixed and percentage-based sizing)
+                    trade_size_usd = self.state.get('initial_size', self.config.TRADE_SIZE_USD)
+                    pnl_usd = trade_size_usd * pnl_pct / 100
+
                     # Log exit
                     self.trade_logger.log_event("EXIT", {
                         "trigger": "SL_or_TP",
@@ -925,18 +1690,35 @@ class TradingBot:
                         "pnl_usd": float(pnl_usd),
                         "candle": self.last_candle_data
                     })
-                    
+
                     # End trade
                     duration = (datetime.now() - datetime.fromisoformat(
                         self.trade_logger.current_trade['start_time']
                     )).total_seconds()
-                    
+
                     self.trade_logger.end_trade({
                         "duration_seconds": int(duration),
                         "total_pnl_usd": float(pnl_usd),
                         "total_pnl_pct": float(pnl_pct)
                     })
-                
+
+                    # COOLDOWN: Always activate cooldown after ANY closed position
+                    # This prevents bot from immediately re-entering based on same 15m candle
+                    # (e.g., if user manually closes position or bot closes at TP/SL)
+                    cooldown_until = datetime.now()
+                    result_emoji = "❌" if pnl_usd < 0 else "✅"
+                    logging.warning(f"⏰ {result_emoji} POSITION CLOSED: PnL={pnl_usd:.2f} USD ({pnl_pct:.2f}%)")
+                    logging.warning(f"   Activating {self.config.COOLDOWN_AFTER_LOSS_MINUTES}min cooldown before next position")
+
+                    # Save cooldown timestamp in a new state (separate from position state)
+                    self.state = {
+                        'last_position_closed_at': cooldown_until.isoformat(),
+                        'cooldown_minutes': self.config.COOLDOWN_AFTER_LOSS_MINUTES,
+                        'last_pnl_usd': pnl_usd  # For logging purposes
+                    }
+                    self._save_state()
+                    return False
+
                 if self.state:
                     logging.info("Position closed. Resetting state.")
                     self.state = {}
@@ -1018,7 +1800,18 @@ class TradingBot:
                 "type": "MANAGE_POSITION_ERROR",
                 "error": str(e)
             })
-            return True
+
+            # FIX #7: Don't assume position exists on exception
+            # Re-check position to return correct value
+            try:
+                position = self.adapter.get_position(self.config.TICKER)
+                has_position = position and position.get('size', 0) > 0
+                logging.info(f"Exception recovery: position exists = {has_position}")
+                return has_position
+            except:
+                # If we can't even check, safer to assume no position
+                logging.warning("Cannot verify position after exception - assuming no position")
+                return False
     
     def _open_position(self, decision: str):
         """Open new position with verification and logging"""
@@ -1027,25 +1820,109 @@ class TradingBot:
             if current_price == 0:
                 return
 
-            qty = round(self.config.TRADE_SIZE_USD / current_price, 2)
-            if qty <= 0:
-                return
-
             side_str = "Buy" if decision == "BUY" else "Sell"
             position_type = "LONG" if decision == "BUY" else "SHORT"
 
+            # ========== CHECK MAXIMUM POSITION LIMIT (if enabled) ==========
+            # Verify that opening this position won't exceed configured limit
+            if self.config.MAX_POSITIONS > 0:
+                try:
+                    current_positions = self.adapter.get_active_positions_count()
+                    if current_positions >= self.config.MAX_POSITIONS:
+                        logging.error("="*60)
+                        logging.error(f"❌ POSITION LIMIT REACHED: Cannot open new {position_type} position")
+                        logging.error(f"   Current Active Positions: {current_positions}")
+                        logging.error(f"   Maximum Allowed: {self.config.MAX_POSITIONS}")
+                        logging.error(f"   Signal: {decision} @ ${current_price:.2f}")
+                        logging.error(f"   Wait for existing positions to close before opening new ones")
+                        logging.error("="*60)
+                        return
+                    else:
+                        logging.info("="*60)
+                        logging.info(f"✓ POSITION LIMIT CHECK PASSED")
+                        logging.info(f"   Current Positions: {current_positions}/{self.config.MAX_POSITIONS}")
+                        logging.info(f"   Opening new {position_type} position...")
+                        logging.info("="*60)
+                except Exception as e:
+                    logging.warning("="*60)
+                    logging.warning(f"⚠️  Position limit check failed (API error): {e}")
+                    logging.warning("   Continuing with order placement anyway (use with caution)")
+                    logging.warning("="*60)
+
+            # ========== CALCULATE POSITION SIZE (Percentage-based or Fixed USD) ==========
+            # Determine trade size based on configuration:
+            # - If TRADE_SIZE_PCT > 0: use percentage of available balance (dynamic sizing)
+            # - Otherwise: use fixed TRADE_SIZE_USD (legacy mode)
+            try:
+                available_balance_usd = self.adapter.get_available_balance_usd()
+
+                if self.config.TRADE_SIZE_PCT > 0:
+                    # PERCENTAGE-BASED SIZING: Calculate trade size as % of available balance WITH leverage
+                    buying_power = available_balance_usd * self.config.LEVERAGE
+                    trade_size_usd = buying_power * self.config.TRADE_SIZE_PCT
+                    qty = round(trade_size_usd / current_price, 2)
+
+                    logging.info("="*60)
+                    logging.info(f"📊 PERCENTAGE-BASED POSITION SIZING")
+                    logging.info(f"   Available Balance: ${available_balance_usd:.2f}")
+                    logging.info(f"   Leverage: {self.config.LEVERAGE}x")
+                    logging.info(f"   Buying Power: ${buying_power:.2f}")
+                    logging.info(f"   Risk Percentage: {self.config.TRADE_SIZE_PCT * 100:.2f}%")
+                    logging.info(f"   Calculated Trade Size: ${trade_size_usd:.2f}")
+                    logging.info(f"   Position Quantity: {qty:.4f} @ ${current_price:.2f}")
+                    logging.info("="*60)
+                else:
+                    # FIXED USD SIZING: Use legacy fixed trade size
+                    trade_size_usd = self.config.TRADE_SIZE_USD
+                    qty = round(trade_size_usd / current_price, 2)
+
+                    logging.info(f"💵 Fixed trade size: ${trade_size_usd:.2f} → {qty:.4f} units @ ${current_price:.2f}")
+
+                if qty <= 0:
+                    logging.error(f"❌ Invalid quantity: {qty} (trade_size=${trade_size_usd:.2f}, price=${current_price:.2f})")
+                    return
+
+                # Balance check: verify sufficient margin
+                required_margin = trade_size_usd / self.config.LEVERAGE
+
+                if available_balance_usd < required_margin:
+                    logging.error("="*60)
+                    logging.error(f"❌ INSUFFICIENT BALANCE: Cannot open {position_type} position")
+                    logging.error(f"   Required Margin: ${required_margin:.2f} (${trade_size_usd:.2f} / {self.config.LEVERAGE}x leverage)")
+                    logging.error(f"   Available Balance: ${available_balance_usd:.2f}")
+                    logging.error(f"   Shortfall: ${required_margin - available_balance_usd:.2f}")
+                    logging.error("   Please deposit funds or reduce trade size")
+                    logging.error("="*60)
+                    return
+                else:
+                    logging.info(f"✓ Balance check passed: ${available_balance_usd:.2f} available (need ${required_margin:.2f})")
+
+            except Exception as e:
+                logging.warning(f"⚠️  Balance check/sizing failed (API error): {e}")
+                logging.warning("   Falling back to fixed TRADE_SIZE_USD mode")
+                # Fallback to fixed sizing if balance API fails
+                trade_size_usd = self.config.TRADE_SIZE_USD
+                qty = round(trade_size_usd / current_price, 2)
+                if qty <= 0:
+                    return
+
             # ========== LIMIT ORDER MODE ==========
             if self.config.LIMIT_ORDER_MODE:
-                # Calculate limit price with offset
-                if decision == "BUY":
-                    # LONG: Buy cheaper (limit below current price)
-                    limit_price = current_price * (1 - self.config.LIMIT_OFFSET_PCT)
-                else:
-                    # SHORT: Sell higher (limit above current price)
-                    limit_price = current_price * (1 + self.config.LIMIT_OFFSET_PCT)
-
-                logging.warning(f"📋 Placing LIMIT order: {position_type}")
-                logging.warning(f"   Current: {current_price:.4f} | Limit: {limit_price:.4f} | Offset: {self.config.LIMIT_OFFSET_PCT*100:.2f}%")
+                # CRITICAL FIX: Check for existing open orders on Bybit BEFORE placing new ones
+                # This prevents duplicate orders if bot restarts and loses self.active_limit_orders from memory
+                try:
+                    existing_orders = self.adapter.get_open_orders(self.config.TICKER)
+                    if existing_orders:
+                        logging.warning("="*60)
+                        logging.warning(f"⚠️  DUPLICATE ORDER PREVENTION: Found {len(existing_orders)} existing open orders on Bybit")
+                        for order in existing_orders[:3]:  # Show first 3
+                            logging.warning(f"   Order: {order.get('orderId')} | {order.get('side')} @ {order.get('price')}")
+                        logging.warning("   Skipping new order placement - please cancel existing orders first")
+                        logging.warning("="*60)
+                        return
+                except Exception as e:
+                    logging.error(f"Failed to check existing orders: {e}")
+                    # Continue anyway - don't block order placement on API error
 
                 # Start trade logging (will finalize after order fills)
                 self.trade_logger.start_trade(
@@ -1054,37 +1931,184 @@ class TradingBot:
                     decision_data=self.last_decision_data
                 )
 
-                # Place limit order
-                resp = self.adapter.limit_open(self.config.TICKER, side_str, qty, limit_price)
-                order_id = (resp.get("result") or {}).get("orderId")
+                # ========== DCA MODE: Dynamic levels (1-3) based on available qty ==========
+                if self.config.DCA_ENABLED:
+                    # Calculate 3 DCA levels using Hybrid approach
+                    all_dca_levels = self._calculate_dca_levels(decision, current_price, self.last_df)
 
-                if not order_id:
-                    logging.error("Failed to place limit order - no orderId returned")
-                    return
+                    # Validate minimum order quantity & adjust number of levels
+                    min_qty = self.adapter.get_min_order_qty(self.config.TICKER)
 
-                # Track active limit order
-                self.active_limit_order = {
-                    'order_id': order_id,
-                    'timestamp': time.time(),
-                    'side': position_type,
-                    'price': limit_price,
-                    'qty': qty,
-                    'decision': decision
-                }
+                    # Try 3 levels first (33% each)
+                    qty_per_level = self.adapter.round_qty(self.config.TICKER, qty / 3.0)
+                    num_levels = 3
 
-                # Log event
-                self.trade_logger.log_event("LIMIT_ORDER_PLACED", {
-                    "order_id": order_id,
-                    "order_type": "LIMIT",
-                    "limit_price": float(limit_price),
-                    "current_price": float(current_price),
-                    "quantity": float(qty),
-                    "side": position_type,
-                    "max_wait_seconds": self.config.MAX_WAITING_LIMIT_ORDER
-                })
+                    if qty_per_level < min_qty:
+                        # Try 2 levels (50% each)
+                        qty_per_level = self.adapter.round_qty(self.config.TICKER, qty / 2.0)
+                        num_levels = 2
 
-                logging.info(f"✓ Limit order placed: {order_id} | Wait max {self.config.MAX_WAITING_LIMIT_ORDER}s")
-                return  # Exit - will check order status in run_cycle()
+                        if qty_per_level < min_qty:
+                            # Try 1 level (100%)
+                            qty_per_level = self.adapter.round_qty(self.config.TICKER, qty)
+                            num_levels = 1
+
+                            if qty_per_level < min_qty:
+                                logging.error(f"Total qty {qty_per_level:.4f} < minOrderQty {min_qty:.4f}")
+                                logging.error("Balance too low for DCA mode. Use regular limit order instead.")
+                                return
+
+                    # Use only the number of levels we can afford
+                    dca_levels = all_dca_levels[:num_levels]
+
+                    logging.warning(f"💡 DCA adjusted to {num_levels} level(s) (qty per level: {qty_per_level:.4f} >= {min_qty:.4f})")
+
+                    # Log which levels are being used
+                    for idx, price in enumerate(dca_levels, start=1):
+                        logging.info(f"   ✓ Using Level {idx}: {price:.4f} ({abs((price/current_price - 1)*100):.2f}%)")
+
+                    # Calculate SL/TP BEFORE placing orders (needed for Level 1)
+                    # SL will be based on furthest level (worst case)
+                    # TP will be based on average of all levels (assuming all fill)
+                    furthest_level = dca_levels[-1]  # Last level = furthest (sorted: closest to furthest)
+                    expected_avg_entry = sum(dca_levels) / len(dca_levels)
+
+                    if decision == "BUY":
+                        planned_sl = furthest_level * (1 - self.config.TSL_PCT)
+                        planned_tp = expected_avg_entry * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+                    else:
+                        planned_sl = furthest_level * (1 + self.config.TSL_PCT)
+                        planned_tp = expected_avg_entry * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+
+                    logging.warning(f"📋 Placing DCA orders ({num_levels} level(s)): {position_type}")
+                    logging.warning(f"   Current: {current_price:.4f}")
+                    logging.warning(f"   Qty per level: {qty_per_level:.4f} ({qty_per_level / qty * 100:.1f}%)")
+                    tp_display = f"{planned_tp:.4f}" if planned_tp > 0 else "OFF"
+                    logging.warning(f"   🛡️  Level 1 will have SL: {planned_sl:.4f} | TP: {tp_display}")
+
+                    # Place DCA limit orders (1-3 levels depending on balance)
+                    for level_idx, limit_price in enumerate(dca_levels, start=1):
+                        try:
+                            # CRITICAL: Level 1 order includes SL/TP for immediate protection
+                            if level_idx == 1:
+                                resp = self.adapter.limit_open(
+                                    self.config.TICKER, side_str, qty_per_level, limit_price,
+                                    stop_loss=planned_sl,
+                                    take_profit=planned_tp if planned_tp > 0 else None
+                                )
+                            else:
+                                # Levels 2 & 3: No SL/TP (already set by Level 1)
+                                resp = self.adapter.limit_open(self.config.TICKER, side_str, qty_per_level, limit_price)
+
+                            order_id = (resp.get("result") or {}).get("orderId")
+
+                            if not order_id:
+                                logging.error(f"Failed to place DCA level {level_idx} - no orderId returned")
+                                continue
+
+                            # Track active limit order
+                            self.active_limit_orders.append({
+                                'order_id': order_id,
+                                'timestamp': time.time(),
+                                'side': position_type,
+                                'price': limit_price,
+                                'qty': qty_per_level,
+                                'decision': decision,
+                                'level': level_idx
+                            })
+
+                            # Log event
+                            self.trade_logger.log_event(f"DCA_LIMIT_ORDER_L{level_idx}_PLACED", {
+                                "order_id": order_id,
+                                "level": level_idx,
+                                "order_type": "LIMIT",
+                                "limit_price": float(limit_price),
+                                "current_price": float(current_price),
+                                "quantity": float(qty_per_level),
+                                "side": position_type,
+                                "max_wait_seconds": self.config.MAX_WAITING_LIMIT_ORDER,
+                                "offset_pct": abs((limit_price / current_price - 1) * 100)
+                            })
+
+                            logging.info(f"✓ DCA Level {level_idx} order placed: {order_id} @ {limit_price:.4f} ({abs((limit_price/current_price - 1)*100):.2f}%)")
+
+                        except Exception as e:
+                            logging.error(f"Failed to place DCA level {level_idx}: {e}")
+
+                    if not self.active_limit_orders:
+                        logging.error("Failed to place any DCA orders")
+                        return
+
+                    # ========== DCA: Store state for tracking ==========
+                    # SL/TP were already calculated above and embedded in Level 1 order
+                    # Save to state for verification and tracking
+                    self.state = {
+                        'side': position_type.capitalize(),
+                        'dca_mode': True,
+                        'dca_levels': dca_levels,
+                        'dca_furthest_level': furthest_level,
+                        'dca_expected_avg_entry': expected_avg_entry,
+                        'planned_sl': planned_sl,
+                        'planned_tp': planned_tp,
+                        'decision': decision,
+                        'sl_tp_embedded': True  # Flag that SL/TP are in Level 1 order
+                    }
+                    self._save_state()
+
+                    logging.warning(f"✓ DCA orders placed ({len(self.active_limit_orders)} levels) | Wait max {self.config.MAX_WAITING_LIMIT_ORDER}s")
+                    logging.warning(f"   Expected avg entry: {expected_avg_entry:.4f}")
+                    logging.warning(f"   🛡️  SL/TP protection EMBEDDED in Level 1 order:")
+                    logging.warning(f"      SL: {planned_sl:.4f} (from Level 3: {furthest_level:.4f})")
+                    tp_str = f"{planned_tp:.4f}" if planned_tp > 0 else "OFF"
+                    logging.warning(f"      TP: {tp_str} (from avg: {expected_avg_entry:.4f})")
+                    logging.warning(f"   ⚠️  Position will be PROTECTED immediately when Level 1 fills!")
+                    return  # Exit - will check order status in run_cycle()
+
+                # ========== SINGLE LIMIT ORDER MODE (original logic) ==========
+                else:
+                    # Calculate limit price with offset
+                    if decision == "BUY":
+                        # LONG: Buy cheaper (limit below current price)
+                        limit_price = current_price * (1 - self.config.LIMIT_OFFSET_PCT)
+                    else:
+                        # SHORT: Sell higher (limit above current price)
+                        limit_price = current_price * (1 + self.config.LIMIT_OFFSET_PCT)
+
+                    logging.warning(f"📋 Placing LIMIT order: {position_type}")
+                    logging.warning(f"   Current: {current_price:.4f} | Limit: {limit_price:.4f} | Offset: {self.config.LIMIT_OFFSET_PCT*100:.2f}%")
+
+                    # Place limit order
+                    resp = self.adapter.limit_open(self.config.TICKER, side_str, qty, limit_price)
+                    order_id = (resp.get("result") or {}).get("orderId")
+
+                    if not order_id:
+                        logging.error("Failed to place limit order - no orderId returned")
+                        return
+
+                    # Track active limit order
+                    self.active_limit_orders.append({
+                        'order_id': order_id,
+                        'timestamp': time.time(),
+                        'side': position_type,
+                        'price': limit_price,
+                        'qty': qty,
+                        'decision': decision,
+                        'level': 1  # Single order = level 1
+                    })
+
+                    # Log event
+                    self.trade_logger.log_event("LIMIT_ORDER_PLACED", {
+                        "order_id": order_id,
+                        "order_type": "LIMIT",
+                        "limit_price": float(limit_price),
+                        "current_price": float(current_price),
+                        "quantity": float(qty),
+                        "side": position_type,
+                        "max_wait_seconds": self.config.MAX_WAITING_LIMIT_ORDER
+                    })
+
+                    logging.info(f"✓ Limit order placed: {order_id} | Wait max {self.config.MAX_WAITING_LIMIT_ORDER}s")
+                    return  # Exit - will check order status in run_cycle()
 
             # ========== MARKET ORDER MODE (original logic) ==========
             logging.warning(f"🚀 Opening {position_type}: {qty} @ ~{current_price:.4f}")
@@ -1153,7 +2177,7 @@ class TradingBot:
                 'entry_price': actual_entry,
                 'initial_tp': tp,
                 'original_qty': qty,
-                'initial_size': self.config.TRADE_SIZE_USD,  # For dynamic TP calculations
+                'initial_size': trade_size_usd,  # Actual trade size (USD) used for this position
                 'partial_tp_taken': False,
                 'dynamic_tp_levels_taken': 0,  # For dynamic TP mechanism
                 'last_sl': sl,
@@ -1175,76 +2199,198 @@ class TradingBot:
 
     def _check_limit_order_status(self) -> bool:
         """
-        Check status of active limit order.
+        Check status of active limit orders (supports both single and DCA mode).
 
         Returns:
-            True if order is being processed (still waiting), False if completed/cancelled
+            True if orders are being processed (still waiting), False if all completed/cancelled
         """
-        if not self.active_limit_order:
+        if not self.active_limit_orders:
             return False
 
         try:
-            order_id = self.active_limit_order['order_id']
-            order_timestamp = self.active_limit_order['timestamp']
-            elapsed = time.time() - order_timestamp
-            max_wait = self.config.MAX_WAITING_LIMIT_ORDER
+            # Get list of open (unfilled) orders from Bybit
+            open_orders = self.adapter.get_open_orders(self.config.TICKER)
+            open_order_ids = {order['orderId'] for order in open_orders}
 
-            # Check if order filled by querying position
-            position = self.adapter.get_position(self.config.TICKER)
-            if position:
-                # Position exists - order was filled!
-                logging.warning("="*60)
-                logging.warning(f"✅ LIMIT ORDER FILLED: {order_id}")
-                logging.warning(f"   Entry: {position['entryPrice']:.4f} | Size: {position['size']}")
-                logging.warning("="*60)
+            # Check which orders have been filled
+            filled_orders = []
+            remaining_orders = []
 
-                # Finalize entry - set SL/TP and save state
-                self._finalize_limit_order_entry(position)
+            for order in self.active_limit_orders:
+                order_id = order['order_id']
+                elapsed = time.time() - order['timestamp']
 
-                # Clear limit order tracking
-                self.active_limit_order = None
-                return False  # Order completed
+                # Check if order is still open on Bybit
+                if order_id not in open_order_ids:
+                    # Order was filled!
+                    filled_orders.append(order)
+                    logging.warning("="*60)
+                    logging.warning(f"✅ LIMIT ORDER FILLED: {order_id}")
+                    if self.config.DCA_ENABLED:
+                        logging.warning(f"   Level: {order['level']}/3 | Price: {order['price']:.4f} | Qty: {order['qty']:.4f}")
+                    else:
+                        logging.warning(f"   Price: {order['price']:.4f} | Qty: {order['qty']:.4f}")
+                    logging.warning("="*60)
+                else:
+                    # Order still open - check timeout
+                    if elapsed > self.config.MAX_WAITING_LIMIT_ORDER:
+                        logging.warning("="*60)
+                        logging.warning(f"⏰ LIMIT ORDER TIMEOUT: {order_id}")
+                        logging.warning(f"   Elapsed: {elapsed:.0f}s / {self.config.MAX_WAITING_LIMIT_ORDER}s")
+                        logging.warning(f"   Cancelling order...")
+                        logging.warning("="*60)
 
-            # Position doesn't exist - check timeout
-            if elapsed > max_wait:
-                logging.warning("="*60)
-                logging.warning(f"⏰ LIMIT ORDER TIMEOUT: {order_id}")
-                logging.warning(f"   Elapsed: {elapsed:.0f}s / {max_wait}s")
-                logging.warning(f"   Cancelling order...")
-                logging.warning("="*60)
+                        # Cancel order
+                        try:
+                            self.adapter.cancel_order(self.config.TICKER, order_id)
+                            logging.info(f"✓ Order cancelled: {order_id}")
 
-                # Cancel order
-                try:
-                    self.adapter.cancel_order(self.config.TICKER, order_id)
-                    logging.info(f"✓ Order cancelled: {order_id}")
+                            # Log event
+                            event_name = f"DCA_LIMIT_ORDER_L{order['level']}_CANCELLED" if self.config.DCA_ENABLED else "LIMIT_ORDER_CANCELLED"
+                            self.trade_logger.log_event(event_name, {
+                                "order_id": order_id,
+                                "reason": "TIMEOUT",
+                                "elapsed_seconds": elapsed,
+                                "max_wait_seconds": self.config.MAX_WAITING_LIMIT_ORDER,
+                                "level": order.get('level', 1)
+                            })
 
-                    # Log event
-                    self.trade_logger.log_event("LIMIT_ORDER_CANCELLED", {
-                        "order_id": order_id,
-                        "reason": "TIMEOUT",
-                        "elapsed_seconds": elapsed,
-                        "max_wait_seconds": max_wait
-                    })
+                        except Exception as e:
+                            # Error 110001 = order already cancelled/filled - this is OK
+                            if "110001" in str(e) or "not exists" in str(e).lower():
+                                logging.info(f"✓ Order {order_id} already processed (filled or cancelled by exchange)")
+                            else:
+                                logging.error(f"Failed to cancel order {order_id}: {e}")
+                    else:
+                        # Still waiting
+                        remaining_orders.append(order)
+                        if int(elapsed) % 30 == 0:  # Log every 30s
+                            if self.config.DCA_ENABLED:
+                                logging.info(f"⏳ Waiting for DCA Level {order['level']}: {elapsed:.0f}s / {self.config.MAX_WAITING_LIMIT_ORDER}s")
+                            else:
+                                logging.info(f"⏳ Waiting for limit order: {elapsed:.0f}s / {self.config.MAX_WAITING_LIMIT_ORDER}s")
 
-                except Exception as e:
-                    logging.error(f"Failed to cancel order {order_id}: {e}")
+            # Update active orders list (remove filled orders)
+            self.active_limit_orders = remaining_orders
 
-                # Clear limit order tracking
-                self.active_limit_order = None
+            # Process filled orders AFTER updating active_limit_orders
+            # This allows _finalize_limit_order_entry to know if this is the last fill
+            if filled_orders:
+                # Get current position with retry (Bybit may need time to update)
+                position = None
+                for retry in range(3):
+                    time.sleep(0.5 if retry > 0 else 0)  # Wait 0.5s on retries
+                    position = self.adapter.get_position(self.config.TICKER)
+                    if position:
+                        break
+                    logging.warning(f"Position not found yet, retry {retry+1}/3...")
 
-                # End trade logging (order didn't fill)
-                if self.trade_logger.current_trade:
+                if position:
+                    # Finalize entry for filled orders
+                    # Pass remaining_orders count so it knows if this is the last fill
+                    self._finalize_limit_order_entry(position, filled_orders, len(remaining_orders))
+                else:
+                    logging.error("❌ CRITICAL: Position not found after 3 retries - order filled but position not detected!")
+                    logging.error(f"   Filled orders: {[o['order_id'] for o in filled_orders]}")
+                    logging.error(f"   This may cause duplicate orders. Manual intervention required.")
+
+            # If all orders completed/cancelled
+            if not self.active_limit_orders:
+                # Check if position exists
+                position = self.adapter.get_position(self.config.TICKER)
+
+                if position:
+                    # ========== SAFETY NET: Verify position has SL/TP protection ==========
+                    # This should NEVER trigger (SL/TP are set in _finalize_limit_order_entry)
+                    # But kept as emergency fallback if something goes wrong
+
+                    # FIX: Convert to float to handle both string "0.0" and float 0.0
+                    stop_loss = float(position.get('stopLoss', 0))
+                    take_profit = float(position.get('takeProfit', 0))
+
+                    # DEBUG: Log raw position data for diagnostics
+                    logging.debug(f"Safety net check: position data = {position}")
+
+                    if stop_loss > 0:
+                        # OK - Position has SL/TP protection (expected path)
+                        logging.info(f"✓ Position has SL/TP protection (SL: {stop_loss}, TP: {take_profit})")
+                    else:
+                        # ⚠️ EMERGENCY: Position without SL/TP (should not happen!)
+                        logging.error("="*60)
+                        logging.error("❌ EMERGENCY: Position WITHOUT SL/TP detected!")
+                        logging.error("   This should NOT happen - indicates a bug in _finalize_limit_order_entry")
+                        logging.error(f"   Raw position data: {position}")
+                        logging.error("   Setting emergency SL/TP now...")
+                        logging.error("="*60)
+
+                        # Get position details
+                        actual_entry = position['entryPrice']
+                        side = position['side']  # "Buy" or "Sell"
+
+                        # Determine decision from state or position side
+                        if self.state and 'side' in self.state:
+                            position_type = self.state['side']  # "Long" or "Short"
+                        else:
+                            position_type = "Long" if side == "Buy" else "Short"
+
+                        decision = "BUY" if position_type == "Long" else "SELL"
+                        side_str = "Buy" if decision == "BUY" else "Sell"
+
+                        # Use planned SL/TP if DCA mode and available in state
+                        if self.config.DCA_ENABLED and self.state and 'planned_sl' in self.state:
+                            sl = self.state['planned_sl']
+                            tp = self.state['planned_tp']
+                            logging.info("Using planned SL/TP from state (DCA mode)")
+                        else:
+                            # Fallback: Calculate from actual entry
+                            if decision == "BUY":
+                                sl = actual_entry * (1 - self.config.TSL_PCT)
+                                tp = actual_entry * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+                            else:
+                                sl = actual_entry * (1 + self.config.TSL_PCT)
+                                tp = actual_entry * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+
+                        # Set SL/TP on Bybit
+                        try:
+                            position_side = side_str
+                            self.adapter.set_stop_loss(self.config.TICKER, sl, position_side)
+                            logging.warning(f"✓ EMERGENCY Stop Loss set: {sl:.4f}")
+
+                            if tp > 0:
+                                self.adapter.set_take_profit(self.config.TICKER, tp, position_side)
+                                logging.warning(f"✓ EMERGENCY Take Profit set: {tp:.4f}")
+
+                            # Update state if it exists
+                            if self.state:
+                                self.state['last_sl'] = sl
+                                if tp > 0:
+                                    self.state['initial_tp'] = tp
+                                self._save_state()
+
+                            # Log event
+                            self.trade_logger.log_event("EMERGENCY_SL_TP_SET", {
+                                "entry_price": float(actual_entry),
+                                "sl_price": float(sl),
+                                "tp_price": float(tp) if tp > 0 else None,
+                                "reason": "Position without SL/TP protection detected"
+                            })
+
+                            tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
+                            logging.warning(f"✓ EMERGENCY SL/TP protection enabled | SL: {sl:.4f} | TP: {tp_display}")
+
+                        except Exception as e:
+                            logging.error(f"❌ CRITICAL: Failed to set emergency SL/TP: {e}")
+                            logging.error("   Position is UNPROTECTED - MANUAL INTERVENTION REQUIRED!")
+
+                elif self.trade_logger.current_trade:
+                    # No position exists - all orders cancelled without fills
                     self.trade_logger.end_trade({
-                        "exit_reason": "LIMIT_ORDER_TIMEOUT",
+                        "exit_reason": "LIMIT_ORDERS_TIMEOUT_ALL_CANCELLED",
                         "final_balance": 0.0,
                         "pnl": 0.0
                     })
 
-                return False  # Order cancelled
-
-            # Still waiting
-            if int(elapsed) % 30 == 0:  # Log every 30s
-                logging.info(f"⏳ Waiting for limit order: {elapsed:.0f}s / {max_wait}s")
+                return False  # All orders completed/cancelled
 
             return True  # Still processing
 
@@ -1252,81 +2398,213 @@ class TradingBot:
             logging.error(f"Error checking limit order status: {e}", exc_info=True)
             return False
 
-    def _finalize_limit_order_entry(self, position: dict):
+    def _finalize_limit_order_entry(self, position: dict, filled_orders: list = None, remaining_orders_count: int = 0):
         """
         Finalize limit order entry after position is filled.
-        Sets SL/TP, saves state, logs entry event.
+        Supports both single order and DCA mode (multiple fills).
+
+        Args:
+            position: Current position from Bybit API
+            filled_orders: List of filled orders (for DCA mode)
+            remaining_orders_count: Number of orders still pending (for DCA mode)
         """
         try:
-            actual_entry = position['entryPrice']
+            actual_entry = position['entryPrice']  # Average entry from Bybit (handles DCA automatically)
             side = position['side']  # "Long" or "Short"
             size = position['size']
 
-            decision = self.active_limit_order['decision']
-            qty = self.active_limit_order['qty']
+            # Get decision from first filled order
+            if filled_orders:
+                decision = filled_orders[0]['decision']
+            else:
+                logging.error("No filled_orders provided to _finalize_limit_order_entry")
+                return
+
             side_str = "Buy" if decision == "BUY" else "Sell"
             position_type = "LONG" if decision == "BUY" else "SHORT"
 
-            logging.info(f"Finalizing {position_type} entry @ {actual_entry:.4f}")
+            # Check if this is first fill or subsequent DCA fill
+            is_first_fill = not self.state or 'entry_price' not in self.state
 
-            # Calculate SL/TP
-            if decision == "BUY":
-                sl = actual_entry * (1 - self.config.TSL_PCT)
-                tp = actual_entry * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
-                highest = actual_entry
-                lowest = 999999
+            if is_first_fill:
+                # ========== FIRST FILL: Initialize position ==========
+                logging.info(f"Finalizing {position_type} entry @ {actual_entry:.4f}")
+
+                # ========== Check if SL/TP already embedded in order (DCA mode) ==========
+                sl_tp_already_set = False
+                if self.config.DCA_ENABLED and self.state and self.state.get('sl_tp_embedded', False):
+                    # DCA MODE: SL/TP were embedded in Level 1 order - already active on Bybit
+                    sl = self.state['planned_sl']
+                    tp = self.state['planned_tp']
+                    sl_tp_already_set = True
+                    logging.warning(f"✅ DCA MODE: SL/TP already ACTIVE from Level 1 order")
+                    tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
+                    logging.warning(f"   SL: {sl:.4f} (Level 3 based) | TP: {tp_display} (avg entry based)")
+                elif self.config.DCA_ENABLED and self.state and 'planned_sl' in self.state:
+                    # DCA MODE (legacy): Use pre-calculated SL/TP (based on furthest level)
+                    sl = self.state['planned_sl']
+                    tp = self.state['planned_tp']
+                    logging.info(f"📋 DCA MODE: Using planned SL/TP (SL from Level 3, TP from expected avg entry)")
+                else:
+                    # SINGLE LIMIT ORDER: Calculate SL/TP from actual entry
+                    if decision == "BUY":
+                        sl = actual_entry * (1 - self.config.TSL_PCT)
+                        tp = actual_entry * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+                    else:
+                        sl = actual_entry * (1 + self.config.TSL_PCT)
+                        tp = actual_entry * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+
+                # Set highest/lowest for TSL tracking
+                if decision == "BUY":
+                    highest = actual_entry
+                    lowest = 999999
+                else:
+                    highest = 999999
+                    lowest = actual_entry
+
+                # ========== SET SL/TP if not already embedded ==========
+                if not sl_tp_already_set:
+                    position_side = side_str
+                    self.adapter.set_stop_loss(self.config.TICKER, sl, position_side)
+                    logging.info(f"✓ Stop Loss set: {sl:.4f}")
+
+                    if tp > 0:
+                        self.adapter.set_take_profit(self.config.TICKER, tp, position_side)
+                        logging.info(f"✓ Take Profit set: {tp:.4f}")
+
+                    tp_str = f"{tp:.4f}" if tp > 0 else "OFF"
+                    logging.warning(f"✓ SL/TP PROTECTION ENABLED | SL: {sl:.4f} | TP: {tp_str}")
+
+                    # ========== VERIFY SL/TP WERE ACTUALLY SET ==========
+                    # Wait for Bybit to process the SL/TP update
+                    time.sleep(2.0)
+
+                    # Verify with retries
+                    verified = False
+                    for retry in range(3):
+                        verify_position = self.adapter.get_position(self.config.TICKER)
+                        if verify_position:
+                            verify_sl = verify_position.get('stopLoss', 0)
+                            verify_tp = verify_position.get('takeProfit', 0)
+
+                            # Check if SL is set (TP is optional)
+                            if verify_sl > 0:
+                                verified = True
+                                logging.info(f"✅ SL/TP verification PASSED (retry {retry+1}/3): SL={verify_sl:.4f}, TP={verify_tp:.4f}")
+                                break
+                            else:
+                                logging.warning(f"⚠️  SL/TP verification FAILED (retry {retry+1}/3): SL={verify_sl}, TP={verify_tp}")
+                                if retry < 2:
+                                    time.sleep(1.5)  # Wait before retry
+
+                    if not verified:
+                        logging.error("❌ SL/TP VERIFICATION FAILED after 3 retries!")
+                        logging.error("   Forcing emergency SL/TP re-set NOW...")
+                        # EMERGENCY: Force set SL/TP again with longer wait
+                        self.adapter.set_stop_loss(self.config.TICKER, sl, position_side)
+                        if tp > 0:
+                            self.adapter.set_take_profit(self.config.TICKER, tp, position_side)
+                        time.sleep(3.0)  # Longer wait
+                        # Final verification
+                        final_check = self.adapter.get_position(self.config.TICKER)
+                        if final_check and final_check.get('stopLoss', 0) > 0:
+                            logging.warning("✅ Emergency SL/TP re-set SUCCEEDED!")
+                        else:
+                            logging.error("❌ CRITICAL: Emergency SL/TP re-set FAILED! Manual intervention required!")
+
+                # Calculate trade size USD for state tracking
+                trade_size_usd = actual_entry * size
+
+                # Log entry event
+                event_name = "DCA_ENTRY_FIRST" if self.config.DCA_ENABLED else "ENTRY"
+                entry_details = {
+                    "order_type": "LIMIT",
+                    "entry_price": float(actual_entry),
+                    "quantity": float(size),
+                    "sl_price": float(sl),
+                    "tp_price": float(tp) if tp > 0 else None,
+                    "leverage": self.config.LEVERAGE,
+                    "candle": self.last_candle_data
+                }
+
+                if self.config.DCA_ENABLED:
+                    entry_details['dca_levels_filled'] = [order['level'] for order in filled_orders]
+                    entry_details['dca_levels_pending'] = len(self.active_limit_orders)
+
+                self.trade_logger.log_event(event_name, entry_details)
+
+                # Log indicators (only on first fill)
+                if 'top_indicators' in self.last_decision_data:
+                    self.trade_logger.log_indicators(
+                        indicators=self.last_decision_data['top_indicators'],
+                        model_probas={
+                            'proba_buy': self.last_decision_data['proba_buy'],
+                            'proba_sell': self.last_decision_data['proba_sell']
+                        }
+                    )
+
+                # Save state
+                total_qty = sum(order['qty'] for order in filled_orders)
+                self.state = {
+                    'side': position_type.capitalize(),
+                    'entry_price': actual_entry,
+                    'initial_tp': tp,
+                    'original_qty': total_qty,
+                    'initial_size': trade_size_usd,  # Actual trade size (USD) used for this position
+                    'partial_tp_taken': False,
+                    'dynamic_tp_levels_taken': 0,
+                    'last_sl': sl,
+                    'highest_price': highest,
+                    'lowest_price': lowest,
+                    'dca_fills': len(filled_orders) if self.config.DCA_ENABLED else 1
+                }
+                self._save_state()
+
+                tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
+                if self.config.DCA_ENABLED:
+                    logging.warning(f"✓ DCA Position initialized | Entry: {actual_entry:.4f} | SL: {sl:.4f} | TP: {tp_display}")
+                    logging.warning(f"   Filled levels: {[order['level'] for order in filled_orders]} | Pending: {len(self.active_limit_orders)}")
+                else:
+                    logging.warning(f"✓ Position finalized | SL: {sl:.4f} | TP: {tp_display}")
+
             else:
-                sl = actual_entry * (1 + self.config.TSL_PCT)
-                tp = actual_entry * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
-                highest = 999999
-                lowest = actual_entry
+                # ========== SUBSEQUENT DCA FILL: Update position ==========
+                old_entry = self.state['entry_price']
+                logging.info(f"DCA fill: updating entry {old_entry:.4f} → {actual_entry:.4f}")
 
-            # Set SL
-            position_side = side_str
-            self.adapter.set_stop_loss(self.config.TICKER, sl, position_side)
+                # ========== DCA MODE: DO NOT update SL/TP on subsequent fills ==========
+                # SL/TP were already set on first fill based on:
+                # - SL: Level 3 (furthest/worst case) - remains constant
+                # - TP: Expected avg entry (assuming all 3 levels) - remains constant
+                # This protects position from the start with worst-case SL
 
-            # Set TP
-            if tp > 0:
-                self.adapter.set_take_profit(self.config.TICKER, tp, position_side)
+                # Keep existing SL/TP from state (no changes)
+                sl = self.state.get('last_sl', 0)
+                tp = self.state.get('initial_tp', 0)
 
-            # Log entry event
-            self.trade_logger.log_event("ENTRY", {
-                "order_type": "LIMIT",
-                "entry_price": float(actual_entry),
-                "quantity": float(size),
-                "sl_price": float(sl),
-                "tp_price": float(tp) if tp > 0 else None,
-                "leverage": self.config.LEVERAGE,
-                "candle": self.last_candle_data
-            })
+                tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
+                logging.info(f"📋 DCA subsequent fill: Keeping original SL/TP (SL: {sl:.4f}, TP: {tp_display})")
+                logging.info(f"   (SL remains based on Level 3, not updated to new avg entry)")
 
-            # Log indicators
-            if 'top_indicators' in self.last_decision_data:
-                self.trade_logger.log_indicators(
-                    indicators=self.last_decision_data['top_indicators'],
-                    model_probas={
-                        'proba_buy': self.last_decision_data['proba_buy'],
-                        'proba_sell': self.last_decision_data['proba_sell']
-                    }
-                )
+                # Log DCA add event
+                self.trade_logger.log_event("DCA_ENTRY_ADD", {
+                    "old_entry_price": float(old_entry),
+                    "new_entry_price": float(actual_entry),
+                    "new_quantity": float(size),
+                    "added_quantity": float(sum(order['qty'] for order in filled_orders)),
+                    "dca_levels_filled": [order['level'] for order in filled_orders],
+                    "dca_levels_pending": len(self.active_limit_orders),
+                    "candle": self.last_candle_data
+                })
 
-            # Save state
-            self.state = {
-                'side': position_type.capitalize(),
-                'entry_price': actual_entry,
-                'initial_tp': tp,
-                'original_qty': qty,
-                'initial_size': self.config.TRADE_SIZE_USD,
-                'partial_tp_taken': False,
-                'dynamic_tp_levels_taken': 0,
-                'last_sl': sl,
-                'highest_price': highest,
-                'lowest_price': lowest
-            }
-            self._save_state()
+                # Update state
+                self.state['entry_price'] = actual_entry
+                # Keep original SL/TP in state (don't update)
+                # self.state['initial_tp'] and self.state['last_sl'] remain unchanged
+                self.state['dca_fills'] = self.state.get('dca_fills', 1) + len(filled_orders)
+                self._save_state()
 
-            tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
-            logging.warning(f"✓ Position finalized | SL: {sl:.4f} | TP: {tp_display}")
+                logging.warning(f"✓ DCA Position updated | New avg entry: {actual_entry:.4f} | Total fills: {self.state['dca_fills']} | Pending: {remaining_orders_count}")
 
         except Exception as e:
             logging.error(f"Failed to finalize limit order entry: {e}", exc_info=True)
@@ -1338,29 +2616,42 @@ class TradingBot:
         logging.info("="*60)
 
         try:
-            # ========== LIMIT ORDER MODE: Check pending order first ==========
-            if self.config.LIMIT_ORDER_MODE and self.active_limit_order:
-                # Check if limit order filled or timeout
+            # Always get decision to log model probabilities AND populate last_candle_data
+            # This is needed even when waiting for limit orders (for _manage_position logging)
+            decision = self.get_decision()
+
+            # ========== LIMIT ORDER MODE: Check pending orders first ==========
+            if self.config.LIMIT_ORDER_MODE and self.active_limit_orders:
+                # Check if limit orders filled or timeout
                 still_waiting = self._check_limit_order_status()
 
                 if still_waiting:
-                    # Order still pending - skip new signals
-                    logging.info("Limit order pending - skipping new signals this cycle")
+                    # Orders still pending - but still manage position if it exists
+                    # This is critical for TSL and monitoring (especially DCA mode)
+                    position = self.adapter.get_position(self.config.TICKER)
+                    if position and position.get('size', 0) > 0:
+                        logging.info("Limit order(s) pending - managing existing position")
+                        self._manage_position()
+                    else:
+                        logging.info("Limit order(s) pending - no position yet, waiting...")
                     return
-                # If not still_waiting, order was filled or cancelled - continue normally
-
-            # Always get decision to log model probabilities
-            decision = self.get_decision()
+                # If not still_waiting, orders were filled or cancelled - continue normally
 
             # Manage existing position
             if self._manage_position():
                 return
 
-            # Open new position if signal and no position (and no active limit order)
+            # Open new position if signal and no position (and no active limit orders)
             if decision in ["BUY", "SELL"]:
-                # Safety check: Don't place new limit order if one already exists
-                if self.config.LIMIT_ORDER_MODE and self.active_limit_order:
-                    logging.warning("⚠️ Skipping new signal - limit order already active")
+                # Safety check: Don't place new limit orders if some already exist
+                if self.config.LIMIT_ORDER_MODE and self.active_limit_orders:
+                    logging.warning("⚠️ Skipping new signal - limit order(s) already active")
+                    return
+
+                # COOLDOWN CHECK: Don't open new position if in cooldown period
+                # This prevents re-entry on same 15m candle (bot checks every 60s)
+                if self._is_in_cooldown_period():
+                    logging.warning(f"⏰ Skipping {decision} signal - cooldown active after last position close")
                     return
 
                 self._open_position(decision)
@@ -1382,7 +2673,15 @@ class TradingBot:
                 cycle += 1
                 logging.info(f"\nCYCLE #{cycle}")
                 self.run_cycle()
-                time.sleep(self.config.LOOP_SLEEP_SECONDS)
+
+                # Adaptive sleep: faster checks when waiting for limit orders
+                if self.active_limit_orders:
+                    sleep_time = 15  # Check every 15 seconds when orders pending
+                    logging.info(f"⏰ Fast mode: Checking limit orders in {sleep_time}s")
+                else:
+                    sleep_time = self.config.LOOP_SLEEP_SECONDS  # Normal 5-minute interval
+
+                time.sleep(sleep_time)
                 
         except KeyboardInterrupt:
             logging.info("\n" + "="*60)
@@ -1412,23 +2711,42 @@ def launch_bot(args):
     config.TIMEFRAME = args.timeframe
     config.HELPER_TIMEFRAMES = args.helper_timeframes
     config.TRADE_SIZE_USD = args.trade_size
+    config.TRADE_SIZE_PCT = getattr(args, 'trade_size_pct', 0.0)
+    config.MAX_POSITIONS = getattr(args, 'max_positions', 0)
     config.LEVERAGE = args.leverage
     config.TP_PCT = args.tp_pct
     config.TSL_PCT = args.tsl_pct
     config.PROBABILITY_THRESHOLD = args.prob_threshold
     config.MIN_PROBA_DIFF = args.min_proba_diff
+    # ICT Context Mode
+    config.ICT_CONTEXT_MODE = getattr(args, 'ict_context', False)
+    config.ICT_MIN_STRENGTH = getattr(args, 'ict_min_strength', 0.3)
+    config.ICT_MAX_THRESHOLD_REDUCTION = getattr(args, 'ict_max_reduction', 0.20)
+    config.REGIME_SENSITIVITY = getattr(args, 'regime_sensitivity', 1.0)
     config.PARTIAL_TP_ENABLED = args.partial_tp
     config.DYNAMIC_TP_ENABLED = getattr(args, 'dynamic_tp', False)
     config.HEDGE_MODE = getattr(args, 'hedge_mode', False)
     config.LIMIT_ORDER_MODE = getattr(args, 'limit_order', False)
     config.MAX_WAITING_LIMIT_ORDER = getattr(args, 'max_waiting_limit_order', 300)
+    config.LIMIT_ORDER_CANDLES = getattr(args, 'limit_order_candles', 5)
     config.LIMIT_OFFSET_PCT = getattr(args, 'limit_offset_pct', 0.005)
     config.PROTECT_PROFIT_ENABLED = getattr(args, 'protect_profit', False)
+    config.COOLDOWN_AFTER_LOSS_MINUTES = getattr(args, 'cooldown_after_loss', 30)
+    # DCA Mode
+    config.DCA_ENABLED = getattr(args, 'dca_mode', False)
+    config.DCA_LEVEL1_PCT = getattr(args, 'dca_level1_pct', 0.003)
+    config.DCA_ATR_MULTIPLIER = getattr(args, 'dca_atr_multiplier', 0.5)
+    config.DCA_MAX_SWING_DISTANCE_PCT = getattr(args, 'dca_max_swing_distance', 1.5)
 
     version = getattr(args, 'version', 'v1.0')
-    
+
+    # Validation
     if config.PARTIAL_TP_ENABLED and config.DYNAMIC_TP_ENABLED:
         print("\n❌ ERROR: Cannot enable both --partial-tp and --dynamic-tp. Choose only one.\n")
+        return
+
+    if config.DCA_ENABLED and not config.LIMIT_ORDER_MODE:
+        print("\n❌ ERROR: DCA mode requires --limit-order to be enabled.\n")
         return
     
     print("\n" + "="*70)
@@ -1437,11 +2755,25 @@ def launch_bot(args):
     print(f"Ticker:            {config.TICKER}")
     print(f"Timeframe:         {config.TIMEFRAME}")
     print(f"Model Version:     {version}")
-    print(f"Trade Size:        ${config.TRADE_SIZE_USD}")
+    if config.TRADE_SIZE_PCT > 0:
+        print(f"Trade Size:        {config.TRADE_SIZE_PCT * 100:.2f}% of available balance (dynamic sizing)")
+    else:
+        print(f"Trade Size:        ${config.TRADE_SIZE_USD:.2f} (fixed)")
     print(f"TP/TSL:            {config.TP_PCT*100:.2f}% / {config.TSL_PCT*100:.2f}%")
     print(f"Threshold:         {config.PROBABILITY_THRESHOLD:.3f}")
     print(f"Min Proba Diff:    {config.MIN_PROBA_DIFF:.3f}")
-    
+
+    # ICT Context Mode info
+    if config.ICT_CONTEXT_MODE:
+        print(f"ICT Context:       🎯 ENABLED (OPCJA 3)")
+        print(f"  Min Strength:    {config.ICT_MIN_STRENGTH:.2f}")
+        print(f"  Max Reduction:   {config.ICT_MAX_THRESHOLD_REDUCTION*100:.0f}%")
+        print(f"  Regime Sens:     {config.REGIME_SENSITIVITY:.1f}x")
+    else:
+        print(f"ICT Context:       OFF (static thresholds)")
+
+    print(f"Max Positions:     {config.MAX_POSITIONS if config.MAX_POSITIONS > 0 else 'UNLIMITED'}")
+
     if config.PARTIAL_TP_ENABLED:
         print(f"Partial TP:        ON (50% at halfway to TP)")
     elif config.DYNAMIC_TP_ENABLED:
@@ -1452,11 +2784,22 @@ def launch_bot(args):
     print(f"Position Mode:     {'HEDGE (Long=1, Short=2)' if config.HEDGE_MODE else 'ONE-WAY (Idx=0)'}")
 
     if config.LIMIT_ORDER_MODE:
-        print(f"Order Type:        LIMIT (offset: {config.LIMIT_OFFSET_PCT*100:.2f}%, timeout: {config.MAX_WAITING_LIMIT_ORDER}s)")
+        timeout_info = f"{config.MAX_WAITING_LIMIT_ORDER}s"
+        if config.LIMIT_ORDER_CANDLES > 0:
+            timeout_info += f" ({config.LIMIT_ORDER_CANDLES} candles × {config.TIMEFRAME})"
+
+        if config.DCA_ENABLED:
+            print(f"Order Type:        DCA LIMIT (3 levels, timeout: {timeout_info})")
+            print(f"  Level 1 (Fixed): {config.DCA_LEVEL1_PCT*100:.2f}% offset")
+            print(f"  Level 2 (ATR):   {config.DCA_ATR_MULTIPLIER:.2f}x ATR")
+            print(f"  Level 3 (Swing): max {config.DCA_MAX_SWING_DISTANCE_PCT:.2f}% to swing level")
+        else:
+            print(f"Order Type:        LIMIT (offset: {config.LIMIT_OFFSET_PCT*100:.2f}%, timeout: {timeout_info})")
     else:
         print(f"Order Type:        MARKET")
 
     print(f"Profit Protection: {'ON (BE if profit peaks >0.25% then declines)' if config.PROTECT_PROFIT_ENABLED else 'OFF'}")
+    print(f"Cooldown Period:   {config.COOLDOWN_AFTER_LOSS_MINUTES} minutes after ANY closed position (prevents re-entry on same candle)")
 
     print(f"")
     print(f"Logs directory:    logs/")
@@ -1477,13 +2820,25 @@ if __name__ == "__main__":
     parser.add_argument('--helper-timeframes', nargs='*', default=None)
     parser.add_argument('--version', type=str, default='v1.0',
                         help='Model version to use (e.g., v1.0, v1.1)')
-    parser.add_argument('--trade-size', type=float, default=100.0)
+    parser.add_argument('--trade-size', type=float, default=100.0,
+                        help='Fixed trade size in USD (default: 100.0). Ignored if --trade-size-pct is set.')
+    parser.add_argument('--trade-size-pct', type=float, default=0.0,
+                        help='Trade size as percentage of available balance (e.g., 0.01 = 1%%). Overrides --trade-size if > 0.')
     parser.add_argument('--leverage', type=int, default=10)
     parser.add_argument('--tp-pct', type=float, required=True)
     parser.add_argument('--tsl-pct', type=float, required=True)
     parser.add_argument('--prob-threshold', type=float, required=True)
     parser.add_argument('--min-proba-diff', type=float, default=0.0,
                         help='Minimum probability difference between BUY and SELL (confidence gap)')
+    # ICT Context Mode arguments
+    parser.add_argument('--ict-context', action='store_true',
+                        help='Enable ICT context mode: dynamic thresholds based on Smart Money signals (OPCJA 3)')
+    parser.add_argument('--ict-min-strength', type=float, default=0.3,
+                        help='Minimum ICT strength to apply threshold reduction (default: 0.3, range: 0.0-1.0)')
+    parser.add_argument('--ict-max-reduction', type=float, default=0.20,
+                        help='Maximum threshold reduction when ICT strong (default: 0.20 = 20%%)')
+    parser.add_argument('--regime-sensitivity', type=float, default=1.0,
+                        help='Regime adjustment sensitivity multiplier (default: 1.0, range: 0.5-2.0)')
     parser.add_argument('--partial-tp', action='store_true',
                         help='Enable old partial TP mechanism (50%% at halfway to TP)')
     parser.add_argument('--dynamic-tp', action='store_true',
@@ -1495,8 +2850,21 @@ if __name__ == "__main__":
     parser.add_argument('--limit-offset-pct', type=float, default=0.005,
                         help='Price offset for limit orders (default: 0.005 = 0.5%%)')
     parser.add_argument('--max-waiting-limit-order', type=int, default=300,
-                        help='Maximum seconds to wait for limit order execution before cancelling (default: 300)')
+                        help='Maximum seconds to wait for limit order execution before cancelling (default: 300). Auto-calculated if --limit-order-candles is set.')
+    parser.add_argument('--limit-order-candles', type=int, default=5,
+                        help='Number of candles to wait for limit order execution (default: 5). Auto-calculates timeout based on timeframe.')
     parser.add_argument('--protect-profit', action='store_true',
                         help='Enable profit protection: move SL to breakeven if profit peaks >0.25%% but declines before hitting partial TP')
+    parser.add_argument('--cooldown-after-loss', type=int, default=30,
+                        help='Minutes to wait before opening new position after ANY closed position (default: 30 = 2x 15m candles, prevents re-entry on same candle)')
+    # DCA Mode arguments
+    parser.add_argument('--dca-mode', action='store_true',
+                        help='Enable DCA mode: place 3 limit orders at different levels (requires --limit-order)')
+    parser.add_argument('--dca-level1-pct', type=float, default=0.003,
+                        help='DCA Level 1: Fixed percentage offset (default: 0.003 = 0.3%%)')
+    parser.add_argument('--dca-atr-multiplier', type=float, default=0.5,
+                        help='DCA Level 2: ATR multiplier (default: 0.5)')
+    parser.add_argument('--dca-max-swing-distance', type=float, default=1.5,
+                        help='DCA Level 3: Max distance to swing level in %% (default: 1.5%%)')
 
     launch_bot(parser.parse_args())

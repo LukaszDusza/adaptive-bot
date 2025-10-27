@@ -152,11 +152,10 @@ show_menu() {
     echo "4) Run Analysis (LONG)"
     echo "5) Run Analysis (SHORT)"
     echo "6) Run Backtest"
-    echo "7) Generate Report"
-    echo "8) Complete Workflow (Train Both + Backtest + Report)"
-    echo "9) Analyze Logged Trades"
-    echo "10) Optimize Parameters (Optuna) 🔥"
-    echo "11) Optimize & Auto-Deploy 🚀 (Optuna → Update Docker → Restart)"
+    echo "7) Complete Workflow (Train Both + Backtest)"
+    echo "8) Analyze Logged Trades"
+    echo "9) Optimize Parameters (Optuna) 🔥"
+    echo "10) Optimize & Auto-Deploy 🚀 (Optuna → Update Docker → Restart)"
     echo "0) Exit"
     echo ""
 }
@@ -513,50 +512,6 @@ run_backtest() {
         echo -e "${GREEN}  Results saved to: models/$VERSION/backtests/${NC}"
     else
         echo -e "${RED}✗ Backtest failed!${NC}"
-    fi
-}
-
-# Function to generate report
-generate_report() {
-    # Prompt for version if not set
-    if [[ -z "$VERSION" ]]; then
-        if ! prompt_version; then
-            return
-        fi
-    fi
-
-    # Auto-detect model parameters from version directory
-    if ! auto_detect_model_params "$VERSION"; then
-        echo -e "${YELLOW}Auto-detection failed. Please enter parameters manually.${NC}"
-
-        # Fallback to manual prompts
-        if ! prompt_ticker; then
-            return
-        fi
-        if ! prompt_timeframe; then
-            return
-        fi
-        if ! prompt_helper_timeframes; then
-            return
-        fi
-    fi
-
-    echo -e "${YELLOW}========================================${NC}"
-    echo -e "${YELLOW}Generating Report (version: $VERSION)${NC}"
-    echo -e "${YELLOW}========================================${NC}"
-
-    python main.py \
-        --report \
-        --ticker $TICKER \
-        --timeframe $TIMEFRAME \
-        --helper-timeframes $HELPER_TIMEFRAMES \
-        --version "$VERSION"
-
-    if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✓ Report generated successfully!${NC}"
-        echo -e "${GREEN}  Check the reports/ directory${NC}"
-    else
-        echo -e "${RED}✗ Report generation failed!${NC}"
     fi
 }
 
@@ -936,7 +891,6 @@ complete_workflow() {
     echo "1. Train LONG model (~2-4 hours)"
     echo "2. Train SHORT model (~2-4 hours)"
     echo "3. Run backtest"
-    echo "4. Generate report"
     echo ""
     echo -e "${YELLOW}Total estimated time: 4-8 hours${NC}"
     echo ""
@@ -979,25 +933,19 @@ complete_workflow() {
     run_backtest
     echo ""
 
-    # Generate report
-    generate_report
-    echo ""
-
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}  Complete Workflow Finished!${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}✓ LONG model trained (version: $VERSION)${NC}"
     echo -e "${GREEN}✓ SHORT model trained (version: $VERSION)${NC}"
     echo -e "${GREEN}✓ Backtest completed${NC}"
-    echo -e "${GREEN}✓ Report generated${NC}"
     echo ""
     echo "All results saved in: models/$VERSION/"
     echo ""
     echo "Next steps:"
     echo "1. Review analysis results in model folders"
     echo "2. Check backtest results in models/$VERSION/backtests/ folder"
-    echo "3. Open HTML report for detailed performance analysis"
-    echo "4. Consider running parameter optimization (option 10)"
+    echo "3. Consider running parameter optimization (option 9)"
 }
 
 # Function to analyze trades
@@ -1012,9 +960,9 @@ analyze_trades() {
 # Main loop
 while true; do
     show_menu
-    read -p "Enter your choice [0-11]: " choice
+    read -p "Enter your choice [0-10]: " choice
     echo ""
-    
+
     case $choice in
         1)
             train_long
@@ -1063,19 +1011,15 @@ while true; do
             VERSION=""
             ;;
         7)
-            generate_report
-            VERSION=""
-            ;;
-        8)
             complete_workflow
             ;;
-        9)
+        8)
             analyze_trades
             ;;
-        10)
+        9)
             optimize_parameters
             ;;
-        11)
+        10)
             auto_deploy_optimized_params
             ;;
         0)

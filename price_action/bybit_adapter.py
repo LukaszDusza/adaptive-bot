@@ -201,15 +201,16 @@ class BybitAdapter:
         except ValueError as e:
             raise ValueError(f"Invalid date format: {date_str}. Expected YYYY-MM-DD. Error: {e}")
 
-    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int, end_date: str = None, fetch_max: bool = False) -> List[List[Any]]:
+    def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int, end_date: str = None, start_date: str = None, fetch_max: bool = False) -> List[List[Any]]:
         """
         Fetch OHLCV candle data from Bybit API.
 
         Args:
             symbol: Trading pair (e.g., SOLUSDT)
             timeframe: Candle interval (e.g., 15m, 1h, 4h)
-            limit: Maximum number of candles to fetch
+            limit: Maximum number of candles to fetch (ignored if start_date and end_date both provided)
             end_date: End date for data (YYYY-MM-DD). If provided, fetches backwards from this date.
+            start_date: Start date for data (YYYY-MM-DD). If provided with end_date, filters to exact date range.
             fetch_max: If True, fetches ALL available history from Bybit (ignores limit)
 
         Returns:
@@ -226,8 +227,22 @@ class BybitAdapter:
         # Track initial end for logging
         initial_end = end
 
+        # If both start_date and end_date provided, calculate required candles for exact range
+        # Otherwise use limit parameter
+        if start_date and end_date:
+            start_ms = self._parse_end_date(start_date)
+            end_ms = self._parse_end_date(end_date)
+            time_diff_ms = end_ms - start_ms
+            required_candles = int(time_diff_ms / step) + 100  # +100 buffer for safety
+            effective_limit = required_candles
+            log.info(f"📅 Date range mode: {start_date} to {end_date}")
+            log.info(f"   Calculated required candles: {required_candles}")
+        elif fetch_max:
+            effective_limit = 999999999
+        else:
+            effective_limit = limit
+
         # For fetch_max, set limit to a very high number and increase max_empty_tries
-        effective_limit = 999999999 if fetch_max else limit
         max_empty_tries = 50 if fetch_max else 20
 
         tries = 0
@@ -236,7 +251,7 @@ class BybitAdapter:
         max_retries = 5
 
         log.info(f"fetch_ohlcv: symbol={sym}, timeframe={timeframe}, limit={limit}, "
-                 f"end_date={end_date}, fetch_max={fetch_max}, effective_limit={effective_limit}")
+                 f"start_date={start_date}, end_date={end_date}, fetch_max={fetch_max}, effective_limit={effective_limit}")
 
         while len(out) < effective_limit and consecutive_empty < max_empty_tries:
             need = min(1000, effective_limit - len(out))  # Bybit API limit: 1000 candles per request
@@ -322,8 +337,15 @@ class BybitAdapter:
 
         # No need to reverse - we prepend older batches to the beginning, so list is already sorted oldest → newest
 
-        # If not fetch_max, trim to requested limit (keep most recent candles)
-        if not fetch_max and len(out) > limit:
+        # Filter by date range if start_date provided
+        if start_date:
+            start_ms = self._parse_end_date(start_date)
+            out_filtered = [candle for candle in out if int(candle[0]) >= start_ms]
+            log.info(f"📅 Filtered by start_date {start_date}: {len(out)} → {len(out_filtered)} candles")
+            out = out_filtered
+
+        # If not fetch_max and not using date range, trim to requested limit (keep most recent candles)
+        if not fetch_max and not (start_date and end_date) and len(out) > limit:
             out = out[-limit:]
 
         if not out:
@@ -381,6 +403,29 @@ class BybitAdapter:
             else:
                 raise
 
+    def _safe_parse_price(self, value, field_name: str = "price") -> float:
+        """
+        Safely parse price from Bybit API response.
+
+        Handles:
+        - None, empty strings, "0", "0.0" → returns 0.0
+        - Valid numeric strings → returns float
+        - Invalid formats → logs warning and returns 0.0
+
+        This fixes the bug where empty strings "" from API were treated as 0
+        due to `p.get("stopLoss", 0) or 0` returning 0 for empty strings.
+        """
+        if value is None or value == "":
+            return 0.0
+
+        try:
+            parsed = float(value)
+            # Treat 0 as "not set"
+            return parsed if parsed != 0.0 else 0.0
+        except (ValueError, TypeError) as e:
+            log.warning(f"Failed to parse {field_name}='{value}': {e}")
+            return 0.0
+
     def get_position(self, symbol_u: str) -> Dict[str, Any]:
         resp = self.client.get_positions(category=self.category, symbol=symbol_u)
         if str(resp.get("retCode")) not in ("0",):
@@ -390,9 +435,21 @@ class BybitAdapter:
             sz = float(p.get("size", 0) or 0)
             if abs(sz) > 0:
                 side = p.get("side")
+                # FIX: Handle None/empty side (Bybit can return None for classic accounts)
+                if not side or side not in ("Buy", "Sell"):
+                    log.warning(f"Invalid position side: {side}, skipping position")
+                    continue
                 entry = float(p.get("avgPrice", 0) or 0)
-                stop_loss = float(p.get("stopLoss", 0) or 0)
-                take_profit = float(p.get("takeProfit", 0) or 0)
+
+                # FIX: Safely parse SL/TP (handles empty strings from API)
+                stop_loss = self._safe_parse_price(p.get("stopLoss"), "stopLoss")
+                take_profit = self._safe_parse_price(p.get("takeProfit"), "takeProfit")
+
+                # DEBUG: Log raw API values for SL/TP detection
+                log.debug(f"Position {symbol_u}: raw stopLoss={repr(p.get('stopLoss'))}, "
+                         f"raw takeProfit={repr(p.get('takeProfit'))}, "
+                         f"parsed SL={stop_loss}, parsed TP={take_profit}")
+
                 return {
                     "side": "Long" if side == "Buy" else "Short",
                     "size": sz,
@@ -418,11 +475,24 @@ class BybitAdapter:
         return str(qty)
 
     def market_open(self, symbol_u: str, side: str, qty: float):
+        # Minimum order quantities (fallback when rounding produces 0)
+        MIN_ORDER_QTY = {
+            'SOLUSDT': 0.1,
+            'BTCUSDT': 0.001,
+            'ETHUSDT': 0.01,
+            'DOGEUSDT': 1.0,
+            '1000PEPEUSDT': 1000.0,
+        }
+
         # Try 2 decimal places first
         safe_qty = round(qty, 2)
+        if safe_qty <= 0:
+            safe_qty = MIN_ORDER_QTY.get(symbol_u, 0.1)
+            log.warning(f"⚠️ Qty rounded to 0, using minimum: {safe_qty} for {symbol_u}")
+
         position_idx = self._get_position_idx(side)
         log.info(f"Próba otwarcia pozycji: {qty} zaokrąglona do {safe_qty} (2 miejsca po przecinku) dla {symbol_u} (positionIdx={position_idx})")
-        
+
         try:
             resp = self.client.place_order(
                 category=self.category,
@@ -439,17 +509,44 @@ class BybitAdapter:
             # If "Qty invalid" error, retry with 1 decimal place
             if "Qty invalid" in error_msg or "10001" in error_msg:
                 safe_qty = round(qty, 1)
-                log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
-                resp = self.client.place_order(
-                    category=self.category,
-                    symbol=symbol_u,
-                    side=side,
-                    orderType="Market",
-                    qty=self._format_qty(safe_qty), timeInForce="IOC", reduceOnly=False, positionIdx=position_idx,
-                )
-                if str(resp.get("retCode")) not in ("0",):
-                    raise BybitAPIError(f"place_order -> {resp}")
-                return resp
+                if safe_qty <= 0:
+                    safe_qty = MIN_ORDER_QTY.get(symbol_u, 0.1)
+                    log.warning(f"⚠️ Qty rounded to 0 (1 decimal), using minimum: {safe_qty} for {symbol_u}")
+                else:
+                    log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
+                try:
+                    resp = self.client.place_order(
+                        category=self.category,
+                        symbol=symbol_u,
+                        side=side,
+                        orderType="Market",
+                        qty=self._format_qty(safe_qty), timeInForce="IOC", reduceOnly=False, positionIdx=position_idx,
+                    )
+                    if str(resp.get("retCode")) not in ("0",):
+                        raise BybitAPIError(f"place_order -> {resp}")
+                    return resp
+                except (InvalidRequestError, BybitAPIError) as e2:
+                    error_msg2 = str(e2)
+                    # If still "Qty invalid", retry with integer (0 decimal places) - needed for DOGEUSDT, etc.
+                    if "Qty invalid" in error_msg2 or "10001" in error_msg2:
+                        safe_qty = int(qty)
+                        if safe_qty <= 0:
+                            safe_qty = MIN_ORDER_QTY.get(symbol_u, 1.0)
+                            log.warning(f"⚠️ Qty rounded to 0 (integer), using minimum: {safe_qty} for {symbol_u}")
+                        else:
+                            log.warning(f"Qty invalid z 1 miejscem, ponawiam z liczbą całkowitą: {safe_qty} dla {symbol_u}")
+                        resp = self.client.place_order(
+                            category=self.category,
+                            symbol=symbol_u,
+                            side=side,
+                            orderType="Market",
+                            qty=self._format_qty(safe_qty), timeInForce="IOC", reduceOnly=False, positionIdx=position_idx,
+                        )
+                        if str(resp.get("retCode")) not in ("0",):
+                            raise BybitAPIError(f"place_order -> {resp}")
+                        return resp
+                    else:
+                        raise
             else:
                 raise
 
@@ -493,20 +590,39 @@ class BybitAdapter:
             if "Qty invalid" in error_msg or "10001" in error_msg:
                 safe_qty = round(qty, 1)
                 log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
-                resp = self.client.place_order(
-                    category=self.category,
-                    symbol=symbol_u,
-                    side=side,
-                    orderType="Market",
-                    qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
-                )
-                if str(resp.get("retCode")) not in ("0",):
-                    raise BybitAPIError(f"close_position (partial) -> {resp}")
-                return resp
+                try:
+                    resp = self.client.place_order(
+                        category=self.category,
+                        symbol=symbol_u,
+                        side=side,
+                        orderType="Market",
+                        qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
+                    )
+                    if str(resp.get("retCode")) not in ("0",):
+                        raise BybitAPIError(f"close_position (partial) -> {resp}")
+                    return resp
+                except (InvalidRequestError, BybitAPIError) as e2:
+                    error_msg2 = str(e2)
+                    # If still "Qty invalid", retry with integer (0 decimal places) - needed for DOGEUSDT, etc.
+                    if "Qty invalid" in error_msg2 or "10001" in error_msg2:
+                        safe_qty = int(qty)
+                        log.warning(f"Qty invalid z 1 miejscem, ponawiam z liczbą całkowitą: {safe_qty} dla {symbol_u}")
+                        resp = self.client.place_order(
+                            category=self.category,
+                            symbol=symbol_u,
+                            side=side,
+                            orderType="Market",
+                            qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
+                        )
+                        if str(resp.get("retCode")) not in ("0",):
+                            raise BybitAPIError(f"close_position (partial) -> {resp}")
+                        return resp
+                    else:
+                        raise
             else:
                 raise
 
-    def limit_open(self, symbol_u: str, side: str, qty: float, limit_price: float):
+    def limit_open(self, symbol_u: str, side: str, qty: float, limit_price: float, stop_loss: float = None, take_profit: float = None):
         """
         Place a limit order to open a position.
 
@@ -515,26 +631,59 @@ class BybitAdapter:
             side: "Buy" for LONG, "Sell" for SHORT
             qty: Order quantity
             limit_price: Limit price for the order
+            stop_loss: Optional stop loss price (activated when order fills)
+            take_profit: Optional take profit price (activated when order fills)
 
         Returns:
             API response with orderId
         """
+        # Minimum order quantities (fallback when rounding produces 0)
+        MIN_ORDER_QTY = {
+            'SOLUSDT': 0.1,
+            'BTCUSDT': 0.001,
+            'ETHUSDT': 0.01,
+            'DOGEUSDT': 1.0,
+            '1000PEPEUSDT': 1000.0,
+        }
+
         safe_qty = round(qty, 2)
+        if safe_qty <= 0:
+            safe_qty = MIN_ORDER_QTY.get(symbol_u, 0.1)
+            log.warning(f"⚠️ Qty rounded to 0, using minimum: {safe_qty} for {symbol_u}")
+
         position_idx = self._get_position_idx(side)
-        log.info(f"Placing LIMIT order: {side} {safe_qty} @ {limit_price:.4f} for {symbol_u} (positionIdx={position_idx})")
+
+        sl_tp_info = ""
+        if stop_loss:
+            sl_tp_info += f" | SL: {stop_loss:.4f}"
+        if take_profit:
+            sl_tp_info += f" | TP: {take_profit:.4f}"
+
+        log.info(f"Placing LIMIT order: {side} {safe_qty} @ {limit_price:.4f}{sl_tp_info} for {symbol_u} (positionIdx={position_idx})")
+
+        # Build order parameters
+        order_params = {
+            "category": self.category,
+            "symbol": symbol_u,
+            "side": side,
+            "orderType": "Limit",
+            "qty": self._format_qty(safe_qty),
+            "price": str(limit_price),
+            "timeInForce": "GTC",  # Good Till Cancel
+            "reduceOnly": False,
+            "positionIdx": position_idx,
+        }
+
+        # Add SL/TP if provided (Bybit will activate them when order fills)
+        if stop_loss:
+            order_params["stopLoss"] = str(stop_loss)
+            order_params["slTriggerBy"] = "MarkPrice"  # Use MarkPrice to prevent manipulation
+        if take_profit:
+            order_params["takeProfit"] = str(take_profit)
+            order_params["tpTriggerBy"] = "MarkPrice"
 
         try:
-            resp = self.client.place_order(
-                category=self.category,
-                symbol=symbol_u,
-                side=side,
-                orderType="Limit",
-                qty=self._format_qty(safe_qty),
-                price=str(limit_price),
-                timeInForce="GTC",  # Good Till Cancel
-                reduceOnly=False,
-                positionIdx=position_idx,
-            )
+            resp = self.client.place_order(**order_params)
             if str(resp.get("retCode")) not in ("0",):
                 raise BybitAPIError(f"place_order (LIMIT) -> {resp}")
 
@@ -547,24 +696,40 @@ class BybitAdapter:
             # If "Qty invalid" error, retry with 1 decimal place
             if "Qty invalid" in error_msg or "10001" in error_msg:
                 safe_qty = round(qty, 1)
-                log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
-                resp = self.client.place_order(
-                    category=self.category,
-                    symbol=symbol_u,
-                    side=side,
-                    orderType="Limit",
-                    qty=self._format_qty(safe_qty),
-                    price=str(limit_price),
-                    timeInForce="GTC",
-                    reduceOnly=False,
-                    positionIdx=position_idx,
-                )
-                if str(resp.get("retCode")) not in ("0",):
-                    raise BybitAPIError(f"place_order (LIMIT) -> {resp}")
+                if safe_qty <= 0:
+                    safe_qty = MIN_ORDER_QTY.get(symbol_u, 0.1)
+                    log.warning(f"⚠️ Qty rounded to 0 (1 decimal), using minimum: {safe_qty} for {symbol_u}")
+                else:
+                    log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
+                try:
+                    order_params["qty"] = self._format_qty(safe_qty)
+                    resp = self.client.place_order(**order_params)
+                    if str(resp.get("retCode")) not in ("0",):
+                        raise BybitAPIError(f"place_order (LIMIT) -> {resp}")
 
-                order_id = (resp.get("result") or {}).get("orderId")
-                log.info(f"✓ Limit order placed: ID={order_id}")
-                return resp
+                    order_id = (resp.get("result") or {}).get("orderId")
+                    log.info(f"✓ Limit order placed: ID={order_id}")
+                    return resp
+                except (InvalidRequestError, BybitAPIError) as e2:
+                    error_msg2 = str(e2)
+                    # If still "Qty invalid", retry with integer (0 decimal places) - needed for DOGEUSDT, etc.
+                    if "Qty invalid" in error_msg2 or "10001" in error_msg2:
+                        safe_qty = int(qty)
+                        if safe_qty <= 0:
+                            safe_qty = MIN_ORDER_QTY.get(symbol_u, 1.0)
+                            log.warning(f"⚠️ Qty rounded to 0 (integer), using minimum: {safe_qty} for {symbol_u}")
+                        else:
+                            log.warning(f"Qty invalid z 1 miejscem, ponawiam z liczbą całkowitą: {safe_qty} dla {symbol_u}")
+                        order_params["qty"] = self._format_qty(safe_qty)
+                        resp = self.client.place_order(**order_params)
+                        if str(resp.get("retCode")) not in ("0",):
+                            raise BybitAPIError(f"place_order (LIMIT) -> {resp}")
+
+                        order_id = (resp.get("result") or {}).get("orderId")
+                        log.info(f"✓ Limit order placed: ID={order_id}")
+                        return resp
+                    else:
+                        raise
             else:
                 raise
 
@@ -633,11 +798,154 @@ class BybitAdapter:
             log.error(f"Error cancelling all orders: {e}", exc_info=True)
             raise
 
+    def get_available_balance_usd(self) -> float:
+        """
+        Get available balance in USD for Unified Trading Account.
+
+        Returns:
+            Available balance in USD (totalAvailableBalance for cross margin)
+            Returns 0.0 on error.
+        """
+        try:
+            resp = self.client.get_wallet_balance(accountType="UNIFIED")
+
+            if str(resp.get("retCode")) not in ("0",):
+                log.error(f"get_wallet_balance error: {resp}")
+                return 0.0
+
+            # Extract accounts from result
+            result = resp.get("result") or {}
+            accounts = result.get("list", [])
+
+            if not accounts:
+                log.warning("No unified account found in wallet balance response")
+                return 0.0
+
+            first_account = accounts[0]
+
+            # Try multiple possible balance fields
+            balance_usd = 0.0
+
+            # Strategy 1: Try totalAvailableBalance (but Bybit may return empty string "")
+            total_avail = first_account.get("totalAvailableBalance", "")
+            if total_avail and str(total_avail).strip():
+                try:
+                    balance_usd = float(total_avail)
+                    log.info(f"✓ Using totalAvailableBalance: ${balance_usd:.2f}")
+                except (ValueError, TypeError):
+                    pass
+
+            # Strategy 2: If still zero, try USDT coin equity (most reliable!)
+            if balance_usd == 0.0:
+                coins = first_account.get("coin", [])
+                log.info(f"🔍 Searching USDT in {len(coins)} coins...")
+
+                for coin in coins:
+                    if coin.get("coin") == "USDT":
+                        # Get all possible balance fields
+                        equity = coin.get("equity", "")
+                        wallet_balance = coin.get("walletBalance", "")
+                        available_withdraw = coin.get("availableToWithdraw", "")
+
+                        # FIX: Try availableToWithdraw FIRST (free funds, excludes positions)
+                        if available_withdraw and str(available_withdraw).strip():
+                            try:
+                                balance_usd = float(available_withdraw)
+                                log.info(f"✓ Using USDT availableToWithdraw: ${balance_usd:.2f} (free funds)")
+                                break
+                            except (ValueError, TypeError):
+                                pass
+
+                        # Fallback to equity (total balance including positions)
+                        if balance_usd == 0.0 and equity and str(equity).strip():
+                            try:
+                                balance_usd = float(equity)
+                                log.warning(f"⚠️  Using USDT equity: ${balance_usd:.2f} (may include locked funds in positions)")
+                                break
+                            except (ValueError, TypeError):
+                                pass
+
+                        # Last resort: walletBalance
+                        if balance_usd == 0.0 and wallet_balance and str(wallet_balance).strip():
+                            try:
+                                balance_usd = float(wallet_balance)
+                                log.warning(f"⚠️  Using USDT walletBalance: ${balance_usd:.2f}")
+                                break
+                            except (ValueError, TypeError):
+                                pass
+
+            # If still zero, log warning
+            if balance_usd == 0.0:
+                log.warning(f"⚠️ Could not find USDT balance in account")
+                log.warning(f"⚠️ Available coins: {[c.get('coin') for c in first_account.get('coin', [])]}")
+
+            log.info(f"💰 Unified Wallet Available Balance: ${balance_usd:.2f}")
+            return balance_usd
+
+        except Exception as e:
+            log.error(f"Error getting wallet balance: {e}", exc_info=True)
+            return 0.0
+
+    def get_active_positions_count(self) -> int:
+        """
+        Get count of currently active positions (size > 0) for ALL symbols.
+
+        Returns:
+            Number of active positions across all symbols
+            Returns 0 on error.
+        """
+        try:
+            # Get all positions for linear (USDT perpetuals)
+            resp = self.client.get_positions(
+                category="linear",
+                settleCoin="USDT"
+            )
+
+            if str(resp.get("retCode")) not in ("0",):
+                log.error(f"get_positions error: {resp}")
+                return 0
+
+            result = resp.get("result") or {}
+            positions = result.get("list", [])
+
+            # Count positions with size > 0
+            active_count = 0
+            active_symbols = []
+
+            for pos in positions:
+                size_str = pos.get("size", "0")
+                symbol = pos.get("symbol", "UNKNOWN")
+                side = pos.get("side", "")
+
+                try:
+                    size = float(size_str)
+                    if size > 0:
+                        active_count += 1
+                        active_symbols.append(f"{symbol}({side})")
+                except (ValueError, TypeError):
+                    continue
+
+            if active_count > 0:
+                log.info(f"📊 Active positions: {active_count} - {', '.join(active_symbols)}")
+            else:
+                log.info(f"📊 Active positions: 0 (no open positions)")
+
+            return active_count
+
+        except Exception as e:
+            log.error(f"Error getting active positions count: {e}", exc_info=True)
+            return 0
+
     def set_stop_loss(self, symbol_u: str, price: float, side: str):
         position_idx = self._get_position_idx(side)
         try:
             resp = self.client.set_trading_stop(
-                category=self.category, symbol=symbol_u, stopLoss=str(price), positionIdx=position_idx,
+                category=self.category,
+                symbol=symbol_u,
+                stopLoss=str(price),
+                tpslMode="Full",  # Required by API - applies to entire position
+                slTriggerBy="MarkPrice",  # Use MarkPrice to prevent manipulation
+                positionIdx=position_idx,
             )
             if str(resp.get("retCode")) not in ("0",):
                 raise BybitAPIError(f"set_trading_stop (SL) -> {resp}")
@@ -658,6 +966,8 @@ class BybitAdapter:
                 category=self.category,
                 symbol=symbol_u,
                 takeProfit=str(price),
+                tpslMode="Full",  # Required by API - applies to entire position
+                tpTriggerBy="MarkPrice",  # Use MarkPrice to prevent manipulation
                 positionIdx=position_idx,
             )
             if str(resp.get("retCode")) not in ("0",):
@@ -687,6 +997,7 @@ class BybitAdapter:
             symbol=symbol_u,
             takeProfit="0",
             stopLoss="0",
+            tpslMode="Full",  # Required by API
             positionIdx=position_idx,
         )
         if str(resp.get("retCode")) not in ("0",):
@@ -698,7 +1009,8 @@ class BybitAdapter:
         if not pos:
             return
         side = "Sell" if pos["side"] == "Long" else "Buy"
-        position_idx = self._get_position_idx(side)
+        # FIX: Use position side (not order side) to get correct positionIdx in hedge mode
+        position_idx = self._get_position_idx(pos["side"])
         qty = abs(float(pos.get("size", 0)))
         if qty <= 0: return
         
@@ -723,16 +1035,35 @@ class BybitAdapter:
             if "Qty invalid" in error_msg or "10001" in error_msg:
                 safe_qty = round(qty, 1)
                 log.warning(f"Qty invalid z 2 miejscami, ponawiam z 1 miejscem: {safe_qty} dla {symbol_u}")
-                resp = self.client.place_order(
-                    category=self.category,
-                    symbol=symbol_u,
-                    side=side,
-                    orderType="Market",
-                    qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
-                )
-                if str(resp.get("retCode")) not in ("0",):
-                    raise BybitAPIError(f"close_position -> {resp}")
-                return resp
+                try:
+                    resp = self.client.place_order(
+                        category=self.category,
+                        symbol=symbol_u,
+                        side=side,
+                        orderType="Market",
+                        qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
+                    )
+                    if str(resp.get("retCode")) not in ("0",):
+                        raise BybitAPIError(f"close_position -> {resp}")
+                    return resp
+                except (InvalidRequestError, BybitAPIError) as e2:
+                    error_msg2 = str(e2)
+                    # If still "Qty invalid", retry with integer (0 decimal places) - needed for DOGEUSDT, etc.
+                    if "Qty invalid" in error_msg2 or "10001" in error_msg2:
+                        safe_qty = int(qty)
+                        log.warning(f"Qty invalid z 1 miejscem, ponawiam z liczbą całkowitą: {safe_qty} dla {symbol_u}")
+                        resp = self.client.place_order(
+                            category=self.category,
+                            symbol=symbol_u,
+                            side=side,
+                            orderType="Market",
+                            qty=self._format_qty(safe_qty), reduceOnly=True, timeInForce="IOC", positionIdx=position_idx,
+                        )
+                        if str(resp.get("retCode")) not in ("0",):
+                            raise BybitAPIError(f"close_position -> {resp}")
+                        return resp
+                    else:
+                        raise
             else:
                 raise
 
@@ -988,4 +1319,127 @@ class BybitAdapter:
                 return []
         except requests.RequestException as e:
             log.error(f"Błąd połączenia podczas pobierania ostatnich transakcji: {e}")
+            return []
+
+    def get_trade_history(self, symbol: str = None, start_time_ms: int = None, end_time_ms: int = None, limit: int = 100) -> List[Dict]:
+        """
+        Get trade execution history from Bybit.
+
+        Args:
+            symbol: Trading pair (e.g., SOLUSDT). If None, gets all symbols.
+            start_time_ms: Start timestamp in milliseconds
+            end_time_ms: End timestamp in milliseconds
+            limit: Max records to return (default 100, max 100 per request)
+
+        Returns:
+            List of execution records sorted by execTime descending
+
+        Example response for each execution:
+            {
+                'symbol': 'SOLUSDT',
+                'orderId': '...',
+                'execId': '...',
+                'execPrice': '170.50',
+                'execQty': '0.1',
+                'execValue': '17.05',
+                'execTime': '1698765432000',
+                'execFee': '0.00935',
+                'side': 'Buy',
+                'orderType': 'Market',
+                'closedSize': '0.1'
+            }
+        """
+        try:
+            params = {
+                "category": self.category,
+                "limit": min(limit, 100)  # Bybit API limit: 100 per request
+            }
+
+            if symbol:
+                params["symbol"] = _norm_symbol(symbol)
+            if start_time_ms:
+                params["startTime"] = int(start_time_ms)
+            if end_time_ms:
+                params["endTime"] = int(end_time_ms)
+
+            log.info(f"📊 Fetching trade history: symbol={symbol}, start={start_time_ms}, end={end_time_ms}, limit={limit}")
+
+            resp = self.client.get_executions(**params)
+
+            if str(resp.get("retCode")) not in ("0",):
+                log.error(f"get_executions error: {resp}")
+                return []
+
+            result = resp.get("result") or {}
+            executions = result.get("list", [])
+
+            log.info(f"✓ Retrieved {len(executions)} execution records")
+            return executions
+
+        except Exception as e:
+            log.error(f"Error fetching trade history: {e}", exc_info=True)
+            return []
+
+    def get_closed_pnl_history(self, symbol: str = None, start_time_ms: int = None, end_time_ms: int = None, limit: int = 100) -> List[Dict]:
+        """
+        Get closed P&L history from Bybit (completed trades with profit/loss).
+
+        Args:
+            symbol: Trading pair (e.g., SOLUSDT). If None, gets all symbols.
+            start_time_ms: Start timestamp in milliseconds
+            end_time_ms: End timestamp in milliseconds
+            limit: Max records to return (default 100, max 100 per request)
+
+        Returns:
+            List of closed P&L records sorted by createdTime descending
+
+        Example response for each closed trade:
+            {
+                'symbol': 'SOLUSDT',
+                'orderId': '...',
+                'side': 'Buy',
+                'qty': '0.1',
+                'orderPrice': '170.50',
+                'orderType': 'Market',
+                'execType': 'Trade',
+                'closedSize': '0.1',
+                'cumEntryValue': '17.05',
+                'avgEntryPrice': '170.50',
+                'cumExitValue': '17.20',
+                'avgExitPrice': '172.00',
+                'closedPnl': '0.15',      # Net P&L after fees
+                'fillCount': '1',
+                'leverage': '10',
+                'createdTime': '1698765432000'
+            }
+        """
+        try:
+            params = {
+                "category": self.category,
+                "limit": min(limit, 100)  # Bybit API limit: 100 per request
+            }
+
+            if symbol:
+                params["symbol"] = _norm_symbol(symbol)
+            if start_time_ms:
+                params["startTime"] = int(start_time_ms)
+            if end_time_ms:
+                params["endTime"] = int(end_time_ms)
+
+            log.info(f"📊 Fetching closed P&L history: symbol={symbol}, start={start_time_ms}, end={end_time_ms}, limit={limit}")
+
+            resp = self.client.get_closed_pnl(**params)
+
+            if str(resp.get("retCode")) not in ("0",):
+                log.error(f"get_closed_pnl error: {resp}")
+                return []
+
+            result = resp.get("result") or {}
+            trades = result.get("list", [])
+
+            log.info(f"✓ Retrieved {len(trades)} closed P&L records")
+            return trades
+
+        except Exception as e:
+            log.error(f"Error fetching closed P&L history: {e}", exc_info=True)
             return []

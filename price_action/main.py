@@ -1,5 +1,4 @@
 import argparse
-import os
 from dotenv import load_dotenv
 
 
@@ -10,7 +9,6 @@ def main():
     action.add_argument('--train', action='store_true', help="Uruchom potok treningowy dla modelu 'long' lub 'short'.")
     action.add_argument('--backtest', action='store_true',
                         help="Uruchom backtest dla połączonej strategii 'long/short'.")
-    action.add_argument('--report', action='store_true', help="Wygeneruj raport HTML z ostatniego backtestu.")
     action.add_argument('--run-bot', action='store_true', help="Uruchom bota tradingowego na żywo.")
 
     parser.add_argument('--ticker', type=str, default="SOLUSDT", help="Ticker do analizy (np. SOLUSDT).")
@@ -79,11 +77,6 @@ def main():
         from backtester import run_backtester_with_args
         print_header("Uruchamianie Backtestu")
         run_backtester_with_args(args)
-
-    elif args.report:
-        from report_generator import run_report_generator_with_args
-        print_header("Generowanie Raportu")
-        run_report_generator_with_args(args)
 
     elif args.run_bot:
         from bot import launch_bot

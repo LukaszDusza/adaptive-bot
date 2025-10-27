@@ -1,67 +1,196 @@
 # ============================================================================
-# UPDATED: 2025-10-21 - Deployment v1.2 (Pipeline v2.0)
+# DEPLOYMENT - 4 bots with DCA mode (DOGE, SOL, PEPE, LINK)
 # ============================================================================
-# Changes from v1.1:
-#   - version: v1.1 → v1.2 (all critical fixes applied)
-#   - prob-threshold: 0.54 → 0.60 (optimized on calibration set)
-#   - min-proba-diff: 0.3 → 0.35 (higher confidence threshold)
-#
-# v1.2 Backtest Results (vs v1.1):
-#   - Total Return: +7.36% (+39% better than v1.1)
-#   - Win Rate: 80.5% (+2.8pp vs v1.1)
-#   - Profit Factor: 5.48 (+41% vs v1.1)
-#   - Sharpe: 11.90 (+25% vs v1.1)
-# ============================================================================
+
+x-bot-base: &bot-base
+  image: adaptive-bot:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+    cache_from:
+      - adaptive-bot:latest
+
+x-bot-common: &bot-common
+  restart: on-failure:5
+  volumes:
+    - ./models:/app/models
+    - ./logs:/app/logs
+    - ./bot_state:/app/bot_state
+    - ./prediction_logs:/app/prediction_logs
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+  deploy:
+    resources:
+      limits:
+        cpus: '1.0'
+        memory: 2G
+      reservations:
+        cpus: '0.25'
+        memory: 256M
+  healthcheck:
+    test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/bot_state') and os.access('/app/bot_state', os.W_OK) else 1)"]
+    interval: 60s
+    timeout: 10s
+    retries: 3
+    start_period: 30s
 
 services:
 
-  bot-syl-sol-dynamic-tp:
-    container_name: syl-sol-dynamic-tp
-    build: .
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CONTAINER_NAME=syl-sol-dynamic-tp
-    env_file:
-      - .env_sylwia
-    restart: unless-stopped
-    volumes:
-      - ./prediction_logs:/app/prediction_logs
-    command: >
-      python main.py --run-bot
-      --version v1.2
-      --ticker SOLUSDT
-      --timeframe 15m
-      --helper-timeframes 1h 4h 1D
-      --prob-threshold 0.60
-      --min-proba-diff 0.35
-      --tsl-pct 0.014
-      --tp-pct 0.02
-      --trade-size 100.0
-      --leverage 10
-      --partial-tp
+  bot-base:
+    <<: *bot-base
+    container_name: bot-base-builder
+    command: echo "Base image built successfully"
+    profiles:
+      - build-only
 
-  bot-luk-sol-dynamic-tp:
-    container_name: luk-sol-dynamic-tp
-    build: .
+  # DOGEUSDT - DCA Mode
+  bot-luk-doge-dca:
+    <<: [*bot-base, *bot-common]
+    container_name: luk-doge-dca
     environment:
       - PYTHONUNBUFFERED=1
-      - CONTAINER_NAME=luk-sol-dynamic-tp
+      - CONTAINER_NAME=luk-doge-dca
     env_file:
       - .env_luk
-    restart: unless-stopped
-    volumes:
-      - ./prediction_logs:/app/prediction_logs
     command: >
-      python main.py --run-bot
-      --version v1.2
-      --ticker SOLUSDT
+      python bot.py
+      --version v1.2.doge
+      --ticker DOGEUSDT
       --timeframe 15m
       --helper-timeframes 1h 4h 1D
       --prob-threshold 0.60
       --min-proba-diff 0.35
       --tsl-pct 0.014
       --tp-pct 0.02
-      --trade-size 300.0
-      --leverage 10
+      --trade-size-pct 0.02
+      --leverage 20
       --partial-tp
       --hedge-mode
+      --limit-order
+      --limit-order-candles 5
+      --dca-mode
+      --dca-level1-pct 0.01
+      --dca-atr-multiplier 1.8
+      --dca-max-swing-distance 2.0
+
+  # SOLUSDT - DCA Mode
+  bot-luk-sol-ict:
+    <<: [*bot-base, *bot-common]
+    container_name: luk-sol-ict
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=luk-sol-ict
+    env_file:
+      - .env_luk
+    command: >
+      python bot.py
+      --version v1.2.1.sol
+      --ticker SOLUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 4h 1D
+      --prob-threshold 0.58
+      --min-proba-diff 0.29
+      --tsl-pct 0.014
+      --tp-pct 0.02
+      --trade-size-pct 0.02
+      --leverage 20
+      --partial-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 5
+      --dca-mode
+      --dca-level1-pct 0.01
+      --dca-atr-multiplier 1.8
+      --dca-max-swing-distance 2.0
+
+  # 1000PEPEUSDT - DCA Mode
+  bot-luk-pepe:
+    <<: [*bot-base, *bot-common]
+    container_name: luk-pepe
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=luk-pepe
+    env_file:
+      - .env_luk
+    command: >
+      python bot.py
+      --version v1.2.1000pepe
+      --ticker 1000PEPEUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 4h 1D
+      --prob-threshold 0.60
+      --min-proba-diff 0.35
+      --tsl-pct 0.014
+      --tp-pct 0.02
+      --trade-size-pct 0.02
+      --leverage 20
+      --partial-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 5
+      --dca-mode
+      --dca-level1-pct 0.01
+      --dca-atr-multiplier 1.8
+      --dca-max-swing-distance 2.0
+
+  # LINKUSDT - DCA Mode
+  bot-luk-link:
+    <<: [*bot-base, *bot-common]
+    container_name: luk-link
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=luk-link
+    env_file:
+      - .env_luk
+    command: >
+      python bot.py
+      --version v1.2.link
+      --ticker LINKUSDT
+      --timeframe 15m
+      --helper-timeframes 4h 1D
+      --prob-threshold 0.60
+      --min-proba-diff 0.35
+      --tsl-pct 0.014
+      --tp-pct 0.02
+      --trade-size-pct 0.02
+      --leverage 20
+      --partial-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 5
+      --dca-mode
+      --dca-level1-pct 0.01
+      --dca-atr-multiplier 1.8
+      --dca-max-swing-distance 2.0
+
+  bot-luk-bnb:
+    <<: [ *bot-base, *bot-common ]
+    container_name: luk-bnb
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=luk-bnb
+    env_file:
+      - .env_luk
+    command: >
+      python bot.py
+      --version v1.2.bnb
+      --ticker BNBUSDT
+      --timeframe 15m
+      --helper-timeframes 6h 12h 1D
+      --prob-threshold 0.60
+      --min-proba-diff 0.35
+      --tsl-pct 0.014
+      --tp-pct 0.02
+      --trade-size-pct 0.02
+      --leverage 20
+      --partial-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 5
+      --dca-mode
+      --dca-level1-pct 0.01
+      --dca-atr-multiplier 1.8
+      --dca-max-swing-distance 2.0

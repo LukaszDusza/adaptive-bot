@@ -91,6 +91,7 @@ from scipy.signal import find_peaks
 import json
 from typing import Tuple, List
 import logging
+import sys
 from tqdm import tqdm
 
 # ============================================================================
@@ -1292,8 +1293,12 @@ def _calculate_base_features(df_out: pd.DataFrame):
         'volume_ma_50': df_out['volume'].rolling(50).mean(),
         # Common price calculations
         'high_low_range': df_out['high'] - df_out['low'],
+        'price_range': df_out['high'] - df_out['low'],  # Alias for backward compatibility
         'body_size': np.abs(df_out['close'] - df_out['open']),
     }
+
+    # Add price_range to df_out (required by old models)
+    df_out['price_range'] = _cache['price_range']
 
     print("  1. Struktura rynku...")
     swing_high, swing_low = df_out['high'].rolling(window=SWING_WINDOW).max(), df_out['low'].rolling(
@@ -2479,7 +2484,7 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     load_dotenv()
     api_key, api_secret = os.getenv("BYBIT_API_KEY"), os.getenv("BYBIT_API_SECRET")
     base_url = os.getenv("BYBIT_BASE_URL")
-    if not api_key or not api_secret: raise ValueError("Brak kluczy API w .env")
+    if not api_key or not api_secret: raise ValueError("Brak kluczy API w .env_demo")
     adapter = BybitAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
 
     def to_dataframe(raw_data):
@@ -2601,17 +2606,20 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             ("Pattern detection", lambda: detect_double_top_bottom_patterns(final_df, lookback=200, tolerance=0.015))
         ]
 
+        # Disable progress bar in non-TTY environments (Docker logs)
+        is_interactive = sys.stdout.isatty()
         with tqdm(total=len(advanced_tasks), desc="Advanced features", ncols=100,
-                  bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
+                  bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
+                  disable=not is_interactive) as pbar:
 
             # PRIORITY 1: Confluence features
             pbar.set_description("→ Confluence features")
             confluence_df = advanced_tasks[0][1]()
             if len(confluence_df.columns) > 0:
                 final_df = pd.concat([final_df, confluence_df], axis=1)
-                pbar.write(f"   ✓ Added {len(confluence_df.columns)} confluence features")
+                print(f"   ✓ Added {len(confluence_df.columns)} confluence features")
             else:
-                pbar.write(f"   ⚠ Skipped (missing required columns)")
+                print(f"   ⚠ Skipped (missing required columns)")
             pbar.update(1)
 
             # PRIORITY 2: Pivot-based dynamic S/R
@@ -2619,7 +2627,7 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             pivot_sr_df = advanced_tasks[1][1]()
             if len(pivot_sr_df.columns) > 0:
                 final_df = pd.concat([final_df, pivot_sr_df], axis=1)
-                pbar.write(f"   ✓ Added {len(pivot_sr_df.columns)} pivot S/R features")
+                print(f"   ✓ Added {len(pivot_sr_df.columns)} pivot S/R features")
             pbar.update(1)
 
             # PRIORITY 3: Double top/bottom patterns
@@ -2627,7 +2635,7 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             pattern_df = advanced_tasks[2][1]()
             if len(pattern_df.columns) > 0:
                 final_df = pd.concat([final_df, pattern_df], axis=1)
-                pbar.write(f"   ✓ Added {len(pattern_df.columns)} pattern features")
+                print(f"   ✓ Added {len(pattern_df.columns)} pattern features")
             pbar.update(1)
 
         print("✓ Advanced features completed\n")
@@ -2655,6 +2663,25 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
 
     print(f"\nKształt danych przed czyszczeniem (usunięciem wierszy z NaN): {final_df.shape}")
     initial_rows = len(final_df)
+
+    # ========================================================================
+    # BEST PRACTICE: Clean inf values before dropna()
+    # ========================================================================
+    # Dzielenie przez 0 może dawać inf (np. volume_acceleration, ratios)
+    # Replace inf/-inf → NaN, potem dropna() usunie te wiersze
+    print("🧹 Czyszczenie inf values...")
+    inf_counts = np.isinf(final_df.select_dtypes(include=[np.number])).sum()
+    total_infs = inf_counts.sum()
+    if total_infs > 0:
+        print(f"   ⚠️  Found {total_infs} inf values across {(inf_counts > 0).sum()} columns")
+        # Show top 5 columns with most infs
+        top_inf_cols = inf_counts.nlargest(5)
+        for col, count in top_inf_cols.items():
+            if count > 0:
+                print(f"      - {col}: {count} inf values")
+
+    final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+    print(f"   ✅ Replaced {total_infs} inf values with NaN")
 
     # DEBUG: Check which columns have all NaN
     nan_counts = final_df.isna().sum()

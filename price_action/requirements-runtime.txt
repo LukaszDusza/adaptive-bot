@@ -1,0 +1,78 @@
+# ============================================================================
+# REQUIREMENTS FOR LIVE TRADING BOT (RUNTIME ONLY)
+# ============================================================================
+# This is a minimal set of dependencies needed ONLY for running the bot live.
+# For training models, use requirements.txt instead.
+#
+# Size comparison:
+#   - requirements.txt (full):    ~2.5GB (includes PyTorch, Optuna, etc.)
+#   - requirements-runtime.txt:   ~800MB (50-70% smaller!)
+#
+# Build time comparison:
+#   - Full requirements:          ~8-10 minutes
+#   - Runtime requirements:       ~3-4 minutes
+# ============================================================================
+
+# Core trading dependencies
+pybit==5.12.0                    # Bybit API client
+python-dotenv==1.1.1             # Environment variables (.env files)
+
+# ML inference (model loading and prediction)
+lightgbm==4.6.0                  # LightGBM model inference
+scikit-learn==1.7.2              # StandardScaler, preprocessing
+joblib==1.5.2                    # Loading pickled models (.joblib files)
+numpy==2.2.6                     # Numerical computations
+scipy==1.16.2                    # Required by scikit-learn and lightgbm
+
+# Data processing and feature engineering
+pandas==2.3.3                    # DataFrames and time series
+pandas-ta==0.4.71b0              # Technical analysis indicators
+python-dateutil==2.9.0.post0     # Date utilities (pandas dependency)
+pytz==2025.2                     # Timezone handling (pandas dependency)
+tzdata==2025.2                   # Timezone data
+
+# Logging and monitoring
+colorlog==6.9.0                  # Colored logging output
+pyarrow==19.0.0                  # Parquet format for prediction logs
+
+# HTTP and networking (pybit dependencies)
+requests==2.32.5                 # HTTP client
+urllib3==2.5.0                   # HTTP library
+certifi==2025.10.5               # SSL certificates
+charset-normalizer==3.4.3        # Character encoding detection
+idna==3.11                       # Internationalized domain names
+websocket-client==1.9.0          # WebSocket support (pybit)
+pycryptodome==3.23.0             # Cryptography (pybit)
+
+# Async HTTP (pybit may use this)
+aiohttp==3.13.0                  # Async HTTP client
+aiohappyeyeballs==2.6.1          # Async DNS resolver
+aiosignal==1.4.0                 # Async signals
+frozenlist==1.8.0                # Immutable lists (aiohttp)
+multidict==6.7.0                 # Multi-value dicts (aiohttp)
+yarl==1.22.0                     # URL parsing (aiohttp)
+attrs==25.4.0                    # Classes without boilerplate
+propcache==0.4.1                 # Property caching
+
+# Utilities
+threadpoolctl==3.6.0             # Thread pool control (scikit-learn)
+packaging==25.0                  # Version parsing
+six==1.17.0                      # Python 2/3 compatibility
+typing_extensions==4.15.0        # Type hints backport
+
+# ============================================================================
+# REMOVED FROM FULL REQUIREMENTS (training-only dependencies):
+# ============================================================================
+# These packages are NOT needed for live trading and save ~1.7GB:
+#
+# - torch==2.9.0 + nvidia-cuda-* stack         (~1.2GB) - PyTorch + CUDA
+# - pytorch-tabnet==4.1.0                      (unused in current bot)
+# - optuna==4.5.0 + optuna-dashboard           (optimization only)
+# - sqlalchemy, alembic                        (Optuna database)
+# - matplotlib, seaborn, plotly, mplfinance    (~200MB) - Visualization
+# - imbalanced-learn==0.14.0                   (SMOTE - training only)
+# - numba==0.61.2 + llvmlite==0.44.0          (~150MB) - JIT compilation
+# - networkx, sympy, mpmath                    (scipy/torch dependencies)
+# - pillow, fonttools, contourpy, cycler       (matplotlib dependencies)
+# - kiwisolver                                 (matplotlib dependency)
+# ============================================================================

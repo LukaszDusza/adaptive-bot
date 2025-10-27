@@ -1,52 +1,94 @@
-# Python cache
+# Python cache and bytecode
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
 .Python
+.pytest_cache/
 
 # Virtual environments
 venv/
 env/
 ENV/
+.venv
 
 # Git
 .git/
 .gitignore
+.gitattributes
 
-# IDE
+# IDE and editor files
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+.DS_Store
 
 # Docker
 .dockerignore
 Dockerfile
 docker-compose.yaml
+docker-compose.yaml.backup*
+docker-optimize.sh
+# DO NOT IGNORE docker-entrypoint.sh - needed for container startup
 
 # Runtime data (will be mounted as volumes)
-logs/*
-bot_state/*
+logs/
+bot_state/
+prediction_logs/
+*.log
 
 # Environment files (passed via env_file in docker-compose)
 .env*
 
-# Test/development files
+# Test/development files (not needed in production container)
+test_*.py
+*_test.py
+tests/
+analyze_*.py
+benchmark_*.py
+debug_*.py
+visualize_*.py
 *.md
+!README.md
 *.txt.bak
-*.log
+COMMIT_SUMMARY.txt
+FEATURE_REFACTOR_CHANGELOG.md
 
 # Jupyter notebooks
 *.ipynb
+.ipynb_checkpoints/
 
 # Documentation
 docs/
 *.pdf
 
-# Backtest results (not needed in production)
-backtests/
-reports/
+# Training and optimization tools (not needed for live trading)
+model_pipeline.py
+optuna_optimizer.py
+backtester.py
+reports/report_generator.py
+run_*.sh
 
-# DO NOT IGNORE:
-# models/  <- MUST be copied to image!
+# Training artifacts inside models (keep only inference files)
+models/*/optuna/
+models/*/backtests/
+models/*/analysis/
+models/*/*.db
+models/*/holdout_predictions.csv
+models/*/*.txt
+models/*/*.png
+
+# Analysis results
+feature_analysis_results/
+analysis_confidence/
+
+# Backup files
+*.backup
+*.bak
+data_preparer_pa.py.backup*
+
+# DO NOT IGNORE (must be copied to image):
+# models/  <- Core model files (model.joblib, scaler.joblib, features.joblib, etc.)
+# *.py files listed in COPY commands in Dockerfile

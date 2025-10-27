@@ -41,6 +41,19 @@ class Position:
 
 
 @dataclass
+class PendingLimitOrder:
+    """Data structure for pending limit order"""
+    side: str  # 'Long' or 'Short'
+    limit_price: float
+    size: float
+    placed_time: pd.Timestamp
+    placed_candle_index: int
+    probability: float
+    tp_pct: float
+    sl_pct: float
+
+
+@dataclass
 class Trade:
     """Data structure for closed trade"""
     entry_time: pd.Timestamp
@@ -66,29 +79,51 @@ class Trade:
 
 class BacktestEngine:
     """Backtest engine without look-ahead bias"""
-    
-    def __init__(self, 
+
+    def __init__(self,
                  initial_capital: float = 10000.0,
                  maker_fee: float = 0.0002,
                  taker_fee: float = 0.00055,
-                 slippage_pct: float = 0.0001):
+                 slippage_pct: float = 0.0003,
+                 enable_limit_order: bool = False,
+                 limit_order_candles: int = 5,
+                 limit_offset_pct: float = 0.005,
+                 timeframe: str = '15m',
+                 suppress_limit_logs: bool = False,
+                 cooldown_minutes: int = 30):
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
         self.maker_fee = maker_fee
         self.taker_fee = taker_fee
         self.slippage_pct = slippage_pct
-        
+
+        # Limit order settings
+        self.enable_limit_order = enable_limit_order
+        self.limit_order_candles = limit_order_candles
+        self.limit_offset_pct = limit_offset_pct
+        self.timeframe = timeframe
+        self.suppress_limit_logs = suppress_limit_logs
+
+        # Cooldown settings (matches live bot behavior)
+        self.cooldown_minutes = cooldown_minutes
+        self.last_position_closed_at: Optional[pd.Timestamp] = None
+
         self.position: Optional[Position] = None
+        self.pending_limit_order: Optional[PendingLimitOrder] = None
         self.trades: List[Trade] = []
         self.equity_curve: List[float] = [initial_capital]
         self.decision_log: List[Dict] = []
-        
+
         # Track current trade data
         self.current_trade_ohlcv: List[Dict] = []
         self.current_tsl_history: List[Tuple] = []
         self.partial_tp_hit: bool = False
         self.partial_tp_time: Optional[pd.Timestamp] = None
         self.partial_tp_price: Optional[float] = None
+
+        # Limit order statistics
+        self.limit_orders_filled = 0
+        self.limit_orders_cancelled = 0
         
     def calculate_fees(self, price: float, size: float, is_maker: bool = False) -> float:
         """Calculate transaction fees"""
@@ -207,15 +242,20 @@ class BacktestEngine:
         
         return False, None, None
     
-    def close_position(self, exit_price: float, exit_time: pd.Timestamp, 
+    def close_position(self, exit_price: float, exit_time: pd.Timestamp,
                        exit_reason: str, mae_pct: float, mfe_pct: float,
                        size_to_close: Optional[float] = None):
         """Close position (fully or partially)"""
         if not self.position:
             return
-        
+
         pos = self.position
         close_size = size_to_close if size_to_close else pos.current_size
+
+        # Track position close time for cooldown (only for full closes)
+        is_full_close = size_to_close is None or close_size >= pos.current_size
+        if is_full_close:
+            self.last_position_closed_at = exit_time
         
         # Apply slippage
         exit_price_with_slippage = self.apply_slippage(exit_price, pos.side, is_entry=False)
@@ -321,14 +361,38 @@ class BacktestEngine:
             self.position = None
             logging.info(f"Position closed: {exit_reason}, Net P&L: ${net_pnl_usd:.2f}")
     
+    def is_in_cooldown_period(self, current_time: pd.Timestamp) -> bool:
+        """
+        Check if backtest is in cooldown period after position close.
+        Matches live bot behavior (30 min cooldown = 2x 15m candles).
+
+        Args:
+            current_time: Current candle timestamp
+
+        Returns:
+            True if cooldown is active, False otherwise
+        """
+        if self.last_position_closed_at is None:
+            return False
+
+        if self.cooldown_minutes <= 0:
+            return False
+
+        elapsed_minutes = (current_time - self.last_position_closed_at).total_seconds() / 60
+
+        if elapsed_minutes < self.cooldown_minutes:
+            return True
+
+        return False
+
     def update_trailing_stop(self, candle: pd.Series, tsl_pct: float):
         """Update trailing stop loss"""
         if not self.position:
             return
-        
+
         pos = self.position
         old_sl = pos.stop_loss
-        
+
         if pos.side == 'Long':
             current_profit_pct = (candle['close'] / pos.entry_price - 1)
             if current_profit_pct > 0:
@@ -345,7 +409,140 @@ class BacktestEngine:
                     pos.stop_loss = new_sl
                     # Record TSL update
                     self.current_tsl_history.append((candle.name, new_sl))
-    
+
+    def place_limit_order(self, candle: pd.Series, candle_index: int, side: str,
+                         probability: float, risk_pct: float, tp_pct: float, sl_pct: float):
+        """Place a limit order (like bot.py)"""
+        if self.pending_limit_order or self.position:
+            return
+
+        current_price = candle['close']  # Use close price for reference
+        position_size = self.current_capital * risk_pct
+
+        # Calculate limit price with offset (matches bot.py logic)
+        if side == 'Long':
+            # LONG: Buy cheaper (limit below current price)
+            limit_price = current_price * (1 - self.limit_offset_pct)
+        else:
+            # SHORT: Sell higher (limit above current price)
+            limit_price = current_price * (1 + self.limit_offset_pct)
+
+        self.pending_limit_order = PendingLimitOrder(
+            side=side,
+            limit_price=limit_price,
+            size=position_size,
+            placed_time=candle.name,
+            placed_candle_index=candle_index,
+            probability=probability,
+            tp_pct=tp_pct,
+            sl_pct=sl_pct
+        )
+
+        if not self.suppress_limit_logs:
+            logging.info(f"📋 LIMIT ORDER PLACED: {side} @ {limit_price:.4f} | "
+                        f"Current: {current_price:.4f} | Offset: {self.limit_offset_pct*100:.2f}% | "
+                        f"Max wait: {self.limit_order_candles} candles")
+
+    def check_limit_order_fill(self, candle: pd.Series, candle_index: int) -> bool:
+        """
+        Check if pending limit order should be filled (matches bot.py logic).
+        Returns True if filled, False otherwise.
+        """
+        if not self.pending_limit_order:
+            return False
+
+        order = self.pending_limit_order
+
+        # Check if price reached limit (using candle's high/low for accuracy)
+        filled = False
+        if order.side == 'Long':
+            # LONG: filled if candle low <= limit_price
+            filled = candle['low'] <= order.limit_price
+        else:
+            # SHORT: filled if candle high >= limit_price
+            filled = candle['high'] >= order.limit_price
+
+        if filled:
+            self.fill_limit_order(candle)
+            return True
+
+        # Check timeout (based on candles elapsed)
+        candles_elapsed = candle_index - order.placed_candle_index
+        if candles_elapsed >= self.limit_order_candles:
+            self.cancel_limit_order(candle)
+            return False
+
+        return False
+
+    def fill_limit_order(self, candle: pd.Series):
+        """Execute limit order fill (matches bot.py entry logic)"""
+        if not self.pending_limit_order:
+            return
+
+        order = self.pending_limit_order
+
+        # Use limit price as entry (no additional slippage - already maker order)
+        entry_price = order.limit_price
+
+        # Calculate SL and TP
+        if order.side == 'Long':
+            stop_loss = entry_price * (1 - order.sl_pct)
+            take_profit = entry_price * (1 + order.tp_pct) if order.tp_pct > 0 else np.inf
+        else:
+            stop_loss = entry_price * (1 + order.sl_pct)
+            take_profit = entry_price * (1 - order.tp_pct) if order.tp_pct > 0 else 0
+
+        self.position = Position(
+            side=order.side,
+            entry_price=entry_price,
+            entry_time=candle.name,
+            current_size=order.size,
+            initial_size=order.size,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            highest_price=entry_price if order.side == 'Long' else np.inf,
+            lowest_price=entry_price if order.side == 'Short' else 0,
+            partial_tp_taken=False,
+            tp_pct=order.tp_pct,
+            entry_probability=order.probability
+        )
+
+        # Capture entry candle OHLCV data
+        self.current_trade_ohlcv.append({
+            'timestamp': candle.name,
+            'open': candle['open'],
+            'high': candle['high'],
+            'low': candle['low'],
+            'close': candle['close'],
+            'volume': candle.get('volume', 0)
+        })
+
+        self.limit_orders_filled += 1
+        tp_display = f"{take_profit:.4f}" if take_profit not in [0, np.inf] else "OFF"
+
+        if not self.suppress_limit_logs:
+            logging.warning(f"✅ LIMIT ORDER FILLED: {order.side} @ {entry_price:.4f} | "
+                           f"SL: {stop_loss:.4f} | TP: {tp_display} | "
+                           f"Prob: {order.probability:.3f}")
+
+        # Clear pending order
+        self.pending_limit_order = None
+
+    def cancel_limit_order(self, candle: pd.Series):
+        """Cancel limit order due to timeout"""
+        if not self.pending_limit_order:
+            return
+
+        order = self.pending_limit_order
+        self.limit_orders_cancelled += 1
+
+        if not self.suppress_limit_logs:
+            logging.warning(f"⏰ LIMIT ORDER CANCELLED: {order.side} @ {order.limit_price:.4f} | "
+                           f"Timeout: {self.limit_order_candles} candles elapsed")
+
+        # Clear pending order
+        self.pending_limit_order = None
+
     def open_position(self, candle: pd.Series, side: str, probability: float,
                      risk_pct: float, tp_pct: float, sl_pct: float):
         """Open new position"""
@@ -402,7 +599,11 @@ class BacktestEngine:
             enable_partial_tp: bool,
             enable_dynamic_tp: bool = False,
             enable_profit_protection: bool = False,
-            min_proba_diff: float = 0.0) -> Dict:
+            min_proba_diff: float = 0.0,
+            ict_context_mode: bool = False,
+            ict_min_strength: float = 0.3,
+            ict_max_reduction: float = 0.20,
+            regime_sensitivity: float = 1.0) -> Dict:
         """Main backtest loop - NO LOOK-AHEAD BIAS"""
 
         # Validate mutual exclusivity
@@ -420,10 +621,18 @@ class BacktestEngine:
         current_mae_pct = 0.0
         current_mfe_pct = 0.0
         highest_profit_pct = 0.0  # Track peak profit for profit protection
-        
+
+        # Log limit order mode if enabled
+        if self.enable_limit_order:
+            logging.info(f"Limit Order Mode ENABLED: offset={self.limit_offset_pct*100:.2f}%, max_wait={self.limit_order_candles} candles")
+
         for i in range(1, len(df)):
             current_candle = df.iloc[i]
-            
+
+            # STEP 0.5: CHECK PENDING LIMIT ORDERS
+            if self.pending_limit_order:
+                self.check_limit_order_fill(current_candle, i)
+
             # STEP 1: MANAGE OPEN POSITION
             if self.position:
                 # Collect OHLCV data for trade chart
@@ -595,43 +804,163 @@ class BacktestEngine:
                 
                 # Calculate probability difference (confidence gap)
                 proba_diff = abs(proba_long - proba_short)
-                
+
+                # ========== ICT CONTEXT MODE (OPCJA 3) - Backtest Version ==========
+                # Dynamic threshold adjustment based on Smart Money signals
+
+                if ict_context_mode:
+                    # Extract ICT features from current candle
+                    ict_composite = current_candle.get('ict_composite_score', 0.5)
+                    liquidity_sweep = current_candle.get('liquidity_sweep', 0.0)
+                    fvg_signal = current_candle.get('fvg_signal', 0.0)
+                    order_block = current_candle.get('order_block', 0.0)
+                    market_structure_shift = current_candle.get('market_structure_shift', 0.0)
+
+                    # Extract market regime features
+                    rsi = current_candle.get('rsi_14', 50)
+                    atr_norm = current_candle.get('atr_normalized', 1.0)
+                    volume_ratio = current_candle.get('volume_vs_ma_20', 1.0)
+
+                    # 1. Calculate ICT Strength (0-1 scale)
+                    ict_strength = 0.0
+                    if ict_composite > 0.6:
+                        ict_strength += 0.3
+                    if liquidity_sweep > 0:
+                        ict_strength += 0.2
+                    if abs(fvg_signal) > 0:
+                        ict_strength += 0.2
+                    if abs(order_block) > 0:
+                        ict_strength += 0.2
+                    if abs(market_structure_shift) > 0:
+                        ict_strength += 0.1
+                    ict_strength = min(ict_strength, 1.0)
+
+                    # 2. Calculate Market Regime Multiplier
+                    # FIX: Odwrócona logika - niska zmienność NIE PODNOSI progów
+                    regime_multiplier = 1.0
+
+                    # Trending market (easier to trade) → lower thresholds
+                    if (rsi > 60 and proba_long > proba_short) or (rsi < 40 and proba_short > proba_long):
+                        regime_multiplier *= (1.0 - 0.1 * regime_sensitivity)  # -10% threshold
+
+                    # High volatility with volume confirmation → lower thresholds
+                    if atr_norm > 1.2 and volume_ratio > 1.3:
+                        regime_multiplier *= (1.0 - 0.15 * regime_sensitivity)  # -15% threshold
+
+                    # Low volatility OR low volume → LEKKO OBNIŻ (więcej okazji w spokojnym rynku)
+                    # FIX: Było 1.0 + 0.15 (podnosiło), teraz 1.0 - 0.05 (lekko obniża)
+                    if atr_norm < 0.7 or volume_ratio < 0.6:
+                        regime_multiplier *= (1.0 - 0.05 * regime_sensitivity)  # -5% threshold (neutral/slightly lower)
+
+                    # Extreme RSI without volume → LEKKO PODNOSI (ale mniej niż wcześniej)
+                    # FIX: Było 1.0 + 0.25 (mocno podnosiło), teraz 1.0 + 0.10 (lekko podnosi)
+                    if (rsi > 75 or rsi < 25) and volume_ratio < 0.8:
+                        regime_multiplier *= (1.0 + 0.10 * regime_sensitivity)  # +10% threshold (was +25%)
+
+                    # 3. Dynamic Threshold Adjustment
+                    base_prob_threshold = prob_threshold
+                    base_diff_threshold = min_proba_diff
+
+                    if ict_strength >= ict_min_strength:
+                        ict_adjustment = 1.0 - (ict_strength * ict_max_reduction)
+                    else:
+                        ict_adjustment = 1.0
+
+                    dynamic_prob_threshold = base_prob_threshold * regime_multiplier * ict_adjustment
+                    dynamic_diff_threshold = base_diff_threshold * regime_multiplier * ict_adjustment
+
+                    # Safety bounds
+                    dynamic_prob_threshold = np.clip(dynamic_prob_threshold, 0.45, 0.85)
+                    dynamic_diff_threshold = np.clip(dynamic_diff_threshold, 0.08, 0.35)
+                else:
+                    # Use static thresholds (original behavior)
+                    dynamic_prob_threshold = prob_threshold
+                    dynamic_diff_threshold = min_proba_diff
+                    ict_strength = 0.0
+                    regime_multiplier = 1.0
+
+                # Determine decision with dynamic thresholds
                 decision = "HOLD"
                 chosen_proba = 0.0
-                
-                if proba_long > prob_threshold and proba_long > proba_short:
+
+                if proba_long > dynamic_prob_threshold and proba_long > proba_short:
                     # Check if confidence gap is sufficient
-                    if proba_diff >= min_proba_diff:
+                    if proba_diff >= dynamic_diff_threshold:
                         decision = "LONG"
                         chosen_proba = proba_long
-                elif proba_short > prob_threshold and proba_short > proba_long:
+                elif proba_short > dynamic_prob_threshold and proba_short > proba_long:
                     # Check if confidence gap is sufficient
-                    if proba_diff >= min_proba_diff:
+                    if proba_diff >= dynamic_diff_threshold:
                         decision = "SHORT"
                         chosen_proba = proba_short
-                
+
                 # DEBUG: Log first 10 predictions to diagnose issue
                 if i <= 10:
-                    logging.info(f"Candle {i} @ {current_candle.name}: proba_long={proba_long:.4f}, proba_short={proba_short:.4f}, diff={proba_diff:.4f}, decision={decision}")
-                
-                self.decision_log.append({
+                    if ict_context_mode:
+                        logging.info(f"Candle {i} @ {current_candle.name}: proba_long={proba_long:.4f}, proba_short={proba_short:.4f}, "
+                                   f"ICT_str={ict_strength:.2f}, threshold={dynamic_prob_threshold:.3f}, decision={decision}")
+                    else:
+                        logging.info(f"Candle {i} @ {current_candle.name}: proba_long={proba_long:.4f}, proba_short={proba_short:.4f}, "
+                                   f"diff={proba_diff:.4f}, decision={decision}")
+
+                # Extended decision log with ICT context info
+                decision_entry = {
                     'timestamp': current_candle.name,
                     'proba_long': proba_long,
                     'proba_short': proba_short,
-                    'decision': decision
-                })
-                
-                if decision != "HOLD":
-                    self.open_position(
-                        candle=current_candle,
-                        side=decision.capitalize(),
-                        probability=chosen_proba,
-                        risk_pct=risk_pct,
-                        tp_pct=tp_pct,
-                        sl_pct=sl_pct
-                    )
-                    # Reset profit protection tracking for new position
-                    highest_profit_pct = 0.0
+                    'proba_diff': proba_diff,
+                    'decision': decision,
+                    'base_prob_threshold': prob_threshold,
+                    'base_diff_threshold': min_proba_diff,
+                }
+
+                if ict_context_mode:
+                    decision_entry.update({
+                        'ict_mode': True,
+                        'ict_strength': ict_strength,
+                        'regime_multiplier': regime_multiplier,
+                        'dynamic_prob_threshold': dynamic_prob_threshold,
+                        'dynamic_diff_threshold': dynamic_diff_threshold,
+                        'threshold_reduction_pct': (prob_threshold - dynamic_prob_threshold) / prob_threshold * 100
+                    })
+                else:
+                    decision_entry['ict_mode'] = False
+
+                self.decision_log.append(decision_entry)
+
+                if decision != "HOLD" and not self.pending_limit_order:
+                    # COOLDOWN CHECK: Matches live bot behavior
+                    # Prevents immediate re-entry after position close
+                    if self.is_in_cooldown_period(current_candle.name):
+                        elapsed_minutes = (current_candle.name - self.last_position_closed_at).total_seconds() / 60
+                        remaining_minutes = self.cooldown_minutes - elapsed_minutes
+                        logging.info(f"⏰ COOLDOWN: Skipping {decision} signal - {remaining_minutes:.1f} min remaining "
+                                    f"(last close: {self.last_position_closed_at})")
+                        decision_entry['cooldown_blocked'] = True
+                        decision_entry['cooldown_remaining_minutes'] = remaining_minutes
+                    else:
+                        # Use limit order or market order depending on mode
+                        if self.enable_limit_order:
+                            self.place_limit_order(
+                                candle=current_candle,
+                                candle_index=i,
+                                side=decision.capitalize(),
+                                probability=chosen_proba,
+                                risk_pct=risk_pct,
+                                tp_pct=tp_pct,
+                                sl_pct=sl_pct
+                            )
+                        else:
+                            self.open_position(
+                                candle=current_candle,
+                                side=decision.capitalize(),
+                                probability=chosen_proba,
+                                risk_pct=risk_pct,
+                                tp_pct=tp_pct,
+                                sl_pct=sl_pct
+                            )
+                        # Reset profit protection tracking for new position
+                        highest_profit_pct = 0.0
         
         # Close any open position at end
         if self.position:
@@ -643,20 +972,40 @@ class BacktestEngine:
                 mae_pct=current_mae_pct,
                 mfe_pct=current_mfe_pct
             )
-        
+
+        # Log limit order statistics if enabled
+        if self.enable_limit_order:
+            logging.info(f"Limit Order Stats: {self.limit_orders_filled} filled, {self.limit_orders_cancelled} cancelled")
+
         return {
             'trades': self.trades,
             'decision_log': self.decision_log,
             'equity_curve': self.equity_curve,
-            'final_capital': self.current_capital
+            'final_capital': self.current_capital,
+            'limit_orders_filled': self.limit_orders_filled,
+            'limit_orders_cancelled': self.limit_orders_cancelled
         }
 
 
-def calculate_metrics(trades: List[Trade], equity_curve: List[float], 
+def calculate_metrics(trades: List[Trade], equity_curve: List[float],
                      initial_capital: float) -> Dict:
     """Calculate comprehensive performance metrics"""
     if not trades:
-        return {'total_trades': 0}
+        # Return full dict with zeros/defaults when no trades
+        return {
+            'total_trades': 0,
+            'win_rate': 0,
+            'avg_win': 0,
+            'avg_loss': 0,
+            'profit_factor': 0,
+            'total_return_pct': 0,
+            'total_pnl_usd': 0,
+            'max_drawdown_pct': 0,
+            'sharpe_ratio': 0,
+            'sortino_ratio': 0,
+            'recovery_factor': 0,
+            'expectancy': 0
+        }
     
     df_trades = pd.DataFrame([asdict(t) for t in trades])
     
@@ -748,6 +1097,18 @@ def print_results(results: Dict, metrics: Dict, strategy_id: str, version: str =
     print(f"  Expectancy:       ${metrics.get('expectancy', 0):.2f}")
     print(f"\nFEES:")
     print(f"  Total:            ${metrics.get('total_fees', 0):.2f}")
+
+    # Display limit order stats if they exist
+    limit_filled = results.get('limit_orders_filled', 0)
+    limit_cancelled = results.get('limit_orders_cancelled', 0)
+    if limit_filled > 0 or limit_cancelled > 0:
+        print(f"\nLIMIT ORDERS:")
+        print(f"  Filled:           {limit_filled}")
+        print(f"  Cancelled:        {limit_cancelled}")
+        if limit_filled + limit_cancelled > 0:
+            fill_rate = (limit_filled / (limit_filled + limit_cancelled)) * 100
+            print(f"  Fill Rate:        {fill_rate:.2f}%")
+
     print("="*70 + "\n")
 
 
@@ -793,6 +1154,7 @@ def main(args):
         limit=args.limit,
         helper_timeframes=args.helper_timeframes,
         side='backtest',
+        date_from=getattr(args, 'date_from', None),
         version=version,
         model_features_to_preserve=all_model_features
     )
@@ -805,7 +1167,12 @@ def main(args):
         initial_capital=args.initial_capital,
         maker_fee=args.maker_fee,
         taker_fee=args.taker_fee,
-        slippage_pct=args.slippage_pct
+        slippage_pct=args.slippage_pct,
+        enable_limit_order=getattr(args, 'limit_order', False),
+        limit_order_candles=getattr(args, 'limit_order_candles', 5),
+        limit_offset_pct=getattr(args, 'limit_offset_pct', 0.005),
+        timeframe=args.timeframe,
+        cooldown_minutes=getattr(args, 'cooldown_minutes', 30)  # Matches live bot default
     )
     
     results = engine.run(
@@ -824,7 +1191,11 @@ def main(args):
         enable_partial_tp=args.partial_tp,
         enable_dynamic_tp=args.dynamic_tp,
         enable_profit_protection=getattr(args, 'protect_profit', False),
-        min_proba_diff=args.min_proba_diff
+        min_proba_diff=args.min_proba_diff,
+        ict_context_mode=getattr(args, 'ict_context', False),
+        ict_min_strength=getattr(args, 'ict_min_strength', 0.3),
+        ict_max_reduction=getattr(args, 'ict_max_reduction', 0.20),
+        regime_sensitivity=getattr(args, 'regime_sensitivity', 1.0)
     )
     
     metrics = calculate_metrics(results['trades'], results['equity_curve'], args.initial_capital)
@@ -852,12 +1223,31 @@ def run_backtester_with_args(args):
     if not hasattr(args, 'taker_fee'):
         args.taker_fee = 0.00055
     if not hasattr(args, 'slippage_pct'):
-        args.slippage_pct = 0.0001
+        args.slippage_pct = 0.0003  # Includes funding rate equivalent
     if not hasattr(args, 'min_proba_diff'):
         args.min_proba_diff = 0.0
     if not hasattr(args, 'dynamic_tp'):
         args.dynamic_tp = False
-    
+    # Limit order defaults
+    if not hasattr(args, 'limit_order'):
+        args.limit_order = False
+    if not hasattr(args, 'limit_order_candles'):
+        args.limit_order_candles = 5
+    if not hasattr(args, 'limit_offset_pct'):
+        args.limit_offset_pct = 0.005
+    # ICT Context Mode defaults
+    if not hasattr(args, 'ict_context'):
+        args.ict_context = False
+    if not hasattr(args, 'ict_min_strength'):
+        args.ict_min_strength = 0.3
+    if not hasattr(args, 'ict_max_reduction'):
+        args.ict_max_reduction = 0.20
+    if not hasattr(args, 'regime_sensitivity'):
+        args.regime_sensitivity = 1.0
+    # Cooldown defaults
+    if not hasattr(args, 'cooldown_minutes'):
+        args.cooldown_minutes = 30  # Matches live bot default
+
     # Run the main backtest function
     main(args)
 
@@ -886,6 +1276,14 @@ if __name__ == "__main__":
                         help='Enable profit protection: move SL to breakeven if profit peaks >0.25%% but declines before hitting partial TP')
     parser.add_argument('--maker-fee', type=float, default=0.0002)
     parser.add_argument('--taker-fee', type=float, default=0.00055)
-    parser.add_argument('--slippage-pct', type=float, default=0.0001)
+    parser.add_argument('--slippage-pct', type=float, default=0.0003)  # Includes funding rate equivalent
+    parser.add_argument('--limit-order', action='store_true',
+                        help='Enable limit order mode (place limit orders instead of market orders)')
+    parser.add_argument('--limit-order-candles', type=int, default=5,
+                        help='Maximum candles to wait for limit order fill before cancelling')
+    parser.add_argument('--limit-offset-pct', type=float, default=0.005,
+                        help='Limit order price offset percentage (default 0.5%%)')
+    parser.add_argument('--cooldown-minutes', type=int, default=30,
+                        help='Minutes to wait after position close before allowing new entry (default: 30, matches live bot)')
 
     main(parser.parse_args())
