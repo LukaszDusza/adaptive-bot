@@ -29,13 +29,15 @@ from prediction_logger import PredictionLogger
 from feature_cache import FeatureCache
 
 # Logging setup
+# Note: Only use StreamHandler (stdout) for Docker compatibility
+# TradeLogger handles file-based logging separately
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('bot_v2.log'),
-        logging.StreamHandler()
-    ]
+        logging.StreamHandler()  # Docker-friendly: logs to stdout
+    ],
+    force=True  # Override any existing configuration
 )
 
 
@@ -53,7 +55,7 @@ class BotConfig:
     PROBABILITY_THRESHOLD: float = 0.7
     MIN_PROBA_DIFF: float = 0.2  # Minimum difference between BUY and SELL probabilities
     LOOP_SLEEP_SECONDS: int = 300  # 5 minutes - optimized for 15m timeframe (reduces cache hits from 93% to 67%)
-    CANDLES_FOR_FEATURES: int = 5000  # Reduced from 10000 to avoid Bybit API data availability issues
+    CANDLES_FOR_FEATURES: int = 500  # Reduced from 5000 for live bot (5000 is too heavy for Docker 2GB RAM limit)
     PARTIAL_TP_ENABLED: bool = True
     DYNAMIC_TP_ENABLED: bool = False  # New dynamic TP: 25% at each of 4 levels (25%, 50%, 75%, 100%)
     HEDGE_MODE: bool = False  # Hedge Mode: positionIdx 1=Long, 2=Short. One-Way Mode: positionIdx 0
@@ -124,7 +126,9 @@ class TradingBot:
         )
 
         # Restore trade logging if position was active before restart
+        print("📋 Step 1/4: Restoring trade logging if needed...")
         self._restore_trade_logging_if_needed()
+        print("✓ Trade logging restoration complete")
 
         # Cache for last decision data
         self.last_decision_data = {}
@@ -141,10 +145,14 @@ class TradingBot:
         # EPHEMERAL MODE: Auto-recovery from Bybit API
         # If container restarted without persistent state, detect existing position and restore
         # IMPORTANT: This must come AFTER self.active_limit_orders initialization
+        print("📋 Step 2/4: Checking existing positions on Bybit...")
         self._check_existing_position_on_startup()
+        print("✓ Position check complete")
 
         # PERFORMANCE: Feature cache for incremental updates
+        print("📋 Step 3/4: Initializing feature cache...")
         self.feature_cache = FeatureCache(window_size=self.config.CANDLES_FOR_FEATURES)
+        print("✓ Feature cache initialized")
 
         logging.info("="*60)
         logging.info(f"Bot V2 initialized with Trade Logger: {self.base_id}")
@@ -1015,6 +1023,7 @@ class TradingBot:
                 # Use static thresholds (original behavior)
                 dynamic_prob_threshold = self.config.PROBABILITY_THRESHOLD
                 dynamic_diff_threshold = self.config.MIN_PROBA_DIFF
+                logging.info(f"📊 Static Thresholds: prob={dynamic_prob_threshold:.3f}, diff={dynamic_diff_threshold:.3f}")
 
             # Determine decision with dynamic thresholds
             decision = "HOLD"
@@ -1022,18 +1031,19 @@ class TradingBot:
                 # Check if confidence gap is sufficient
                 if proba_diff >= dynamic_diff_threshold:
                     decision = "BUY"
-                    if self.config.ICT_CONTEXT_MODE:
-                        logging.info(f"✅ BUY signal accepted (ICT-adjusted threshold: {dynamic_prob_threshold:.3f})")
+                    logging.info(f"✅ BUY signal accepted: proba={proba_buy:.3f} > threshold={dynamic_prob_threshold:.3f}, gap={proba_diff:.3f} >= {dynamic_diff_threshold:.3f}")
                 else:
-                    logging.warning(f"⚠️  BUY signal rejected: insufficient confidence gap ({proba_diff:.3f} < {dynamic_diff_threshold:.3f})")
+                    logging.info(f"⚠️  BUY signal rejected: insufficient confidence gap ({proba_diff:.3f} < {dynamic_diff_threshold:.3f})")
             elif proba_sell > dynamic_prob_threshold and proba_sell > proba_buy:
                 # Check if confidence gap is sufficient
                 if proba_diff >= dynamic_diff_threshold:
                     decision = "SELL"
-                    if self.config.ICT_CONTEXT_MODE:
-                        logging.info(f"✅ SELL signal accepted (ICT-adjusted threshold: {dynamic_prob_threshold:.3f})")
+                    logging.info(f"✅ SELL signal accepted: proba={proba_sell:.3f} > threshold={dynamic_prob_threshold:.3f}, gap={proba_diff:.3f} >= {dynamic_diff_threshold:.3f}")
                 else:
-                    logging.warning(f"⚠️  SELL signal rejected: insufficient confidence gap ({proba_diff:.3f} < {dynamic_diff_threshold:.3f})")
+                    logging.info(f"⚠️  SELL signal rejected: insufficient confidence gap ({proba_diff:.3f} < {dynamic_diff_threshold:.3f})")
+            else:
+                # HOLD - log the reason
+                logging.info(f"⏸️  HOLD: Neither condition met (BUY={proba_buy:.3f}, SELL={proba_sell:.3f}, threshold={dynamic_prob_threshold:.3f}, gap={proba_diff:.3f})")
 
             logging.info(f"🎯 Final Decision: {decision}")
 

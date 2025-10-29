@@ -1,6 +1,3 @@
-# ============================================================================
-# DEPLOYMENT - 4 bots with DCA mode (DOGE, SOL, PEPE, LINK)
-# ============================================================================
 
 x-bot-base: &bot-base
   image: adaptive-bot:latest
@@ -46,7 +43,6 @@ services:
     profiles:
       - build-only
 
-  # DOGEUSDT - DCA Mode
   bot-luk-doge-dca:
     <<: [*bot-base, *bot-common]
     container_name: luk-doge-dca
@@ -60,7 +56,7 @@ services:
       --version v1.2.doge
       --ticker DOGEUSDT
       --timeframe 15m
-      --helper-timeframes 1h 4h 1D
+      --helper-timeframes 1h 4h 6h 12h 1d
       --prob-threshold 0.60
       --min-proba-diff 0.35
       --tsl-pct 0.014
@@ -76,7 +72,7 @@ services:
       --dca-atr-multiplier 1.8
       --dca-max-swing-distance 2.0
 
-  # SOLUSDT - DCA Mode
+
   bot-luk-sol-ict:
     <<: [*bot-base, *bot-common]
     container_name: luk-sol-ict
@@ -87,10 +83,10 @@ services:
       - .env_luk
     command: >
       python bot.py
-      --version v1.2.1.sol
+      --version v1.2.sol
       --ticker SOLUSDT
       --timeframe 15m
-      --helper-timeframes 1h 4h 1D
+      --helper-timeframes 1h 4h 12h 1d
       --prob-threshold 0.58
       --min-proba-diff 0.29
       --tsl-pct 0.014
@@ -106,91 +102,3 @@ services:
       --dca-atr-multiplier 1.8
       --dca-max-swing-distance 2.0
 
-  # 1000PEPEUSDT - DCA Mode
-  bot-luk-pepe:
-    <<: [*bot-base, *bot-common]
-    container_name: luk-pepe
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CONTAINER_NAME=luk-pepe
-    env_file:
-      - .env_luk
-    command: >
-      python bot.py
-      --version v1.2.1000pepe
-      --ticker 1000PEPEUSDT
-      --timeframe 15m
-      --helper-timeframes 1h 4h 1D
-      --prob-threshold 0.60
-      --min-proba-diff 0.35
-      --tsl-pct 0.014
-      --tp-pct 0.02
-      --trade-size-pct 0.02
-      --leverage 20
-      --partial-tp
-      --hedge-mode
-      --limit-order
-      --limit-order-candles 5
-      --dca-mode
-      --dca-level1-pct 0.01
-      --dca-atr-multiplier 1.8
-      --dca-max-swing-distance 2.0
-
-  # LINKUSDT - DCA Mode
-  bot-luk-link:
-    <<: [*bot-base, *bot-common]
-    container_name: luk-link
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CONTAINER_NAME=luk-link
-    env_file:
-      - .env_luk
-    command: >
-      python bot.py
-      --version v1.2.link
-      --ticker LINKUSDT
-      --timeframe 15m
-      --helper-timeframes 4h 1D
-      --prob-threshold 0.60
-      --min-proba-diff 0.35
-      --tsl-pct 0.014
-      --tp-pct 0.02
-      --trade-size-pct 0.02
-      --leverage 20
-      --partial-tp
-      --hedge-mode
-      --limit-order
-      --limit-order-candles 5
-      --dca-mode
-      --dca-level1-pct 0.01
-      --dca-atr-multiplier 1.8
-      --dca-max-swing-distance 2.0
-
-  bot-luk-bnb:
-    <<: [ *bot-base, *bot-common ]
-    container_name: luk-bnb
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CONTAINER_NAME=luk-bnb
-    env_file:
-      - .env_luk
-    command: >
-      python bot.py
-      --version v1.2.bnb
-      --ticker BNBUSDT
-      --timeframe 15m
-      --helper-timeframes 6h 12h 1D
-      --prob-threshold 0.60
-      --min-proba-diff 0.35
-      --tsl-pct 0.014
-      --tp-pct 0.02
-      --trade-size-pct 0.02
-      --leverage 20
-      --partial-tp
-      --hedge-mode
-      --limit-order
-      --limit-order-candles 5
-      --dca-mode
-      --dca-level1-pct 0.01
-      --dca-atr-multiplier 1.8
-      --dca-max-swing-distance 2.0

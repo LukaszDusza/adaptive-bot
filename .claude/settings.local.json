@@ -58,7 +58,19 @@
       "Bash(npx vite:*)",
       "Bash(mkdir:*)",
       "Bash(git ls-tree:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(npx tailwindcss init -p)",
+      "Bash(./node_modules/.bin/tailwindcss:*)",
+      "Bash(node --version:*)",
+      "Bash(nvm install:*)",
+      "Bash(nvm use:*)",
+      "Bash(open http://localhost:5173)",
+      "Bash(npm uninstall:*)",
+      "Bash(open:*)",
+      "Bash(docker stats:*)",
+      "Read(//var/run/**)",
+      "Read(//Users/lukasz/.docker/run/**)",
+      "Bash(docker context:*)"
     ],
     "deny": [],
     "ask": []

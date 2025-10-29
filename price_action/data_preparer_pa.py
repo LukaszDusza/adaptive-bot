@@ -1518,6 +1518,10 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     Returns:
         DataFrame with computed features
     """
+    # Suppress DataFrame fragmentation warnings (performance is acceptable, warnings clutter logs)
+    import warnings
+    warnings.filterwarnings('ignore', message='DataFrame is highly fragmented')
+
     logging.info(f"Obliczanie cech dla interwału bazowego (level={feature_level})...")
     # ENHANCEMENT #8: Load configuration instead of hardcoded values
     SWING_WINDOW = FEATURE_CONFIG['price_action']['swing_window']

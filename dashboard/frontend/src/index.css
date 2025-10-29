@@ -1,0 +1,123 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-dark-border;
+  }
+
+  html {
+    @apply h-full;
+  }
+
+  body {
+    @apply h-full bg-dark-bg text-dark-text-primary font-sans antialiased;
+  }
+
+  #root {
+    @apply h-full;
+  }
+}
+
+@layer components {
+  /* Card component */
+  .card {
+    @apply bg-dark-card border border-dark-border rounded-lg p-6;
+  }
+
+  /* Button styles */
+  .btn {
+    @apply px-4 py-2 rounded-md font-medium transition-all duration-200;
+  }
+
+  .btn-primary {
+    @apply bg-blue-600 hover:bg-blue-700 text-white;
+  }
+
+  .btn-success {
+    @apply bg-profit hover:bg-profit-dark text-white;
+  }
+
+  .btn-danger {
+    @apply bg-loss hover:bg-loss-dark text-white;
+  }
+
+  .btn-secondary {
+    @apply bg-dark-card hover:bg-dark-border text-dark-text-primary border border-dark-border;
+  }
+
+  /* Stat card */
+  .stat-card {
+    @apply card flex flex-col space-y-2;
+  }
+
+  .stat-label {
+    @apply text-sm text-dark-text-secondary uppercase tracking-wide;
+  }
+
+  .stat-value {
+    @apply text-2xl font-bold;
+  }
+
+  /* Table styles */
+  .table {
+    @apply w-full text-left;
+  }
+
+  .table thead {
+    @apply border-b border-dark-border;
+  }
+
+  .table th {
+    @apply py-3 px-4 text-sm font-semibold text-dark-text-secondary uppercase;
+  }
+
+  .table td {
+    @apply py-4 px-4 text-sm;
+  }
+
+  .table tbody tr {
+    @apply border-b border-dark-border hover:bg-dark-card transition-colors;
+  }
+
+  /* Status badge */
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-success {
+    @apply bg-profit/20 text-profit;
+  }
+
+  .badge-danger {
+    @apply bg-loss/20 text-loss;
+  }
+
+  .badge-warning {
+    @apply bg-warning/20 text-warning;
+  }
+
+  .badge-neutral {
+    @apply bg-dark-border text-dark-text-secondary;
+  }
+}
+
+@layer utilities {
+  /* Scrollbar styles */
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    @apply bg-dark-bg;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-dark-border rounded-full;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    @apply bg-dark-text-muted;
+  }
+}
