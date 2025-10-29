@@ -1,6 +1,11 @@
 """
 Advanced Logging System for Trading Bot
 Enables full trade reconstruction and post-factum analysis
+
+V2 Features:
+- Dual write: JSON files + SQLite database
+- Complete metrics tracking (MFE, MAE, fees)
+- Graceful degradation (DB errors don't stop trading)
 """
 
 import json
@@ -11,30 +16,51 @@ from datetime import datetime
 from typing import Dict, Any, Optional, List
 from pathlib import Path
 
+# Database imports with graceful fallback
+try:
+    from database import get_repository, TradeRepository
+    DATABASE_AVAILABLE = True
+except ImportError:
+    DATABASE_AVAILABLE = False
+    logging.warning("Database module not available - will only use JSON logging")
+
 
 class TradeLogger:
     """
     Advanced logging system for trade reconstruction and analysis.
-    
+
     Features:
     - JSON logs for each trade with full event history
+    - SQLite database for structured queries and analytics
     - Candle data storage (Parquet format)
     - Indicator snapshots
     - Performance analytics
+    - Graceful degradation (DB errors don't stop trading)
     """
-    
-    def __init__(self, base_dir: str = "logs"):
+
+    def __init__(self, base_dir: str = "logs", repository: Optional['TradeRepository'] = None):
         self.base_dir = Path(base_dir)
         self._setup_directories()
-        
+
+        # Database repository (optional)
+        if DATABASE_AVAILABLE and repository is None:
+            try:
+                self.repository = get_repository()
+                logging.info("✓ Database repository initialized")
+            except Exception as e:
+                logging.warning(f"Failed to initialize database: {e}. Using JSON-only mode.")
+                self.repository = None
+        else:
+            self.repository = repository
+
         # Current trade being tracked
         self.current_trade: Optional[Dict] = None
         self.trade_id: Optional[str] = None
-        
+
         # Candle buffer
         self.candle_buffer: List[Dict] = []
         self.candle_buffer_size = 100  # Save every 100 candles
-        
+
         logging.info("✓ TradeLogger initialized")
     
     def _setup_directories(self):
@@ -51,14 +77,14 @@ class TradeLogger:
     def start_trade(self, ticker: str, side: str, decision_data: Dict[str, Any]):
         """
         Start tracking a new trade.
-        
+
         Args:
             ticker: Trading pair
             side: LONG or SHORT
             decision_data: Model decision info (probabilities, etc.)
         """
         self.trade_id = self._generate_trade_id(ticker, side)
-        
+
         self.current_trade = {
             "trade_id": self.trade_id,
             "ticker": ticker,
@@ -69,16 +95,30 @@ class TradeLogger:
             "candles": [],
             "summary": {}
         }
-        
+
+        # Create database record
+        if self.repository:
+            try:
+                self.repository.create_trade({
+                    "trade_id": self.trade_id,
+                    "ticker": ticker,
+                    "side": side,
+                    "start_time": datetime.now(),
+                    "is_active": True
+                })
+                logging.debug(f"✓ Trade created in database: {self.trade_id}")
+            except Exception as e:
+                logging.error(f"Failed to create trade in database: {e}. Continuing with JSON only.")
+
         # Log initial signal
         self.log_event("SIGNAL", decision_data)
-        
+
         logging.info(f"📝 Started tracking trade: {self.trade_id}")
     
     def log_event(self, event_type: str, data: Dict[str, Any]):
         """
         Log a trade event.
-        
+
         Event types:
         - SIGNAL: Model decision
         - ENTRY: Position opened
@@ -90,15 +130,23 @@ class TradeLogger:
         if not self.current_trade:
             logging.warning(f"Attempted to log {event_type} but no active trade")
             return
-        
+
         event = {
             "timestamp": datetime.now().isoformat(),
             "type": event_type,
             "data": data
         }
-        
+
         self.current_trade["events"].append(event)
-        
+
+        # Save event to database
+        if self.repository and self.trade_id:
+            try:
+                self.repository.add_event(self.trade_id, event_type, data)
+                logging.debug(f"✓ Event saved to database: {event_type}")
+            except Exception as e:
+                logging.error(f"Failed to save event to database: {e}")
+
         # Log to console with emoji
         emoji_map = {
             "SIGNAL": "🎯",
@@ -109,7 +157,7 @@ class TradeLogger:
             "ERROR": "❌"
         }
         emoji = emoji_map.get(event_type, "📝")
-        
+
         logging.info(f"{emoji} {event_type}: {json.dumps(data, default=str)}")
     
     def log_candle(self, candle_data: Dict[str, Any], position_data: Optional[Dict] = None):
@@ -181,23 +229,36 @@ class TradeLogger:
     def log_indicators(self, indicators: Dict[str, Any], model_probas: Dict[str, float]):
         """
         Log indicator values at entry.
-        
+
         Args:
             indicators: Dictionary of indicator values
             model_probas: Model probability outputs
         """
         if not self.current_trade:
             return
-        
+
         indicator_snapshot = {
             "timestamp": datetime.now().isoformat(),
             "indicators": indicators,
             "model_probas": model_probas
         }
-        
+
         # Store in trade
         self.current_trade["indicators"]["entry"] = indicator_snapshot
-        
+
+        # Save to database
+        if self.repository and self.trade_id:
+            try:
+                self.repository.add_indicators(
+                    self.trade_id,
+                    "entry",
+                    indicators,
+                    model_probas
+                )
+                logging.debug(f"✓ Indicators saved to database")
+            except Exception as e:
+                logging.error(f"Failed to save indicators to database: {e}")
+
         # Also save to separate file for analysis
         self._save_indicator_snapshot(indicator_snapshot)
     
@@ -225,29 +286,74 @@ class TradeLogger:
     
     def end_trade(self, summary: Dict[str, Any]):
         """
-        End trade tracking and save to file.
-        
+        End trade tracking and save to file + database.
+
         Args:
-            summary: Trade summary (P&L, duration, etc.)
+            summary: Trade summary with complete metrics (P&L, MFE, MAE, fees, etc.)
         """
         if not self.current_trade:
             logging.warning("Attempted to end trade but no active trade")
             return
-        
+
         self.current_trade["summary"] = summary
         self.current_trade["end_time"] = datetime.now().isoformat()
-        
-        # Save trade to file
+
+        # Update database record with final metrics
+        if self.repository and self.trade_id:
+            try:
+                # Extract trade metrics from summary
+                updates = {
+                    "end_time": datetime.now(),
+                    "duration_seconds": summary.get("duration_seconds"),
+                    "pnl_usd": summary.get("pnl_usd"),
+                    "pnl_percent": summary.get("pnl_percent"),
+                    "max_favorable_excursion": summary.get("max_favorable_excursion"),
+                    "max_adverse_excursion": summary.get("max_adverse_excursion"),
+                    "fees_paid": summary.get("fees_paid"),
+                    "exit_reason": summary.get("exit_reason"),
+                    "is_active": False
+                }
+
+                # Add entry/exit details if available
+                if "entry_price" in summary:
+                    updates["entry_price"] = summary["entry_price"]
+                if "exit_price" in summary:
+                    updates["exit_price"] = summary["exit_price"]
+                if "quantity" in summary:
+                    updates["quantity"] = summary["quantity"]
+                if "leverage" in summary:
+                    updates["leverage"] = summary["leverage"]
+                if "initial_sl" in summary:
+                    updates["initial_sl"] = summary["initial_sl"]
+                if "initial_tp" in summary:
+                    updates["initial_tp"] = summary["initial_tp"]
+                if "final_sl" in summary:
+                    updates["final_sl"] = summary["final_sl"]
+                if "final_tp" in summary:
+                    updates["final_tp"] = summary["final_tp"]
+
+                # Update trade record
+                success = self.repository.update_trade(self.trade_id, updates)
+
+                if success:
+                    logging.info(f"✓ Trade updated in database: {self.trade_id}")
+                else:
+                    logging.warning(f"Trade not found in database: {self.trade_id}")
+
+            except Exception as e:
+                logging.error(f"Failed to update trade in database: {e}")
+
+        # Save trade to JSON file (backward compatibility)
         self._save_trade()
-        
+
         # Update analytics
         self._update_analytics(self.current_trade)
-        
+
         # Flush any remaining candles
         self._flush_candle_buffer()
-        
+
         logging.info(f"✓ Trade completed and saved: {self.trade_id}")
-        
+
         # Reset
         self.current_trade = None
         self.trade_id = None

@@ -70,10 +70,16 @@
       "Bash(docker stats:*)",
       "Read(//var/run/**)",
       "Read(//Users/lukasz/.docker/run/**)",
-      "Bash(docker context:*)"
+      "Bash(docker context:*)",
+      "Bash(cp:*)",
+      "Bash(source ~/.nvm/nvm.sh)",
+      "Bash(nvm ls:*)",
+      "Bash(docker restart:*)",
+      "Bash(do echo \"=== $version ===\")",
+      "Bash(ls:*)"
     ],
     "deny": [],
     "ask": []
   },
-  "outputStyle": "Explanatory"
+  "outputStyle": "default"
 }

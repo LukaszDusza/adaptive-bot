@@ -252,6 +252,31 @@ function App() {
           <QuickStats
             totalTrades={metrics.total_trades}
             activeTrades={metrics.active_trades}
+            todayPnL={(() => {
+              const today = new Date();
+              today.setHours(0, 0, 0, 0);
+              const todayTrades = trades.filter(t => t.end_time && new Date(t.end_time) >= today);
+              const pnl = todayTrades.reduce((sum, t) => sum + (t.summary?.pnl || 0), 0);
+              console.log('📊 Today PnL calculation:', {
+                totalTrades: trades.length,
+                todayTrades: todayTrades.length,
+                todayPnL: pnl,
+                trades: todayTrades.map(t => ({ ticker: t.ticker, pnl: t.summary?.pnl }))
+              });
+              return pnl;
+            })()}
+            weeklyPnL={(() => {
+              const weekAgo = new Date();
+              weekAgo.setDate(weekAgo.getDate() - 7);
+              const weekTrades = trades.filter(t => t.end_time && new Date(t.end_time) >= weekAgo);
+              const pnl = weekTrades.reduce((sum, t) => sum + (t.summary?.pnl || 0), 0);
+              console.log('📊 Weekly PnL calculation:', {
+                totalTrades: trades.length,
+                weekTrades: weekTrades.length,
+                weeklyPnL: pnl
+              });
+              return pnl;
+            })()}
             onActiveClick={scrollToActiveTrades}
           />
         )}
@@ -283,7 +308,10 @@ function App() {
                 let pnlPercentage: number | null = null;
 
                 if (currentPrice && trade.entry_price && trade.quantity) {
-                  if (trade.side === 'Long') {
+                  // Handle both "LONG"/"SHORT" (from API) and "Long"/"Short" (legacy)
+                  const sideUpper = trade.side.toUpperCase();
+
+                  if (sideUpper === 'LONG') {
                     unrealizedPnL = (currentPrice - trade.entry_price) * trade.quantity;
                   } else {
                     // SHORT
@@ -304,7 +332,7 @@ function App() {
                     <div className="flex items-center justify-between mb-3">
                       <div>
                         <span className="font-medium text-lg">{trade.ticker}</span>
-                        <span className={`ml-2 badge ${trade.side === 'Long' ? 'badge-success' : 'badge-danger'}`}>
+                        <span className={`ml-2 badge ${trade.side.toUpperCase() === 'LONG' ? 'badge-success' : 'badge-danger'}`}>
                           {trade.side}
                         </span>
                       </div>

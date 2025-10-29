@@ -2,7 +2,7 @@
  * Quick Stats Bar - Mini stats between header and main content
  */
 import React from 'react';
-import { TrendingUp, TrendingDown, DollarSign, Percent } from 'lucide-react';
+import { TrendingUp, TrendingDown, Activity, BarChart3 } from 'lucide-react';
 
 interface QuickStatsProps {
   totalTrades: number;
@@ -79,6 +79,3 @@ export const QuickStats: React.FC<QuickStatsProps> = ({
     </div>
   );
 };
-
-// Import icons for QuickStats
-import { Activity, BarChart3 } from 'lucide-react';

@@ -8,7 +8,6 @@ import {
   Cell,
   ResponsiveContainer,
   Tooltip,
-  Legend,
 } from 'recharts';
 import { Target } from 'lucide-react';
 import type { ExitReasonStats } from '../../types';

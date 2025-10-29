@@ -2,7 +2,7 @@
  * Recent Trades Table with filtering and sorting
  */
 import React, { useState, useMemo } from 'react';
-import { Search, ArrowUpDown, TrendingUp, TrendingDown, Filter, X } from 'lucide-react';
+import { Search, ArrowUpDown, TrendingUp, Filter, X } from 'lucide-react';
 import type { Trade } from '../../types';
 import { TradeNoteEditor } from '../controls/TradeNoteEditor';
 

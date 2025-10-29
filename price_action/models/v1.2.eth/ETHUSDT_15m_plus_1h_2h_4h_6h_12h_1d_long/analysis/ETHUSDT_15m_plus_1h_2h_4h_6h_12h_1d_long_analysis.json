@@ -1,0 +1,349 @@
+{
+  "metadata": {
+    "strategy_id": "ETHUSDT_15m_plus_1h_2h_4h_6h_12h_1d_long",
+    "side": "LONG",
+    "ticker": "ETHUSDT",
+    "timeframe": "15m",
+    "helper_timeframes": [
+      "1h",
+      "2h",
+      "4h",
+      "6h",
+      "12h",
+      "1d"
+    ],
+    "timestamp": "2025-10-29T17:23:35.866224",
+    "test_set_size": 12200
+  },
+  "tier_1_basic": {
+    "basic_metrics": {
+      "accuracy": 0.7704098360655738,
+      "precision": 0.6769323671497585,
+      "recall": 0.564309086332746,
+      "f1_score": 0.6155113246396705,
+      "f2_score": 0.5837325557175589,
+      "roc_auc": 0.8193964603237894,
+      "pr_auc": 0.7160259719311648
+    },
+    "confusion_matrix": {
+      "true_negatives": 7157,
+      "false_positives": 1070,
+      "false_negatives": 1731,
+      "true_positives": 2242
+    }
+  },
+  "tier_2_advanced": {
+    "advanced_metrics": {
+      "sensitivity_recall": 0.564309086332746,
+      "specificity_tnr": 0.8699404400145861,
+      "false_positive_rate": 0.13005955998541388,
+      "false_negative_rate": 0.435690913667254,
+      "negative_predictive_value": 0.8052430243024302,
+      "matthews_correlation_coefficient": 0.4575854404965835,
+      "cohen_kappa": 0.4537678544231757
+    },
+    "trading_metrics": {
+      "classification_accuracy_percent": 77.04098360655738,
+      "signal_frequency_percent": 27.147540983606554,
+      "total_predictions": 12200,
+      "total_signals": 3312
+    }
+  },
+  "tier_3_probability": {
+    "probability_analysis": {
+      "mean_proba_true_positives": 0.7356406593924991,
+      "mean_proba_false_positives": 0.6340388622693928,
+      "mean_proba_true_negatives": 0.19934407070074991,
+      "mean_proba_false_negatives": 0.3061213402214723,
+      "proba_separation": {
+        "tp_minus_fp": 0.10160179712310635,
+        "tn_minus_fn": -0.10677726952072239
+      }
+    }
+  },
+  "tier_4_confidence": {
+    "model_confidence": {
+      "mean_confidence_correct_predictions": 0.7851474459360268,
+      "mean_confidence_incorrect_predictions": 0.6710194725829638,
+      "confidence_gap": 0.11412797335306302
+    }
+  },
+  "tier_5_thresholds": {
+    "threshold_optimization": [
+      {
+        "threshold": 0.3,
+        "precision": 0.5359918891517405,
+        "recall": 0.798389126604581,
+        "f1_score": 0.6413911636841573,
+        "signal_count": 5918
+      },
+      {
+        "threshold": 0.35,
+        "precision": 0.5751989132544149,
+        "recall": 0.7460357412534608,
+        "f1_score": 0.6495726495726496,
+        "signal_count": 5153
+      },
+      {
+        "threshold": 0.4,
+        "precision": 0.615676641357749,
+        "recall": 0.6939340548703751,
+        "f1_score": 0.6524671636492723,
+        "signal_count": 4478
+      },
+      {
+        "threshold": 0.45,
+        "precision": 0.6487741935483871,
+        "recall": 0.6327712056380569,
+        "f1_score": 0.6406727828746177,
+        "signal_count": 3875
+      },
+      {
+        "threshold": 0.5,
+        "precision": 0.6769323671497585,
+        "recall": 0.564309086332746,
+        "f1_score": 0.6155113246396705,
+        "signal_count": 3312
+      },
+      {
+        "threshold": 0.55,
+        "precision": 0.7126275061554695,
+        "recall": 0.5099421092373522,
+        "f1_score": 0.5944835680751174,
+        "signal_count": 2843
+      },
+      {
+        "threshold": 0.6,
+        "precision": 0.7502106149957877,
+        "recall": 0.4482758620689655,
+        "f1_score": 0.5612100204821175,
+        "signal_count": 2374
+      },
+      {
+        "threshold": 0.65,
+        "precision": 0.7961264016309888,
+        "recall": 0.39315378806946893,
+        "f1_score": 0.52636899747262,
+        "signal_count": 1962
+      },
+      {
+        "threshold": 0.7,
+        "precision": 0.8450704225352113,
+        "recall": 0.332242637805185,
+        "f1_score": 0.47696476964769646,
+        "signal_count": 1562
+      },
+      {
+        "threshold": 0.75,
+        "precision": 0.8705211726384365,
+        "recall": 0.269066196828593,
+        "f1_score": 0.41107479330897906,
+        "signal_count": 1228
+      },
+      {
+        "threshold": 0.8,
+        "precision": 0.8960893854748604,
+        "recall": 0.2018625723634533,
+        "f1_score": 0.3294987674609696,
+        "signal_count": 895
+      },
+      {
+        "threshold": 0.85,
+        "precision": 0.9220103986135182,
+        "recall": 0.13390385099421093,
+        "f1_score": 0.23384615384615384,
+        "signal_count": 577
+      },
+      {
+        "threshold": 0.9,
+        "precision": 0.9666666666666667,
+        "recall": 0.072992700729927,
+        "f1_score": 0.1357360168499883,
+        "signal_count": 300
+      },
+      {
+        "threshold": 0.95,
+        "precision": 1.0,
+        "recall": 0.015353637050088095,
+        "f1_score": 0.03024293505205751,
+        "signal_count": 61
+      }
+    ]
+  },
+  "tier_6_rolling": {
+    "rolling_performance": {
+      "window_100": {
+        "recent_accuracy": 0.98,
+        "mean_accuracy": 0.7699537228328238,
+        "std_accuracy": 0.1435326363338929
+      },
+      "window_50": {
+        "recent_accuracy": 1.0,
+        "mean_accuracy": 0.7703086165747676,
+        "std_accuracy": 0.18322711686022083
+      },
+      "window_20": {
+        "recent_accuracy": 1.0,
+        "mean_accuracy": 0.7704252524423282,
+        "std_accuracy": 0.25333865863693794
+      }
+    }
+  },
+  "tier_7_features": {
+    "feature_importance": {
+      "top_30_features": [
+        {
+          "feature": "rsi_slope_6h",
+          "importance": 434.0,
+          "cumulative_pct": 5.381944444444445
+        },
+        {
+          "feature": "rsi_slope_4h",
+          "importance": 380.0,
+          "cumulative_pct": 10.094246031746032
+        },
+        {
+          "feature": "rsi_slope_12h",
+          "importance": 343.0,
+          "cumulative_pct": 14.347718253968253
+        },
+        {
+          "feature": "rsi_slope_1d",
+          "importance": 257.0,
+          "cumulative_pct": 17.53472222222222
+        },
+        {
+          "feature": "atr_normalized_1d",
+          "importance": 251.0,
+          "cumulative_pct": 20.647321428571427
+        },
+        {
+          "feature": "dist_from_swing_low_50_6h",
+          "importance": 194.0,
+          "cumulative_pct": 23.0530753968254
+        },
+        {
+          "feature": "dist_from_swing_low_50_12h",
+          "importance": 176.0,
+          "cumulative_pct": 25.235615079365083
+        },
+        {
+          "feature": "dist_from_swing_high_50_6h",
+          "importance": 174.0,
+          "cumulative_pct": 27.393353174603174
+        },
+        {
+          "feature": "dist_from_swing_high_50_12h",
+          "importance": 170.0,
+          "cumulative_pct": 29.501488095238095
+        },
+        {
+          "feature": "atr_normalized",
+          "importance": 164.0,
+          "cumulative_pct": 31.535218253968257
+        },
+        {
+          "feature": "sma_20_slope_1h",
+          "importance": 163.0,
+          "cumulative_pct": 33.55654761904761
+        },
+        {
+          "feature": "sma_50_slope",
+          "importance": 162.0,
+          "cumulative_pct": 35.56547619047619
+        },
+        {
+          "feature": "roc_10_atr_norm_1d",
+          "importance": 159.0,
+          "cumulative_pct": 37.53720238095239
+        },
+        {
+          "feature": "rsi_price_divergence_cont_1d",
+          "importance": 159.0,
+          "cumulative_pct": 39.50892857142857
+        },
+        {
+          "feature": "dist_from_swing_low_50_1d",
+          "importance": 153.0,
+          "cumulative_pct": 41.40625
+        },
+        {
+          "feature": "rsi_14",
+          "importance": 153.0,
+          "cumulative_pct": 43.30357142857143
+        },
+        {
+          "feature": "dist_from_swing_low_50_4h",
+          "importance": 149.0,
+          "cumulative_pct": 45.151289682539684
+        },
+        {
+          "feature": "dist_from_s1",
+          "importance": 147.0,
+          "cumulative_pct": 46.97420634920635
+        },
+        {
+          "feature": "mfi_14_2h",
+          "importance": 144.0,
+          "cumulative_pct": 48.75992063492063
+        },
+        {
+          "feature": "roc_10_atr_norm_12h",
+          "importance": 142.0,
+          "cumulative_pct": 50.520833333333336
+        },
+        {
+          "feature": "rsi_slope_2h",
+          "importance": 141.0,
+          "cumulative_pct": 52.269345238095234
+        },
+        {
+          "feature": "dist_from_swing_low_50",
+          "importance": 141.0,
+          "cumulative_pct": 54.01785714285714
+        },
+        {
+          "feature": "dist_from_bullish_ob",
+          "importance": 133.0,
+          "cumulative_pct": 55.667162698412696
+        },
+        {
+          "feature": "dist_from_r1",
+          "importance": 130.0,
+          "cumulative_pct": 57.27926587301587
+        },
+        {
+          "feature": "sma_20_slope_2h",
+          "importance": 125.0,
+          "cumulative_pct": 58.82936507936508
+        },
+        {
+          "feature": "roc_5_atr_norm_6h",
+          "importance": 117.0,
+          "cumulative_pct": 60.280257936507944
+        },
+        {
+          "feature": "rsi_14_1d",
+          "importance": 114.0,
+          "cumulative_pct": 61.693948412698404
+        },
+        {
+          "feature": "sma_20_slope_4h",
+          "importance": 112.0,
+          "cumulative_pct": 63.082837301587304
+        },
+        {
+          "feature": "rsi_price_divergence_cont_12h",
+          "importance": 111.0,
+          "cumulative_pct": 64.45932539682539
+        },
+        {
+          "feature": "tr_percentile",
+          "importance": 108.0,
+          "cumulative_pct": 65.79861111111111
+        }
+      ],
+      "total_features": 69
+    }
+  }
+}

@@ -29,12 +29,15 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5174",
     ]
 
-    # Paths to bot data (relative to backend root)
-    PRICE_ACTION_DIR: str = os.path.abspath("../../price_action")
-    LOGS_DIR: str = os.path.join(PRICE_ACTION_DIR, "logs")
-    BOT_STATE_DIR: str = os.path.join(PRICE_ACTION_DIR, "bot_state")
-    MODELS_DIR: str = os.path.join(PRICE_ACTION_DIR, "models")
-    PREDICTION_LOGS_DIR: str = os.path.join(PRICE_ACTION_DIR, "prediction_logs")
+    # Paths to bot data
+    # Check if running in Docker (mounted volumes) or locally
+    IN_DOCKER: bool = os.path.exists("/app/logs") and os.path.exists("/app/bot_state")
+
+    PRICE_ACTION_DIR: str = "/app" if IN_DOCKER else os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../price_action"))
+    LOGS_DIR: str = "/app/logs" if IN_DOCKER else os.path.join(PRICE_ACTION_DIR, "logs")
+    BOT_STATE_DIR: str = "/app/bot_state" if IN_DOCKER else os.path.join(PRICE_ACTION_DIR, "bot_state")
+    MODELS_DIR: str = "/app/models" if IN_DOCKER else os.path.join(PRICE_ACTION_DIR, "models")
+    PREDICTION_LOGS_DIR: str = "/app/prediction_logs" if IN_DOCKER else os.path.join(PRICE_ACTION_DIR, "prediction_logs")
 
     # Docker
     DOCKER_COMPOSE_FILE: str = os.path.join(PRICE_ACTION_DIR, "docker-compose.yaml")

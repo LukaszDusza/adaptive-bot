@@ -75,6 +75,11 @@ class Trade:
     partial_tp_price: Optional[float] = None
     tsl_history: Optional[str] = None  # JSON string of TSL updates
     chart_ohlcv: Optional[str] = None  # JSON string of OHLCV data for chart
+    # Trade categorization for analysis
+    entry_hour: int = 0  # Hour of day (0-23)
+    exit_hour: int = 0   # Hour of day (0-23)
+    entry_day_of_week: int = 0  # Monday=0, Sunday=6
+    exit_day_of_week: int = 0
 
 
 class BacktestEngine:
@@ -90,7 +95,8 @@ class BacktestEngine:
                  limit_offset_pct: float = 0.005,
                  timeframe: str = '15m',
                  suppress_limit_logs: bool = False,
-                 cooldown_minutes: int = 30):
+                 cooldown_minutes: int = 30,
+                 warmup_candles: int = 200):
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
         self.maker_fee = maker_fee
@@ -107,6 +113,9 @@ class BacktestEngine:
         # Cooldown settings (matches live bot behavior)
         self.cooldown_minutes = cooldown_minutes
         self.last_position_closed_at: Optional[pd.Timestamp] = None
+
+        # Warmup period (skip first N candles for indicator stability)
+        self.warmup_candles = warmup_candles
 
         self.position: Optional[Position] = None
         self.pending_limit_order: Optional[PendingLimitOrder] = None
@@ -126,28 +135,62 @@ class BacktestEngine:
         self.limit_orders_cancelled = 0
         
     def calculate_fees(self, price: float, size: float, is_maker: bool = False) -> float:
-        """Calculate transaction fees"""
+        """Calculate transaction fees in USD"""
         fee_rate = self.maker_fee if is_maker else self.taker_fee
-        return price * size * fee_rate / price  # Returns fee in USD
+        return size * fee_rate  # Fee in USD (size is already in USD)
     
-    def apply_slippage(self, price: float, side: str, is_entry: bool = True) -> float:
-        """Apply slippage to price"""
+    def apply_slippage(self, price: float, side: str, is_entry: bool = True,
+                      volatility_multiplier: float = 1.0) -> float:
+        """
+        Apply slippage to price with volatility adjustment.
+
+        Args:
+            price: Base price
+            side: 'Long' or 'Short'
+            is_entry: True for entry, False for exit
+            volatility_multiplier: Multiplier for slippage (1.0 = normal, >1.0 = high volatility)
+        """
+        adjusted_slippage = self.slippage_pct * volatility_multiplier
+
         if is_entry:
             if side == 'Long':
-                return price * (1 + self.slippage_pct)
+                return price * (1 + adjusted_slippage)
             else:
-                return price * (1 - self.slippage_pct)
+                return price * (1 - adjusted_slippage)
         else:
             if side == 'Long':
-                return price * (1 - self.slippage_pct)
+                return price * (1 - adjusted_slippage)
             else:
-                return price * (1 + self.slippage_pct)
+                return price * (1 + adjusted_slippage)
     
+    def calculate_volatility_multiplier(self, candle: pd.Series) -> float:
+        """
+        Calculate volatility multiplier for slippage adjustment.
+        Uses ATR normalized if available, otherwise returns 1.0.
+
+        Returns:
+            Multiplier between 0.5 and 2.0
+        """
+        atr_normalized = candle.get('atr_normalized', 1.0)
+
+        # ATR normalized:
+        # - 1.0 = normal volatility → multiplier 1.0
+        # - > 1.5 = high volatility → multiplier up to 2.0
+        # - < 0.5 = low volatility → multiplier down to 0.5
+        if atr_normalized > 1.5:
+            multiplier = min(1.0 + (atr_normalized - 1.0) * 0.5, 2.0)
+        elif atr_normalized < 0.5:
+            multiplier = max(0.5, atr_normalized)
+        else:
+            multiplier = 1.0
+
+        return multiplier
+
     def update_position_extremes(self, candle: pd.Series):
         """Update highest/lowest prices for TSL"""
         if not self.position:
             return
-            
+
         if self.position.side == 'Long':
             self.position.highest_price = max(self.position.highest_price, candle['high'])
         else:
@@ -244,7 +287,8 @@ class BacktestEngine:
     
     def close_position(self, exit_price: float, exit_time: pd.Timestamp,
                        exit_reason: str, mae_pct: float, mfe_pct: float,
-                       size_to_close: Optional[float] = None):
+                       size_to_close: Optional[float] = None,
+                       candle: Optional[pd.Series] = None):
         """Close position (fully or partially)"""
         if not self.position:
             return
@@ -256,9 +300,16 @@ class BacktestEngine:
         is_full_close = size_to_close is None or close_size >= pos.current_size
         if is_full_close:
             self.last_position_closed_at = exit_time
-        
-        # Apply slippage
-        exit_price_with_slippage = self.apply_slippage(exit_price, pos.side, is_entry=False)
+
+        # Calculate volatility multiplier for slippage adjustment
+        volatility_multiplier = 1.0
+        if candle is not None:
+            volatility_multiplier = self.calculate_volatility_multiplier(candle)
+
+        # Apply slippage with volatility adjustment
+        exit_price_with_slippage = self.apply_slippage(
+            exit_price, pos.side, is_entry=False, volatility_multiplier=volatility_multiplier
+        )
         
         # Calculate P&L
         if pos.side == 'Long':
@@ -318,7 +369,12 @@ class BacktestEngine:
             partial_tp_time=self.partial_tp_time,
             partial_tp_price=self.partial_tp_price,
             tsl_history=tsl_history_json,
-            chart_ohlcv=chart_ohlcv_json
+            chart_ohlcv=chart_ohlcv_json,
+            # Trade categorization
+            entry_hour=pos.entry_time.hour,
+            exit_hour=exit_time.hour,
+            entry_day_of_week=pos.entry_time.dayofweek,
+            exit_day_of_week=exit_time.dayofweek
         )
         
         self.trades.append(trade)
@@ -545,13 +601,18 @@ class BacktestEngine:
 
     def open_position(self, candle: pd.Series, side: str, probability: float,
                      risk_pct: float, tp_pct: float, sl_pct: float):
-        """Open new position"""
+        """Open new position (uses close price to match live bot market order execution)"""
         if self.position:
             return
-        
+
         position_size = self.current_capital * risk_pct
-        entry_price = candle['open']
-        entry_price_with_slippage = self.apply_slippage(entry_price, side, is_entry=True)
+        entry_price = candle['close']  # Use close to simulate market order execution
+
+        # Calculate volatility multiplier for slippage adjustment
+        volatility_multiplier = self.calculate_volatility_multiplier(candle)
+        entry_price_with_slippage = self.apply_slippage(
+            entry_price, side, is_entry=True, volatility_multiplier=volatility_multiplier
+        )
         
         if side == 'Long':
             stop_loss = entry_price_with_slippage * (1 - sl_pct)
@@ -626,7 +687,13 @@ class BacktestEngine:
         if self.enable_limit_order:
             logging.info(f"Limit Order Mode ENABLED: offset={self.limit_offset_pct*100:.2f}%, max_wait={self.limit_order_candles} candles")
 
-        for i in range(1, len(df)):
+        # Apply warmup period (skip first N candles for indicator stability)
+        start_index = max(1, self.warmup_candles)
+        if self.warmup_candles > 0:
+            logging.info(f"Warmup period: skipping first {self.warmup_candles} candles for indicator stability")
+            logging.info(f"Trading will start from candle {start_index} / {len(df)}")
+
+        for i in range(start_index, len(df)):
             current_candle = df.iloc[i]
 
             # STEP 0.5: CHECK PENDING LIMIT ORDERS
@@ -709,7 +776,8 @@ class BacktestEngine:
                             exit_reason='Partial TP',
                             mae_pct=current_mae_pct,
                             mfe_pct=current_mfe_pct,
-                            size_to_close=self.position.current_size / 2
+                            size_to_close=self.position.current_size / 2,
+                            candle=current_candle
                         )
                 
                 # Check dynamic TP (new mechanism)
@@ -741,7 +809,8 @@ class BacktestEngine:
                             exit_reason=f'Dynamic TP Level {level} ({level*25}%)',
                             mae_pct=current_mae_pct,
                             mfe_pct=current_mfe_pct,
-                            size_to_close=size_to_close
+                            size_to_close=size_to_close,
+                            candle=current_candle
                         )
                         
                         # Increment the level counter and move SL to BE after first level
@@ -768,7 +837,8 @@ class BacktestEngine:
                         exit_time=current_candle.name,
                         exit_reason=exit_reason,
                         mae_pct=current_mae_pct,
-                        mfe_pct=current_mfe_pct
+                        mfe_pct=current_mfe_pct,
+                        candle=current_candle
                     )
                     current_mae_pct = 0.0
                     current_mfe_pct = 0.0
@@ -970,7 +1040,8 @@ class BacktestEngine:
                 exit_time=last_candle.name,
                 exit_reason='End of Backtest',
                 mae_pct=current_mae_pct,
-                mfe_pct=current_mfe_pct
+                mfe_pct=current_mfe_pct,
+                candle=last_candle
             )
 
         # Log limit order statistics if enabled
@@ -1039,7 +1110,42 @@ def calculate_metrics(trades: List[Trade], equity_curve: List[float],
     
     # Calculate total PnL in USD
     total_pnl_usd = equity_curve[-1] - initial_capital
-    
+
+    # Extended statistics: consecutive wins/losses
+    max_consecutive_wins = 0
+    max_consecutive_losses = 0
+    current_streak = 0
+    for _, trade in df_trades.iterrows():
+        if trade['net_pnl_usd'] > 0:
+            if current_streak >= 0:
+                current_streak += 1
+            else:
+                current_streak = 1
+            max_consecutive_wins = max(max_consecutive_wins, current_streak)
+        else:
+            if current_streak <= 0:
+                current_streak -= 1
+            else:
+                current_streak = -1
+            max_consecutive_losses = max(max_consecutive_losses, abs(current_streak))
+
+    # Extended statistics: best/worst trade
+    best_trade = df_trades['net_pnl_usd'].max() if not df_trades.empty else 0
+    worst_trade = df_trades['net_pnl_usd'].min() if not df_trades.empty else 0
+
+    # Extended statistics: average trade duration
+    avg_trade_duration_hours = df_trades['duration'].apply(lambda x: x.total_seconds() / 3600).mean() if not df_trades.empty else 0
+
+    # Extended statistics: win rate by side
+    long_trades = df_trades[df_trades['side'] == 'Long']
+    short_trades = df_trades[df_trades['side'] == 'Short']
+
+    long_wins = long_trades[long_trades['net_pnl_usd'] > 0]
+    short_wins = short_trades[short_trades['net_pnl_usd'] > 0]
+
+    win_rate_long = len(long_wins) / len(long_trades) * 100 if len(long_trades) > 0 else 0
+    win_rate_short = len(short_wins) / len(short_trades) * 100 if len(short_trades) > 0 else 0
+
     return {
         'total_trades': total_trades,
         'win_rate': win_rate,
@@ -1055,7 +1161,17 @@ def calculate_metrics(trades: List[Trade], equity_curve: List[float],
         'expectancy': expectancy,
         'total_fees': df_trades['fees_usd'].sum(),
         'avg_mae_pct': df_trades['mae_pct'].mean(),
-        'avg_mfe_pct': df_trades['mfe_pct'].mean()
+        'avg_mfe_pct': df_trades['mfe_pct'].mean(),
+        # Extended statistics
+        'max_consecutive_wins': max_consecutive_wins,
+        'max_consecutive_losses': max_consecutive_losses,
+        'best_trade': best_trade,
+        'worst_trade': worst_trade,
+        'avg_trade_duration_hours': avg_trade_duration_hours,
+        'win_rate_long': win_rate_long,
+        'win_rate_short': win_rate_short,
+        'total_long_trades': len(long_trades),
+        'total_short_trades': len(short_trades)
     }
 
 
@@ -1095,6 +1211,14 @@ def print_results(results: Dict, metrics: Dict, strategy_id: str, version: str =
     print(f"  Win Rate:         {metrics.get('win_rate', 0):.2f}%")
     print(f"  Profit Factor:    {metrics.get('profit_factor', 0):.2f}")
     print(f"  Expectancy:       ${metrics.get('expectancy', 0):.2f}")
+    print(f"  Best Trade:       ${metrics.get('best_trade', 0):+.2f}")
+    print(f"  Worst Trade:      ${metrics.get('worst_trade', 0):+.2f}")
+    print(f"  Avg Duration:     {metrics.get('avg_trade_duration_hours', 0):.2f} hours")
+    print(f"  Max Win Streak:   {metrics.get('max_consecutive_wins', 0)}")
+    print(f"  Max Loss Streak:  {metrics.get('max_consecutive_losses', 0)}")
+    print(f"\nTRADES BY SIDE:")
+    print(f"  LONG:  {metrics.get('total_long_trades', 0)} trades, {metrics.get('win_rate_long', 0):.2f}% WR")
+    print(f"  SHORT: {metrics.get('total_short_trades', 0)} trades, {metrics.get('win_rate_short', 0):.2f}% WR")
     print(f"\nFEES:")
     print(f"  Total:            ${metrics.get('total_fees', 0):.2f}")
 
@@ -1115,6 +1239,73 @@ def print_results(results: Dict, metrics: Dict, strategy_id: str, version: str =
 def _get_strategy_id(ticker, timeframe, helper_timeframes):
     helpers = '_plus_' + '_'.join(helper_timeframes) if helper_timeframes else ""
     return f"{ticker}_{timeframe.replace(' ', '')}{helpers}_long_short_combined"
+
+
+def validate_date_range(backtest_df: pd.DataFrame, training_metadata_path: str, version: str):
+    """
+    Validate that backtest period doesn't overlap with training period.
+    Prevents data leakage from testing on training data.
+
+    Args:
+        backtest_df: DataFrame with backtest data
+        training_metadata_path: Path to training_metadata.json
+        version: Model version
+
+    Raises:
+        ValueError: If backtest overlaps with training period
+    """
+    metadata_file = f"{training_metadata_path}/training_metadata.json"
+
+    if not os.path.exists(metadata_file):
+        logging.warning(f"Training metadata not found: {metadata_file}. Skipping date validation.")
+        return
+
+    try:
+        with open(metadata_file, 'r') as f:
+            metadata = json.load(f)
+
+        # Extract training end date
+        training_end_str = metadata.get('training_end_date')
+        if not training_end_str:
+            logging.warning("training_end_date not found in metadata. Skipping validation.")
+            return
+
+        # Parse training end date (handle various formats)
+        try:
+            training_end = pd.to_datetime(training_end_str)
+        except:
+            logging.warning(f"Could not parse training_end_date: {training_end_str}. Skipping validation.")
+            return
+
+        # Get backtest start date
+        backtest_start = backtest_df.index[0]
+
+        # Check for overlap
+        if backtest_start <= training_end:
+            overlap_days = (training_end - backtest_start).days
+            raise ValueError(
+                f"\n{'='*70}\n"
+                f"⚠️  DATA LEAKAGE WARNING ⚠️\n"
+                f"{'='*70}\n"
+                f"Backtest period OVERLAPS with training period!\n"
+                f"\n"
+                f"Training ended:    {training_end.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Backtest starts:   {backtest_start.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"Overlap:           {overlap_days} days\n"
+                f"\n"
+                f"This invalidates backtest results (data leakage).\n"
+                f"Use --date-from parameter to start backtest AFTER training end date.\n"
+                f"{'='*70}\n"
+            )
+
+        # Log success
+        gap_days = (backtest_start - training_end).days
+        logging.info(f"✓ Date validation passed: {gap_days} days gap between training and backtest")
+
+    except FileNotFoundError:
+        logging.warning(f"Training metadata file not found. Skipping date validation.")
+    except json.JSONDecodeError:
+        logging.warning(f"Could not parse training metadata JSON. Skipping validation.")
 
 
 def main(args):
@@ -1162,7 +1353,10 @@ def main(args):
     if df.empty:
         logging.error("Failed to prepare data")
         return
-    
+
+    # Validate backtest date range (prevent data leakage)
+    validate_date_range(df, f"models/{version}/{long_id}", version)
+
     engine = BacktestEngine(
         initial_capital=args.initial_capital,
         maker_fee=args.maker_fee,
@@ -1172,7 +1366,8 @@ def main(args):
         limit_order_candles=getattr(args, 'limit_order_candles', 5),
         limit_offset_pct=getattr(args, 'limit_offset_pct', 0.005),
         timeframe=args.timeframe,
-        cooldown_minutes=getattr(args, 'cooldown_minutes', 30)  # Matches live bot default
+        cooldown_minutes=getattr(args, 'cooldown_minutes', 30),  # Matches live bot default
+        warmup_candles=getattr(args, 'warmup_candles', 200)  # Skip first N candles for indicator stability
     )
     
     results = engine.run(
@@ -1247,6 +1442,9 @@ def run_backtester_with_args(args):
     # Cooldown defaults
     if not hasattr(args, 'cooldown_minutes'):
         args.cooldown_minutes = 30  # Matches live bot default
+    # Warmup defaults
+    if not hasattr(args, 'warmup_candles'):
+        args.warmup_candles = 200  # Skip first N candles for indicator stability
 
     # Run the main backtest function
     main(args)
@@ -1285,5 +1483,7 @@ if __name__ == "__main__":
                         help='Limit order price offset percentage (default 0.5%%)')
     parser.add_argument('--cooldown-minutes', type=int, default=30,
                         help='Minutes to wait after position close before allowing new entry (default: 30, matches live bot)')
+    parser.add_argument('--warmup-candles', type=int, default=200,
+                        help='Number of candles to skip at start for indicator stability (default: 200)')
 
     main(parser.parse_args())

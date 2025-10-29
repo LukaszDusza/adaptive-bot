@@ -27,6 +27,7 @@ from data_preparer_pa import fetch_and_prepare_data
 from trade_logger import TradeLogger
 from prediction_logger import PredictionLogger
 from feature_cache import FeatureCache
+from trade_metrics import TradeMetricsCalculator
 
 # Logging setup
 # Note: Only use StreamHandler (stdout) for Docker compatibility
@@ -1702,16 +1703,42 @@ class TradingBot:
                         "candle": self.last_candle_data
                     })
 
-                    # End trade
+                    # Calculate duration
                     duration = (datetime.now() - datetime.fromisoformat(
                         self.trade_logger.current_trade['start_time']
                     )).total_seconds()
 
-                    self.trade_logger.end_trade({
-                        "duration_seconds": int(duration),
-                        "total_pnl_usd": float(pnl_usd),
-                        "total_pnl_pct": float(pnl_pct)
-                    })
+                    # Determine exit reason
+                    exit_reason = TradeMetricsCalculator.determine_exit_reason(
+                        position_closed=True,
+                        sl_hit=True,  # Position closed by SL or TP
+                        tp_hit=True,
+                        partial_tp_taken=self.state.get('partial_tp_taken', False),
+                        dynamic_tp_levels_taken=self.state.get('dynamic_tp_levels_taken', 0)
+                    )
+
+                    # Calculate complete trade summary with all metrics
+                    trade_summary = TradeMetricsCalculator.calculate_trade_summary(
+                        side=side,
+                        entry_price=entry,
+                        exit_price=current_price,
+                        quantity=self.state.get('original_qty', 0),
+                        highest_price=self.state.get('highest_price', entry),
+                        lowest_price=self.state.get('lowest_price', entry),
+                        leverage=self.config.LEVERAGE,
+                        entry_is_limit=self.config.LIMIT_ORDER_MODE,
+                        exit_is_limit=False,  # Exit always market order
+                        partial_tp_value_usd=trade_size_usd * 0.5 if self.state.get('partial_tp_taken') else 0.0,
+                        duration_seconds=duration,
+                        exit_reason=exit_reason,
+                        initial_sl=self.state.get('initial_sl'),
+                        initial_tp=self.state.get('initial_tp'),
+                        final_sl=self.state.get('last_sl'),
+                        final_tp=self.state.get('initial_tp')
+                    )
+
+                    # End trade with complete metrics
+                    self.trade_logger.end_trade(trade_summary)
 
                     # COOLDOWN: Always activate cooldown after ANY closed position
                     # This prevents bot from immediately re-entering based on same 15m candle
@@ -2187,6 +2214,7 @@ class TradingBot:
                 'side': position_type.capitalize(),
                 'entry_price': actual_entry,
                 'initial_tp': tp,
+                'initial_sl': sl,  # Store initial SL for trade metrics
                 'original_qty': qty,
                 'initial_size': trade_size_usd,  # Actual trade size (USD) used for this position
                 'partial_tp_taken': False,
@@ -2395,10 +2423,19 @@ class TradingBot:
 
                 elif self.trade_logger.current_trade:
                     # No position exists - all orders cancelled without fills
+                    duration = (datetime.now() - datetime.fromisoformat(
+                        self.trade_logger.current_trade['start_time']
+                    )).total_seconds()
+
                     self.trade_logger.end_trade({
                         "exit_reason": "LIMIT_ORDERS_TIMEOUT_ALL_CANCELLED",
-                        "final_balance": 0.0,
-                        "pnl": 0.0
+                        "pnl_usd": 0.0,
+                        "pnl_percent": 0.0,
+                        "net_pnl_usd": 0.0,
+                        "duration_seconds": int(duration),
+                        "max_favorable_excursion": 0.0,
+                        "max_adverse_excursion": 0.0,
+                        "fees_paid": 0.0
                     })
 
                 return False  # All orders completed/cancelled
@@ -2560,6 +2597,7 @@ class TradingBot:
                     'side': position_type.capitalize(),
                     'entry_price': actual_entry,
                     'initial_tp': tp,
+                    'initial_sl': sl,  # Store initial SL for trade metrics
                     'original_qty': total_qty,
                     'initial_size': trade_size_usd,  # Actual trade size (USD) used for this position
                     'partial_tp_taken': False,
@@ -2701,17 +2739,39 @@ class TradingBot:
             
             # Close any open trade logging
             if self.trade_logger.current_trade:
+                duration = (datetime.now() - datetime.fromisoformat(
+                    self.trade_logger.current_trade['start_time']
+                )).total_seconds()
+
                 self.trade_logger.end_trade({
-                    "reason": "bot_stopped_by_user"
+                    "exit_reason": "BOT_STOPPED_BY_USER",
+                    "pnl_usd": 0.0,
+                    "pnl_percent": 0.0,
+                    "net_pnl_usd": 0.0,
+                    "duration_seconds": int(duration),
+                    "max_favorable_excursion": 0.0,
+                    "max_adverse_excursion": 0.0,
+                    "fees_paid": 0.0
                 })
         except Exception as e:
             logging.critical(f"Critical error: {e}", exc_info=True)
             
             # Close any open trade logging
             if self.trade_logger.current_trade:
+                duration = (datetime.now() - datetime.fromisoformat(
+                    self.trade_logger.current_trade['start_time']
+                )).total_seconds()
+
                 self.trade_logger.end_trade({
-                    "reason": "bot_crashed",
-                    "error": str(e)
+                    "exit_reason": "BOT_CRASHED",
+                    "pnl_usd": 0.0,
+                    "pnl_percent": 0.0,
+                    "net_pnl_usd": 0.0,
+                    "duration_seconds": int(duration),
+                    "max_favorable_excursion": 0.0,
+                    "max_adverse_excursion": 0.0,
+                    "fees_paid": 0.0,
+                    "error_message": str(e)
                 })
 
 

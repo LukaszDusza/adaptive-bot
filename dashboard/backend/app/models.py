@@ -12,8 +12,19 @@ from enum import Enum
 # ============================================================================
 
 class TradeSide(str, Enum):
-    LONG = "Long"
-    SHORT = "Short"
+    LONG = "LONG"
+    SHORT = "SHORT"
+
+    # Also accept capitalized version from bot logs
+    @classmethod
+    def _missing_(cls, value):
+        """Handle case-insensitive matching"""
+        if isinstance(value, str):
+            value_upper = value.upper()
+            for member in cls:
+                if member.value.upper() == value_upper:
+                    return member
+        return None
 
 
 class ExitReason(str, Enum):

@@ -34,12 +34,12 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=
+        - VITE_WS_URL=ws://localhost:3000/api/ws
     container_name: adaptive-bot-dashboard-ui
     ports:
       - "3000:80"
-    environment:
-      - VITE_API_URL=http://localhost:8000
-      - VITE_WS_URL=ws://localhost:8000
     depends_on:
       - dashboard-api
     restart: unless-stopped

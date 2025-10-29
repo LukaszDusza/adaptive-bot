@@ -12,7 +12,14 @@ import type {
   ExitReasonStats,
 } from '../types';
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+// Determine base URL: empty string for production (proxied by nginx), full URL for dev
+const rawUrl = import.meta.env.VITE_API_URL;
+const API_BASE_URL = rawUrl === '' || rawUrl === undefined || rawUrl === 'undefined'
+  ? '' // Production: nginx proxy handles /api routing
+  : rawUrl; // Development: direct connection to backend
+
+// Log for debugging
+console.log('VITE_API_URL:', import.meta.env.VITE_API_URL, 'Resolved API_BASE_URL:', API_BASE_URL);
 
 const api = axios.create({
   baseURL: API_BASE_URL,

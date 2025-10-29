@@ -3,6 +3,14 @@
 # Stage 1: Build
 FROM node:20-alpine AS builder
 
+# Build arguments for environment variables
+ARG VITE_API_URL=/api
+ARG VITE_WS_URL=/api/ws
+
+# Set as environment variables for Vite
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_WS_URL=$VITE_WS_URL
+
 WORKDIR /app
 
 # Copy package files
@@ -14,7 +22,7 @@ RUN npm ci
 # Copy source code
 COPY . .
 
-# Build for production
+# Build for production (Vite will use ENV vars)
 RUN npm run build
 
 # Stage 2: Production

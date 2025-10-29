@@ -2,7 +2,7 @@
  * Trading Status Indicator - Shows if trading is paused/active
  */
 import React, { useState, useEffect } from 'react';
-import { Activity, Pause, AlertCircle } from 'lucide-react';
+import { Pause } from 'lucide-react';
 import { getPauseState } from '../../api/client';
 
 export const TradingStatusIndicator: React.FC = () => {

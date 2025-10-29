@@ -2,7 +2,7 @@
  * Main dashboard layout with sidebar
  */
 import React from 'react';
-import { Activity, BarChart3, Settings, Container, AlertTriangle } from 'lucide-react';
+import { Activity, BarChart3, Settings, Container } from 'lucide-react';
 import { TradingStatusIndicator } from './TradingStatusIndicator';
 
 interface DashboardLayoutProps {
