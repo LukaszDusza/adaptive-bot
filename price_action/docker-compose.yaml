@@ -131,3 +131,32 @@ services:
       --dca-atr-multiplier 1.8
       --dca-max-swing-distance 2.0
 
+  bot-link:
+    <<: [ *bot-base, *bot-common ]
+    container_name: bot-link
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=bot-link
+    env_file:
+      - .env_luk
+    command: >
+      python bot.py
+      --version v1.2.link
+      --ticker LINKUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 2h 4h 6h 12h 1d
+      --prob-threshold 0.58
+      --min-proba-diff 0.29
+      --tsl-pct 0.014
+      --tp-pct 0.02
+      --trade-size-pct 0.02
+      --leverage 20
+      --partial-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 16
+      --dca-mode
+      --dca-level1-pct 0.005
+      --dca-atr-multiplier 1.8
+      --dca-max-swing-distance 2.0
+
