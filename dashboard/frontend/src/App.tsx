@@ -12,6 +12,7 @@ import { ExitReasonChart } from './components/charts/ExitReasonChart';
 import { RecentTradesTable } from './components/tables/RecentTradesTable';
 import { EmergencyCloseModal } from './components/controls/EmergencyCloseModal';
 import { PauseResumeToggle } from './components/controls/PauseResumeToggle';
+import { PendingOrdersPanel } from './components/controls/PendingOrdersPanel';
 import { useDashboardStore } from './store/dashboardStore';
 import { useWebSocket } from './hooks/useWebSocket';
 import { AlertTriangle, Shield } from 'lucide-react';
@@ -283,6 +284,9 @@ function App() {
 
         {/* Main Metrics */}
         {metrics && <MetricsCards metrics={metrics} />}
+
+        {/* Pending Orders Panel */}
+        <PendingOrdersPanel autoRefresh={true} refreshInterval={10000} />
 
         {/* Active Trades Summary */}
         {activeTrades.length > 0 && (

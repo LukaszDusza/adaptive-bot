@@ -18,10 +18,11 @@ logger = logging.getLogger(__name__)
 class StateReader:
     """Reads bot state files to detect active positions"""
 
-    def __init__(self):
+    def __init__(self, bybit_service=None):
         self.state_dir = Path(settings.BOT_STATE_DIR)
+        self.bybit_service = bybit_service
 
-    def get_active_positions_from_state(self) -> List[Trade]:
+    def get_active_positions_from_state(self, verify_on_bybit: bool = True) -> List[Trade]:
         """
         Read bot_state/*.json files to find active positions.
 
@@ -44,6 +45,26 @@ class StateReader:
             try:
                 position = self._parse_state_file(state_file)
                 if position:
+                    # Verify position actually exists on Bybit (prevents showing stale bot_state data)
+                    if verify_on_bybit and self.bybit_service and self.bybit_service.is_available():
+                        try:
+                            # Check if position exists on Bybit by fetching open orders
+                            # If there are NO open orders AND position has no trade log, it's likely stale
+                            bybit_orders = self.bybit_service.adapter.get_open_orders(position.ticker)
+                            bybit_position = self.bybit_service.adapter.get_position(position.ticker)
+
+                            # Position is valid ONLY if it actually exists on Bybit with size > 0
+                            # Pending limit orders alone do NOT count as active position
+                            has_position = bybit_position and bybit_position.get('size', 0) > 0
+
+                            if not has_position:
+                                logger.info(f"Filtering stale state file {state_file.name}: no actual position on Bybit for {position.ticker} (only pending orders)")
+                                continue
+
+                        except Exception as e:
+                            logger.warning(f"Failed to verify position on Bybit for {position.ticker}: {e}")
+                            # On verification error, include position anyway (fail-safe)
+
                     active_positions.append(position)
                     logger.info(f"Active position found in {state_file.name}: {position.ticker} {position.side}")
             except Exception as e:

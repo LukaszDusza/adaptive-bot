@@ -36,10 +36,10 @@ class TradeParser:
     - Maintains backward compatibility
     """
 
-    def __init__(self, use_database: bool = True):
+    def __init__(self, use_database: bool = True, bybit_service=None):
         self.logs_dir = Path(settings.LOGS_DIR)
         self.trades_dir = self.logs_dir / "trades"
-        self.state_reader = StateReader()
+        self.state_reader = StateReader(bybit_service=bybit_service)
 
         # Initialize database repository if available
         self.use_database = use_database and DATABASE_AVAILABLE
@@ -195,9 +195,22 @@ class TradeParser:
             summary = None
             if "summary" in data and data["summary"]:
                 summary_data = data["summary"]
-                # Handle both formats: new (total_pnl_usd) and legacy (pnl)
-                pnl = summary_data.get("total_pnl_usd", summary_data.get("pnl", 0.0))
-                pnl_percent = summary_data.get("total_pnl_pct", summary_data.get("pnl_percent", 0.0))
+                # Handle multiple formats:
+                # - v3 (current): pnl_usd, pnl_percent, net_pnl_usd
+                # - v2: total_pnl_usd, total_pnl_pct
+                # - v1 (legacy): pnl, final_balance
+                # Use explicit None checks to distinguish between "not set" (None) and "zero" (0.0)
+                pnl = next((v for v in [
+                    summary_data.get("pnl_usd"),
+                    summary_data.get("total_pnl_usd"),
+                    summary_data.get("pnl"),
+                    summary_data.get("net_pnl_usd")
+                ] if v is not None), 0.0)
+
+                pnl_percent = next((v for v in [
+                    summary_data.get("pnl_percent"),
+                    summary_data.get("total_pnl_pct")
+                ] if v is not None), 0.0)
 
                 logger.debug(f"Parsing summary for {file_path.name}: pnl={pnl}, pnl_pct={pnl_percent}")
 

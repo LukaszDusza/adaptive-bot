@@ -1,0 +1,57 @@
+{
+  "version": "v1.2.near",
+  "ticker": "NEARUSDT",
+  "timeframe": "15m",
+  "helper_timeframes": [
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "12h",
+    "1d"
+  ],
+  "side": "long",
+  "n_label_trials": 300,
+  "n_model_trials": 500,
+  "best_label_params": {
+    "barrier_size": 0.015441170063359518,
+    "time_limit": 16
+  },
+  "best_model_params": {
+    "n_estimators": 1196,
+    "learning_rate": 0.01966982680016633,
+    "reg_alpha": 78.99006491304301,
+    "reg_lambda": 79.21638530864283,
+    "num_leaves": 39,
+    "colsample_bytree": 0.6199787685040202,
+    "subsample": 0.715017127846872,
+    "subsample_freq": 1,
+    "min_child_samples": 61
+  },
+  "optimal_threshold": 0.596276868933787,
+  "recommended_min_proba_diff": 0.3,
+  "n_features_selected": 66,
+  "n_features_total": 272,
+  "n_samples_train": 77517,
+  "n_samples_calibration": 9417,
+  "n_samples_holdout": 10139,
+  "pipeline_version": "v2.1",
+  "fixes_applied": [
+    "FIX #1: Symmetric barriers (PT=SL) - eliminates positive bias",
+    "FIX #2: Removed SMOTE - use class_weight='balanced'",
+    "FIX #3: Added 2% gap to walk-forward CV - prevents data leakage",
+    "FIX #4: Removed balance penalty - natural label distribution",
+    "FIX #5: 3-way split (train/calib/holdout) - proper threshold tuning"
+  ],
+  "enhancements_v2.1": [
+    "POPRAWKA #1: Heuristic min_proba_diff recommendation",
+    "POPRAWKA #2: CV-based feature selection (5 folds)",
+    "POPRAWKA #4: Pruning after fold 1 (was fold 0)",
+    "POPRAWKA #5: Early stopping for final model",
+    "POPRAWKA #6: Parametrized min_recall_target",
+    "POPRAWKA #7: Gap size respects feature lookback (min 200)",
+    "POPRAWKA #8: Expanded hyperparameter ranges",
+    "POPRAWKA #9: Feature drift monitoring (KS test)",
+    "POPRAWKA #10: Fine-grained threshold search (21 values)"
+  ]
+}

@@ -755,3 +755,86 @@ cython_debug/
 /price_action/.claude/
 /.claude/
 /price_action/prediction_logs/
+
+# ===== ML TRADING BOT - GENERATED FILES =====
+# Analysis plots and visualizations (can be regenerated)
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+
+# CSV analysis outputs (can be regenerated)
+*_analysis.csv
+*_comparison.csv
+models_analysis_full.csv
+live_trades_analysis.csv
+backtest_results*.csv
+optimization_results*.csv
+feature_drift*.csv
+holdout_predictions.csv
+
+# Optuna optimization databases (large files, can be recreated)
+*.db
+*.db-shm
+*.db-wal
+/price_action/models/**/optuna/*.db
+
+# Trading logs (generated during live trading)
+/price_action/logs/
+/price_action/logs/trades/*.json
+/price_action/logs/candles/*.parquet
+/price_action/logs/indicators/*.json
+
+# Bot state (temporary runtime state)
+/price_action/bot_state/*.json
+
+# Prediction logs (large CSV files)
+/price_action/prediction_logs/*.csv
+
+# Feature cache (can be regenerated)
+/price_action/feature_cache/
+*.cache
+
+# Backup files
+*.backup.*
+docker-compose.yaml.backup.*
+*.bak
+
+# Temporary analysis files
+/price_action/OPTIMIZATION_SUMMARY.md
+/price_action/RESULTS.md
+/price_action/THRESHOLD_EXPLANATION.md
+/price_action/compare_models.py
+/price_action/analyze_*.py
+/price_action/check_models.sh
+/price_action/apply_optimization.sh
+
+# Model analysis outputs (in each model folder)
+/price_action/models/**/analysis/*.png
+/price_action/models/**/analysis/*.html
+/price_action/models/**/analysis/*.json
+/price_action/models/**/optuna/plots/*.html
+
+# Keep essential model files (these ARE needed)
+# Uncomment below if you want to exclude model binaries (they're large)
+# /price_action/models/**/*.joblib
+# /price_action/models/**/*.pkl
+
+# Jupyter notebook outputs
+*.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Docker volumes (if accidentally created locally)
+/price_action/models/cache/

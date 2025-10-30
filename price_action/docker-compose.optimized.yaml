@@ -224,34 +224,32 @@ services:
       --dca-atr-multiplier 1.9
       --dca-max-swing-distance 2.1
 
-  # OPTIMIZED: prob-threshold 0.33 -> 0.33 (already optimal from ML analysis!)
-  # NEARUSDT: LONG best F1 @ 0.30, SHORT @ 0.35, avg = 0.325 ≈ 0.33
-  bot-near:
-    <<: [ *bot-base, *bot-common ]
-    container_name: bot-near
-    environment:
-      - PYTHONUNBUFFERED=1
-      - CONTAINER_NAME=bot-near
-    env_file:
-      - .env_luk
-    command: >
-      python bot.py
-      --version v1.2.near
-      --ticker NEARUSDT
-      --timeframe 15m
-      --helper-timeframes 1h 2h 4h 6h 12h 1d
-      --prob-threshold 0.33
-      --min-proba-diff 0.30
-      --tsl-pct 0.014
-      --tp-pct 0.02
-      --trade-size-pct 0.02
-      --leverage 20
-      --partial-tp
-      --hedge-mode
-      --limit-order
-      --limit-order-candles 16
-      --dca-mode
-      --dca-level1-pct 0.01
-      --dca-atr-multiplier 1.9
-      --dca-max-swing-distance 2.1
+#  bot-near:
+#    <<: [ *bot-base, *bot-common ]
+#    container_name: bot-near
+#    environment:
+#      - PYTHONUNBUFFERED=1
+#      - CONTAINER_NAME=bot-near
+#    env_file:
+#      - .env_luk
+#    command: >
+#      python bot.py
+#      --version v1.2.near
+#      --ticker NEARUSDT
+#      --timeframe 15m
+#      --helper-timeframes 1h 2h 4h 6h 12h 1d
+#      --prob-threshold 0.33
+#      --min-proba-diff 0.28
+#      --tsl-pct 0.014
+#      --tp-pct 0.02
+#      --trade-size-pct 0.02
+#      --leverage 20
+#      --partial-tp
+#      --hedge-mode
+#      --limit-order
+#      --limit-order-candles 16
+#      --dca-mode
+#      --dca-level1-pct 0.01
+#      --dca-atr-multiplier 1.9
+#      --dca-max-swing-distance 2.1
 

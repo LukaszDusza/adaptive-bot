@@ -13,9 +13,47 @@ from app.services.analytics import AnalyticsService
 
 router = APIRouter(prefix="/metrics", tags=["Metrics"])
 
+# Initialize Bybit service for position verification
+try:
+    from app.services.bybit_service import BybitService
+    bybit_service = BybitService()
+except Exception as e:
+    bybit_service = None
+
 # Initialize services
-trade_parser = TradeParser()
+# Use JSON-only mode to ensure latest trades are visible (same as trades.py)
+trade_parser = TradeParser(use_database=False, bybit_service=bybit_service)
 analytics = AnalyticsService()
+
+
+def _get_all_trades_without_duplicates() -> List:
+    """
+    Helper: Get all trades (completed + active) without duplicates.
+
+    Combines:
+    - All trades from logs (completed + active)
+    - Active trades from state files (only those not in logs)
+
+    Returns:
+        List of Trade objects without duplicates
+    """
+    # Get all trades from logs (completed + active)
+    all_trades = trade_parser.get_all_trades()
+
+    # Get active trades (includes logs + state files)
+    active_trades_all = trade_parser.get_active_trades()
+
+    # Remove duplicates - get trade_ids from all_trades
+    existing_trade_ids = {t.trade_id for t in all_trades}
+
+    # Add only active trades that are NOT already in all_trades (from state files)
+    unique_active_trades = [
+        t for t in active_trades_all
+        if t.trade_id not in existing_trade_ids
+    ]
+
+    # Combine without duplicates
+    return all_trades + unique_active_trades
 
 
 @router.get("/overall", response_model=MetricsResponse)
@@ -29,13 +67,7 @@ async def get_overall_metrics():
         - Average win/loss, trade duration
         - Total fees paid
     """
-    # Get all trades (including active positions from bot_state)
-    all_trades = trade_parser.get_all_trades()
-    active_trades = trade_parser.get_active_trades()
-
-    # Combine for metrics calculation
-    trades = all_trades + active_trades
-
+    trades = _get_all_trades_without_duplicates()
     metrics = analytics.calculate_overall_metrics(trades)
     return metrics
 
@@ -47,7 +79,7 @@ async def get_ticker_metrics():
 
     Returns list of TickerMetrics sorted by total PnL descending.
     """
-    trades = trade_parser.get_all_trades()
+    trades = _get_all_trades_without_duplicates()
     ticker_metrics = analytics.calculate_ticker_metrics(trades)
     return ticker_metrics
 
@@ -60,7 +92,11 @@ async def get_single_ticker_metrics(ticker: str):
     Args:
         ticker: Trading pair (e.g., SOLUSDT)
     """
-    trades = trade_parser.get_trades_by_ticker(ticker)
+    # Get all trades without duplicates
+    all_trades = _get_all_trades_without_duplicates()
+
+    # Filter for this ticker only
+    trades = [t for t in all_trades if t.ticker == ticker]
 
     if not trades:
         raise HTTPException(status_code=404, detail=f"No trades found for {ticker}")

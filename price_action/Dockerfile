@@ -45,6 +45,7 @@ COPY trade_logger.py .
 COPY prediction_logger.py .
 COPY feature_cache.py .
 COPY feature_config.py .
+COPY trade_metrics.py .
 COPY docker-entrypoint.sh .
 
 # Copy ML models into the image (self-contained, ephemeral design)

@@ -1768,6 +1768,50 @@ class TradingBot:
             size = position.get('size', 0)
             current_price = self.adapter.latest_price(self.config.TICKER)
 
+            # FIX: Recover state from API if position exists but state is empty
+            # This handles cases where network errors prevented state from being saved during position opening
+            if not self.state or 'entry_price' not in self.state:
+                logging.warning("="*60)
+                logging.warning(f"⚠️  STATE RECOVERY: Position exists but state is empty!")
+                logging.warning(f"    {side} position | Entry: {entry:.4f} | Size: {size}")
+                logging.warning(f"    Recovering state from Bybit API...")
+                logging.warning("="*60)
+
+                stop_loss = position.get('stopLoss', 0.0)
+                take_profit = position.get('takeProfit', 0.0)
+
+                # Reconstruct minimal state
+                self.state = {
+                    'side': side,
+                    'entry_price': entry,
+                    'initial_tp': take_profit if take_profit > 0 else (entry * (1 + self.config.TP_PCT) if side == "Long" else entry * (1 - self.config.TP_PCT)),
+                    'last_sl': stop_loss if stop_loss > 0 else (entry * (1 - self.config.TSL_PCT) if side == "Long" else entry * (1 + self.config.TSL_PCT)),
+                    'partial_tp_taken': False,
+                    'dynamic_tp_levels_taken': 0,
+                    'highest_price': entry if side == "Long" else current_price,
+                    'lowest_price': entry if side == "Short" else current_price,
+                    'original_qty': size,
+                    'initial_size': entry * size  # Approximate trade size
+                }
+                self._save_state()
+
+                # Start trade logger if not active
+                if not self.trade_logger.current_trade:
+                    self.trade_logger.start_trade(
+                        ticker=self.config.TICKER,
+                        side=side,
+                        decision_data={
+                            'recovered_from_api_during_manage': True,
+                            'entry_price': entry,
+                            'size': size,
+                            'note': 'State recovered due to network error during position opening'
+                        }
+                    )
+                    logging.warning(f"    ✓ Trade logger started for recovered {side} position")
+
+                logging.warning("    ✓ State recovery complete")
+                logging.warning("="*60)
+
             # DUST POSITION CLEANUP: Check if position is too small to close normally
             min_qty = self.adapter.get_min_order_qty(self.config.TICKER)
             if size > 0 and size < min_qty:

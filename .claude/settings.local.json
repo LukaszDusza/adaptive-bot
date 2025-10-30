@@ -79,7 +79,11 @@
       "Bash(ls:*)",
       "Bash(./test_regenerate_analyses.sh:*)",
       "Bash(do echo \"=== $file ===\")",
-      "Bash(ps:*)"
+      "Bash(ps:*)",
+      "Bash(git show:*)",
+      "Bash(./check_models.sh:*)",
+      "Bash(./clean_git_cache.sh)",
+      "Bash(git add:*)"
     ],
     "deny": [],
     "ask": []

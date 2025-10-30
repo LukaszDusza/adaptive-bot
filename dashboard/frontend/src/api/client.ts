@@ -10,6 +10,7 @@ import type {
   EquityCurvePoint,
   DrawdownPoint,
   ExitReasonStats,
+  PendingOrdersResponse,
 } from '../types';
 
 // Determine base URL: empty string for production (proxied by nginx), full URL for dev
@@ -59,6 +60,15 @@ export const getTradeById = (tradeId: string) =>
 
 export const updateTradeNote = (tradeId: string, note: string) =>
   api.patch(`/api/trades/${tradeId}/note`, { note });
+
+export const getPendingOrders = (tickers?: string) =>
+  api.get<PendingOrdersResponse>('/api/trades/pending-orders', { params: { tickers } });
+
+export const cancelPendingOrder = (ticker: string, orderId: string) =>
+  api.delete(`/api/trades/pending-orders/${ticker}/${orderId}`);
+
+export const cancelAllPendingOrders = (ticker: string) =>
+  api.delete(`/api/trades/pending-orders/${ticker}`);
 
 // Containers
 export const getAllContainers = () =>

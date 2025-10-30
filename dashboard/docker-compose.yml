@@ -15,7 +15,10 @@ services:
       - ../price_action/bot_state:/app/bot_state:ro
       - ../price_action/models:/app/models:ro
       - ../price_action/prediction_logs:/app/prediction_logs:ro
+      - ../price_action:/app/price_action:ro  # For BybitAdapter access
       - /var/run/docker.sock:/var/run/docker.sock:ro  # For Docker management
+    env_file:
+      - ../price_action/.env_luk  # Bybit API credentials
     environment:
       - LOG_LEVEL=INFO
       - HOST=0.0.0.0

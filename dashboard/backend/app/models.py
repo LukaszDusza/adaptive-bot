@@ -275,3 +275,28 @@ class WSContainerStatusUpdate(BaseModel):
     old_status: str
     new_status: str
     timestamp: datetime
+
+
+class PendingOrder(BaseModel):
+    """Pending limit order waiting for execution"""
+    order_id: str
+    ticker: str
+    side: TradeSide
+    order_type: str  # "Limit", "Market", etc.
+    price: float
+    quantity: float
+    filled_quantity: float = 0.0
+    status: str  # "New", "PartiallyFilled", "Untriggered", etc.
+    created_at: datetime
+    time_in_force: str  # "GTC", "IOC", "FOK"
+    reduce_only: bool = False
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+
+class PendingOrdersResponse(BaseModel):
+    """Response with pending orders grouped by ticker"""
+    orders: List[PendingOrder]
+    total_count: int
+    by_ticker: Dict[str, int]  # Count per ticker
+    last_updated: datetime

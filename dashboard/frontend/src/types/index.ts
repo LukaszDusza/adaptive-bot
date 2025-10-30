@@ -110,3 +110,26 @@ export interface WebSocketMessage {
   data: any;
   timestamp: string;
 }
+
+export interface PendingOrder {
+  order_id: string;
+  ticker: string;
+  side: 'Long' | 'Short';
+  order_type: string;
+  price: number;
+  quantity: number;
+  filled_quantity: number;
+  status: string;
+  created_at: string;
+  time_in_force: string;
+  reduce_only: boolean;
+  stop_loss: number | null;
+  take_profit: number | null;
+}
+
+export interface PendingOrdersResponse {
+  orders: PendingOrder[];
+  total_count: number;
+  by_ticker: Record<string, number>;
+  last_updated: string;
+}
