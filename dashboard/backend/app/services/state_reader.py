@@ -92,7 +92,8 @@ class StateReader:
             # Parse side
             side_str = data.get("side", "").capitalize()
             if side_str not in ["Long", "Short"]:
-                logger.warning(f"Invalid side in {file_path}: {side_str}")
+                # State file is empty or doesn't have active position
+                logger.debug(f"No active position in {file_path} (side: '{side_str}')")
                 return None
 
             side = TradeSide.LONG if side_str == "Long" else TradeSide.SHORT
@@ -104,7 +105,7 @@ class StateReader:
             current_sl = data.get("last_sl")
 
             if not all([entry_price, quantity]):
-                logger.warning(f"Missing required fields in {file_path}")
+                logger.debug(f"State file {file_path} missing position data (probably just closed)")
                 return None
 
             # Parse timestamp

@@ -443,6 +443,347 @@ def run_analysis_with_args(args, output_dir=None):
         plt.close()
         print(f"Zapisano wykres ważności cech w katalogu '{plots_dir}'.")
 
+    # === NOWE WYKRESY - ROZSZERZONA ANALIZA ===
+    print("\n" + "=" * 60)
+    print("--- Generowanie Dodatkowych Wykresów Analitycznych ---")
+    print("=" * 60)
+
+    # 1. MULTI-THRESHOLD CONFUSION MATRICES GRID
+    thresholds_cm = [0.5, 0.6, 0.7, 0.8]
+    fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+    axes = axes.ravel()
+
+    for idx, thresh in enumerate(thresholds_cm):
+        y_pred_thresh = (df[proba_col] > thresh).astype(int)
+        cm_thresh = confusion_matrix(df['y_true'], y_pred_thresh)
+
+        sns.heatmap(cm_thresh, annot=True, fmt='d', cmap='Blues',
+                    xticklabels=target_names, yticklabels=target_names, ax=axes[idx])
+
+        # Dodaj metryki do tytułu
+        prec = precision_score(df['y_true'], y_pred_thresh, zero_division=0)
+        rec = recall_score(df['y_true'], y_pred_thresh, zero_division=0)
+        axes[idx].set_title(f'Próg: {thresh:.1f} | P: {prec:.2f} R: {rec:.2f} | Sygnały: {y_pred_thresh.sum()}')
+        axes[idx].set_ylabel('Prawdziwa etykieta')
+        axes[idx].set_xlabel('Przewidywana etykieta')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_multi_threshold_confusion_matrices.png"))
+    plt.close()
+    print(f"✓ Multi-Threshold Confusion Matrices")
+
+    # 2. PROBABILITY BOX PLOT BY PREDICTION TYPE
+    pred_types = []
+    proba_values = []
+
+    for idx, row in df.iterrows():
+        y_true = row['y_true']
+        y_pred = row['y_pred_default']
+        proba = row[proba_col]
+
+        if y_true == 1 and y_pred == 1:
+            pred_types.append('TP')
+            proba_values.append(proba)
+        elif y_true == 0 and y_pred == 1:
+            pred_types.append('FP')
+            proba_values.append(proba)
+        elif y_true == 0 and y_pred == 0:
+            pred_types.append('TN')
+            proba_values.append(proba)
+        else:  # y_true == 1 and y_pred == 0
+            pred_types.append('FN')
+            proba_values.append(proba)
+
+    box_df = pd.DataFrame({'Type': pred_types, 'Probability': proba_values})
+
+    plt.figure(figsize=(10, 6))
+    sns.boxplot(x='Type', y='Probability', data=box_df, order=['TP', 'FP', 'TN', 'FN'])
+    plt.title(f'Rozkład Prawdopodobieństw według Typu Predykcji - {args.side.upper()}')
+    plt.ylabel(f'Prawdopodobieństwo {signal_name}')
+    plt.grid(True, alpha=0.3, axis='y')
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_probability_boxplot_by_type.png"))
+    plt.close()
+    print(f"✓ Probability Box Plot by Type")
+
+    # 3. THRESHOLD VS SIGNAL COUNT + ACCURACY (DUAL-AXIS)
+    thresholds_analysis = np.arange(0.3, 0.96, 0.05)
+    signal_counts = []
+    accuracies = []
+    precisions = []
+    recalls = []
+
+    for thresh in thresholds_analysis:
+        y_pred_t = (df[proba_col] > thresh).astype(int)
+        signal_counts.append(y_pred_t.sum())
+        accuracies.append((df['y_true'] == y_pred_t).mean())
+        precisions.append(precision_score(df['y_true'], y_pred_t, zero_division=0))
+        recalls.append(recall_score(df['y_true'], y_pred_t, zero_division=0))
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    color1 = 'tab:blue'
+    ax1.set_xlabel('Próg Prawdopodobieństwa')
+    ax1.set_ylabel('Liczba Sygnałów', color=color1)
+    ax1.plot(thresholds_analysis, signal_counts, color=color1, linewidth=2, marker='o', label='Liczba sygnałów')
+    ax1.tick_params(axis='y', labelcolor=color1)
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = ax1.twinx()
+    color2 = 'tab:red'
+    ax2.set_ylabel('Accuracy', color=color2)
+    ax2.plot(thresholds_analysis, accuracies, color=color2, linewidth=2, marker='s', label='Accuracy')
+    ax2.tick_params(axis='y', labelcolor=color2)
+
+    plt.title(f'Wpływ Progu na Liczbę Sygnałów i Accuracy - {args.side.upper()}')
+    fig.tight_layout()
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_threshold_vs_signals_accuracy.png"))
+    plt.close()
+    print(f"✓ Threshold vs Signal Count + Accuracy")
+
+    # 4. CUMULATIVE GAINS CHART
+    df_sorted = df.sort_values(proba_col, ascending=False).reset_index(drop=True)
+    df_sorted['cumulative_positives'] = df_sorted['y_true'].cumsum()
+    df_sorted['cumulative_pct'] = (df_sorted.index + 1) / len(df_sorted)
+    df_sorted['gains'] = df_sorted['cumulative_positives'] / df_sorted['y_true'].sum()
+
+    # Perfect model
+    perfect_positives = df['y_true'].sum()
+    perfect_x = [0] + [i/len(df) for i in range(1, int(perfect_positives)+1)] + [1.0]
+    perfect_y = [0] + [i/perfect_positives for i in range(1, int(perfect_positives)+1)] + [1.0]
+
+    plt.figure(figsize=(10, 8))
+    plt.plot([0, 1], [0, 1], 'k--', label='Random Model', linewidth=1.5)
+    plt.plot(perfect_x, perfect_y, 'g-', label='Perfect Model', linewidth=2, alpha=0.7)
+    plt.plot(df_sorted['cumulative_pct'], df_sorted['gains'], 'b-', label='Actual Model', linewidth=2.5)
+    plt.xlabel('% Populacji (sortowane malejąco wg prawdopodobieństwa)')
+    plt.ylabel('% Pozytywnych Przypadków')
+    plt.title(f'Cumulative Gains Chart - {args.side.upper()}')
+    plt.legend(loc='lower right')
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_cumulative_gains.png"))
+    plt.close()
+    print(f"✓ Cumulative Gains Chart")
+
+    # 5. LIFT CHART
+    n_deciles = 10
+    df_sorted['decile'] = pd.qcut(df_sorted[proba_col], q=n_deciles, labels=False, duplicates='drop')
+
+    lift_data = []
+    baseline_rate = df['y_true'].mean()
+
+    for decile in sorted(df_sorted['decile'].unique(), reverse=True):
+        decile_df = df_sorted[df_sorted['decile'] == decile]
+        decile_rate = decile_df['y_true'].mean()
+        lift = decile_rate / baseline_rate if baseline_rate > 0 else 0
+        lift_data.append({
+            'decile': int(decile) + 1,
+            'positive_rate': decile_rate,
+            'lift': lift
+        })
+
+    lift_df = pd.DataFrame(lift_data)
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    x_pos = np.arange(len(lift_df))
+    ax1.bar(x_pos, lift_df['lift'], alpha=0.7, color='skyblue', edgecolor='black')
+    ax1.axhline(y=1.0, color='r', linestyle='--', linewidth=2, label='Baseline (Random)')
+    ax1.set_xlabel('Decyl (10=najwyższe prawdopodobieństwo)')
+    ax1.set_ylabel('Lift')
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels(lift_df['decile'])
+    ax1.set_title(f'Lift Chart - {args.side.upper()}')
+    ax1.grid(True, alpha=0.3, axis='y')
+    ax1.legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_lift_chart.png"))
+    plt.close()
+    print(f"✓ Lift Chart")
+
+    # 6. PREDICTION CONFIDENCE DISTRIBUTION
+    df['confidence'] = df[proba_col].apply(lambda x: max(x, 1 - x))
+    df['correct'] = df['y_true'] == df['y_pred_default']
+
+    plt.figure(figsize=(10, 6))
+    plt.hist([df[df['correct']]['confidence'],
+              df[~df['correct']]['confidence']],
+             bins=30, label=['Poprawne predykcje', 'Błędne predykcje'],
+             alpha=0.7, edgecolor='black')
+    plt.xlabel('Pewność Modelu (max(proba, 1-proba))')
+    plt.ylabel('Częstotliwość')
+    plt.title(f'Rozkład Pewności Modelu - {args.side.upper()}')
+    plt.legend()
+    plt.grid(True, alpha=0.3, axis='y')
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_confidence_distribution.png"))
+    plt.close()
+    print(f"✓ Prediction Confidence Distribution")
+
+    # 7. TIME-SERIES PERFORMANCE (PRECISION/RECALL/F1 ROLLING)
+    window = 100
+
+    # Oblicz rolling metrics
+    rolling_precision = []
+    rolling_recall = []
+    rolling_f1 = []
+
+    for i in range(window, len(df)):
+        window_df = df.iloc[i-window:i]
+        prec = precision_score(window_df['y_true'], window_df['y_pred_default'], zero_division=0)
+        rec = recall_score(window_df['y_true'], window_df['y_pred_default'], zero_division=0)
+        f1 = f1_score(window_df['y_true'], window_df['y_pred_default'], zero_division=0)
+        rolling_precision.append(prec)
+        rolling_recall.append(rec)
+        rolling_f1.append(f1)
+
+    timestamps = df.index[window:]
+
+    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+
+    axes[0].plot(timestamps, rolling_precision, linewidth=1.5, color='blue')
+    axes[0].set_ylabel('Precision')
+    axes[0].set_title(f'Rolling Performance Metrics (okno={window}) - {args.side.upper()}')
+    axes[0].grid(True, alpha=0.3)
+    axes[0].axhline(y=np.mean(rolling_precision), color='r', linestyle='--', label=f'Średnia: {np.mean(rolling_precision):.3f}')
+    axes[0].legend()
+
+    axes[1].plot(timestamps, rolling_recall, linewidth=1.5, color='green')
+    axes[1].set_ylabel('Recall')
+    axes[1].grid(True, alpha=0.3)
+    axes[1].axhline(y=np.mean(rolling_recall), color='r', linestyle='--', label=f'Średnia: {np.mean(rolling_recall):.3f}')
+    axes[1].legend()
+
+    axes[2].plot(timestamps, rolling_f1, linewidth=1.5, color='orange')
+    axes[2].set_ylabel('F1-Score')
+    axes[2].set_xlabel('Czas')
+    axes[2].grid(True, alpha=0.3)
+    axes[2].axhline(y=np.mean(rolling_f1), color='r', linestyle='--', label=f'Średnia: {np.mean(rolling_f1):.3f}')
+    axes[2].legend()
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_rolling_performance_metrics.png"))
+    plt.close()
+    print(f"✓ Time-Series Performance (Rolling Metrics)")
+
+    # 8. FEATURE CORRELATION HEATMAP (TOP 20)
+    if hasattr(model, 'feature_importances_'):
+        # Wczytaj dane z features
+        features_path = os.path.join(version_dir, "features.joblib")
+        if os.path.exists(features_path):
+            selected_features = joblib.load(features_path)
+
+            # Pobierz top 20 najważniejszych features
+            feature_importance_full = pd.DataFrame({
+                'feature': model.feature_name_,
+                'importance': model.feature_importances_
+            }).sort_values('importance', ascending=False)
+
+            top_20_features = feature_importance_full.head(20)['feature'].tolist()
+
+            # Wczytaj dane treningowe (jeśli dostępne w holdout_predictions)
+            # Alternatywnie można przeliczyć korelacje z danych treningowych
+            print(f"  ⚠️  Uwaga: Feature Correlation Heatmap wymaga danych surowych")
+            print(f"  Pomijam ten wykres (wymaga dostępu do raw features)")
+        else:
+            print(f"  ⚠️  Brak pliku features.joblib - pomijam Feature Correlation Heatmap")
+
+    # 9. CLASS IMBALANCE VISUALIZATION
+    class_counts = df['y_true'].value_counts()
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+    # Pie chart
+    colors = ['#ff9999', '#66b3ff']
+    axes[0].pie(class_counts.values, labels=[f'HOLD (0): {class_counts[0]}',
+                                              f'{signal_name} (1): {class_counts[1]}'],
+                autopct='%1.1f%%', startangle=90, colors=colors, explode=(0, 0.1))
+    axes[0].set_title(f'Rozkład Klas w Zbiorze Testowym - {args.side.upper()}')
+
+    # Bar chart
+    axes[1].bar(['HOLD (0)', f'{signal_name} (1)'], class_counts.values, color=colors, edgecolor='black')
+    axes[1].set_ylabel('Liczba Próbek')
+    axes[1].set_title('Liczebność Klas')
+    axes[1].grid(True, alpha=0.3, axis='y')
+
+    # Dodaj wartości na słupkach
+    for i, v in enumerate(class_counts.values):
+        axes[1].text(i, v + len(df)*0.01, str(v), ha='center', va='bottom', fontweight='bold')
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_class_imbalance.png"))
+    plt.close()
+    print(f"✓ Class Imbalance Visualization")
+
+    # 10. ERROR ANALYSIS - ACCURACY BY PROBABILITY BINS
+    bins = [0.0, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    df['proba_bin'] = pd.cut(df[proba_col], bins=bins, include_lowest=True)
+
+    bin_analysis = []
+    for bin_label in df['proba_bin'].cat.categories:
+        bin_df = df[df['proba_bin'] == bin_label]
+        if len(bin_df) > 0:
+            accuracy = (bin_df['y_true'] == bin_df['y_pred_default']).mean()
+            count = len(bin_df)
+            bin_analysis.append({
+                'bin': str(bin_label),
+                'accuracy': accuracy,
+                'count': count
+            })
+
+    bin_df_analysis = pd.DataFrame(bin_analysis)
+
+    fig, ax1 = plt.subplots(figsize=(12, 6))
+
+    x_pos = np.arange(len(bin_df_analysis))
+    ax1.bar(x_pos, bin_df_analysis['accuracy'], alpha=0.7, color='lightcoral', edgecolor='black', label='Accuracy')
+    ax1.set_xlabel('Przedział Prawdopodobieństwa')
+    ax1.set_ylabel('Accuracy', color='darkred')
+    ax1.set_xticks(x_pos)
+    ax1.set_xticklabels(bin_df_analysis['bin'], rotation=45, ha='right')
+    ax1.tick_params(axis='y', labelcolor='darkred')
+    ax1.set_ylim([0, 1.0])
+    ax1.grid(True, alpha=0.3, axis='y')
+
+    ax2 = ax1.twinx()
+    ax2.plot(x_pos, bin_df_analysis['count'], color='blue', marker='o', linewidth=2, markersize=8, label='Liczba próbek')
+    ax2.set_ylabel('Liczba Próbek', color='blue')
+    ax2.tick_params(axis='y', labelcolor='blue')
+
+    plt.title(f'Accuracy według Przedziałów Prawdopodobieństwa - {args.side.upper()}')
+    fig.tight_layout()
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_accuracy_by_probability_bins.png"))
+    plt.close()
+    print(f"✓ Error Analysis - Accuracy by Probability Bins")
+
+    # 11. PRECISION-RECALL-F1 AT DIFFERENT THRESHOLDS (COMBINED)
+    thresholds_combined = np.arange(0.3, 0.96, 0.02)
+    precisions_combined = []
+    recalls_combined = []
+    f1_scores_combined = []
+
+    for thresh in thresholds_combined:
+        y_pred_t = (df[proba_col] > thresh).astype(int)
+        precisions_combined.append(precision_score(df['y_true'], y_pred_t, zero_division=0))
+        recalls_combined.append(recall_score(df['y_true'], y_pred_t, zero_division=0))
+        f1_scores_combined.append(f1_score(df['y_true'], y_pred_t, zero_division=0))
+
+    plt.figure(figsize=(12, 6))
+    plt.plot(thresholds_combined, precisions_combined, label='Precision', linewidth=2, marker='o', markersize=4)
+    plt.plot(thresholds_combined, recalls_combined, label='Recall', linewidth=2, marker='s', markersize=4)
+    plt.plot(thresholds_combined, f1_scores_combined, label='F1-Score', linewidth=2, marker='^', markersize=4)
+    plt.xlabel('Próg Prawdopodobieństwa')
+    plt.ylabel('Wartość Metryki')
+    plt.title(f'Precision-Recall-F1 w Funkcji Progu - {args.side.upper()}')
+    plt.legend(loc='best')
+    plt.grid(True, alpha=0.3)
+    plt.savefig(os.path.join(plots_dir, f"{strategy_id}_precision_recall_f1_combined.png"))
+    plt.close()
+    print(f"✓ Precision-Recall-F1 Combined")
+
+    print("\n" + "=" * 60)
+    print("✅ Wszystkie dodatkowe wykresy wygenerowane!")
+    print("=" * 60)
+
     # EXPORT DO JSON - NOWE
     stats_json = export_analysis_to_json(df, model, strategy_id, args, plots_dir)
 

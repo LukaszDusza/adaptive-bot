@@ -149,6 +149,7 @@ show_menu() {
     echo "4) Run Analysis (LONG)"
     echo "5) Run Analysis (SHORT)"
     echo "6) Run Backtest"
+    echo "7) Regenerate ALL Analyses for Version"
     echo "0) Exit"
     echo ""
 }
@@ -400,6 +401,117 @@ run_analysis() {
     fi
 }
 
+# Function to regenerate all analyses for a version
+regenerate_all_analyses() {
+    # Prompt for version if not set
+    if [[ -z "$VERSION" ]]; then
+        if ! prompt_version; then
+            return
+        fi
+    fi
+
+    # Check if version directory exists
+    if [ ! -d "models/$VERSION" ]; then
+        echo -e "${RED}Version directory does not exist: models/$VERSION${NC}"
+        return
+    fi
+
+    echo -e "${YELLOW}========================================${NC}"
+    echo -e "${YELLOW}Regenerating ALL analyses for version: $VERSION${NC}"
+    echo -e "${YELLOW}========================================${NC}"
+    echo ""
+
+    # Find all model directories (_long and _short)
+    local model_dirs=$(find models/$VERSION -maxdepth 1 -type d \( -name "*_long" -o -name "*_short" \) | sort)
+
+    if [ -z "$model_dirs" ]; then
+        echo -e "${RED}No model directories found in models/$VERSION/${NC}"
+        return
+    fi
+
+    local count=0
+    local success=0
+    local failed=0
+
+    echo -e "${BLUE}Found models:${NC}"
+    echo "$model_dirs" | while read model_dir; do
+        echo "  - $(basename $model_dir)"
+    done
+    echo ""
+
+    # Process each model directory
+    while IFS= read -r model_dir; do
+        local dir_name=$(basename "$model_dir")
+
+        # Parse directory name: TICKER_TIMEFRAME_plus_HELPERS_SIDE
+        # Remove _long or _short suffix
+        local base_name="${dir_name%_long}"
+        base_name="${base_name%_short}"
+
+        # Extract side
+        local side="long"
+        if [[ $dir_name == *_short ]]; then
+            side="short"
+        fi
+
+        # Extract TICKER and TIMEFRAME
+        if [[ $base_name =~ ^([A-Z]+)_([0-9]+[mhDW])(.*)$ ]]; then
+            local ticker="${BASH_REMATCH[1]}"
+            local timeframe="${BASH_REMATCH[2]}"
+            local remainder="${BASH_REMATCH[3]}"
+
+            # Extract helper timeframes from "_plus_1h_4h_1D" part
+            local helpers=""
+            if [[ $remainder =~ _plus_(.+)$ ]]; then
+                local helpers_str="${BASH_REMATCH[1]}"
+                # Replace underscores with spaces (1h_4h_1D -> 1h 4h 1D)
+                helpers="${helpers_str//_/ }"
+            fi
+
+            count=$((count + 1))
+
+            echo -e "${YELLOW}[$count] Processing: ${ticker} ${timeframe} ${side}${NC}"
+            echo "    Helpers: ${helpers:-none}"
+
+            # Check if model files exist
+            if [ ! -f "$model_dir/model.joblib" ] || [ ! -f "$model_dir/holdout_predictions.csv" ]; then
+                echo -e "${RED}    ✗ Missing required files (model.joblib or holdout_predictions.csv)${NC}"
+                failed=$((failed + 1))
+                echo ""
+                continue
+            fi
+
+            # Run analysis
+            python analysis.py \
+                --ticker "$ticker" \
+                --timeframe "$timeframe" \
+                --side "$side" \
+                --helper-timeframes $helpers \
+                --version "$VERSION" 2>&1 | grep -E "(✓|✗|Error|Failed|Zapisano)"
+
+            if [ ${PIPESTATUS[0]} -eq 0 ]; then
+                echo -e "${GREEN}    ✓ Analysis completed${NC}"
+                success=$((success + 1))
+            else
+                echo -e "${RED}    ✗ Analysis failed${NC}"
+                failed=$((failed + 1))
+            fi
+            echo ""
+        else
+            echo -e "${YELLOW}Could not parse model directory name: $dir_name${NC}"
+            failed=$((failed + 1))
+            echo ""
+        fi
+    done <<< "$model_dirs"
+
+    echo -e "${BLUE}========================================${NC}"
+    echo -e "${BLUE}Summary:${NC}"
+    echo -e "  Total models: $count"
+    echo -e "  ${GREEN}Success: $success${NC}"
+    echo -e "  ${RED}Failed: $failed${NC}"
+    echo -e "${BLUE}========================================${NC}"
+}
+
 # Function to run backtest
 run_backtest() {
     # Prompt for version if not set
@@ -464,7 +576,7 @@ run_backtest() {
 # Main loop
 while true; do
     show_menu
-    read -p "Enter your choice [0-6]: " choice
+    read -p "Enter your choice [0-7]: " choice
     echo ""
 
     case $choice in
@@ -512,6 +624,10 @@ while true; do
             ;;
         6)
             run_backtest
+            VERSION=""
+            ;;
+        7)
+            regenerate_all_analyses
             VERSION=""
             ;;
         0)

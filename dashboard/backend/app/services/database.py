@@ -24,6 +24,7 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 import logging
+import os
 
 log = logging.getLogger(__name__)
 
@@ -220,7 +221,9 @@ class DatabaseConnection:
         """
         if self._engine is None:
             if db_path is None:
-                db_path = "logs/trades.db"
+                # Use proper absolute path from config or environment
+                from app.config import settings
+                db_path = os.path.join(settings.LOGS_DIR, "trades.db")
 
             # Ensure directory exists
             db_file = Path(db_path)

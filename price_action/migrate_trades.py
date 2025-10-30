@@ -149,6 +149,29 @@ class TradeMigrator:
             pnl_usd = summary.get("pnl_usd") or summary.get("total_pnl_usd", 0.0)
             pnl_percent = summary.get("pnl_percent") or summary.get("total_pnl_pct", 0.0)
 
+            # Extract entry/exit details from summary OR events (for old trades)
+            entry_price = summary.get("entry_price")
+            exit_price = summary.get("exit_price")
+            quantity = summary.get("quantity")
+            leverage = summary.get("leverage")
+            initial_sl = summary.get("initial_sl")
+            initial_tp = summary.get("initial_tp")
+            final_sl = summary.get("final_sl")
+            final_tp = summary.get("final_tp")
+
+            # If not in summary, extract from events (old format)
+            if not entry_price or not quantity:
+                entry_data = self._extract_entry_from_events(trade_data.get("events", []))
+                entry_price = entry_price or entry_data.get("entry_price")
+                quantity = quantity or entry_data.get("quantity")
+                leverage = leverage or entry_data.get("leverage")
+                initial_sl = initial_sl or entry_data.get("sl_price")
+                initial_tp = initial_tp or entry_data.get("tp_price")
+
+            if not exit_price:
+                exit_data = self._extract_exit_from_events(trade_data.get("events", []))
+                exit_price = exit_price or exit_data.get("exit_price")
+
             # Build trade dict
             trade_dict = {
                 "trade_id": trade_id,
@@ -159,16 +182,16 @@ class TradeMigrator:
                 "duration_seconds": summary.get("duration_seconds"),
 
                 # Entry/Exit
-                "entry_price": summary.get("entry_price"),
-                "exit_price": summary.get("exit_price"),
-                "quantity": summary.get("quantity"),
-                "leverage": summary.get("leverage"),
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "quantity": quantity,
+                "leverage": leverage,
 
                 # Risk Management
-                "initial_sl": summary.get("initial_sl"),
-                "initial_tp": summary.get("initial_tp"),
-                "final_sl": summary.get("final_sl"),
-                "final_tp": summary.get("final_tp"),
+                "initial_sl": initial_sl,
+                "initial_tp": initial_tp,
+                "final_sl": final_sl,
+                "final_tp": final_tp,
 
                 # Performance
                 "pnl_usd": pnl_usd,
@@ -189,6 +212,31 @@ class TradeMigrator:
         except Exception as e:
             log.error(f"Error parsing trade data: {e}")
             return None
+
+    def _extract_entry_from_events(self, events: List[Dict]) -> Dict[str, Any]:
+        """Extract entry details from events (for old trades)"""
+        for event in events:
+            event_type = event.get("type", "")
+            if event_type in ["ENTRY", "DCA_ENTRY_FIRST"]:
+                data = event.get("data", {})
+                return {
+                    "entry_price": data.get("entry_price"),
+                    "quantity": data.get("quantity"),
+                    "leverage": data.get("leverage"),
+                    "sl_price": data.get("sl_price"),
+                    "tp_price": data.get("tp_price")
+                }
+        return {}
+
+    def _extract_exit_from_events(self, events: List[Dict]) -> Dict[str, Any]:
+        """Extract exit details from events (for old trades)"""
+        for event in events:
+            if event.get("type") == "EXIT":
+                data = event.get("data", {})
+                return {
+                    "exit_price": data.get("exit_price")
+                }
+        return {}
 
     def _migrate_events(self, trade_id: str, events: List[Dict]):
         """Migrate trade events"""

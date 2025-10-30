@@ -76,7 +76,10 @@
       "Bash(nvm ls:*)",
       "Bash(docker restart:*)",
       "Bash(do echo \"=== $version ===\")",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(./test_regenerate_analyses.sh:*)",
+      "Bash(do echo \"=== $file ===\")",
+      "Bash(ps:*)"
     ],
     "deny": [],
     "ask": []
