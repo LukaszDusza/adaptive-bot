@@ -26,8 +26,10 @@ WORKDIR /app
 
 # Install system dependencies required by Python packages
 # libgomp1: Required by LightGBM for OpenMP support
+# dos2unix: Required to fix line endings from Windows
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgomp1 \
+    dos2unix \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy and install Python dependencies
@@ -69,7 +71,9 @@ HEALTHCHECK --interval=60s --timeout=10s --start-period=30s --retries=3 \
     CMD python -c "import os; exit(0 if os.path.exists('/app/bot_state') and os.access('/app/bot_state', os.W_OK) else 1)" || exit 1
 
 # Configure entrypoint to fix permissions before running bot
-RUN chmod +x docker-entrypoint.sh
+# Fix line endings (critical for Windows-cloned repos) and make executable
+RUN dos2unix docker-entrypoint.sh && \
+    chmod +x docker-entrypoint.sh
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 
 # Default command (overridden in docker-compose.yaml)
