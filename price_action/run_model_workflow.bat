@@ -9,11 +9,11 @@ echo ========================================
 echo.
 
 REM Activate virtual environment
-if exist "..\\.venv\\Scripts\\activate.bat" (
+if exist "..\.venv\Scripts\activate.bat" (
     echo Activating virtual environment...
-    call "..\\.venv\\Scripts\\activate.bat"
+    call "..\.venv\Scripts\activate.bat"
 ) else (
-    echo WARNING: Virtual environment not found at ..\\.venv
+    echo WARNING: Virtual environment not found at ..\.venv
     echo Attempting to use system Python...
 )
 

@@ -43,8 +43,10 @@ services:
     profiles:
       - build-only
 
-  # OPTIMIZED: prob-threshold 0.60 -> 0.38 (ML F1 analysis)
-  # OPTIMIZED: min-proba-diff 0.35 -> 0.30 (lower to catch more signals)
+  # ============================================
+  # DOGEUSDT - v1.2.doge
+  # UPDATED: prob-threshold 0.38 -> 0.6039 (ML optimal)
+  # ============================================
   bot-luk-doge-dca:
     <<: [*bot-base, *bot-common]
     container_name: luk-doge-dca
@@ -59,10 +61,10 @@ services:
       --ticker DOGEUSDT
       --timeframe 15m
       --helper-timeframes 1h 4h 6h 12h 1d
-      --prob-threshold 0.38
+      --prob-threshold 0.6039
       --min-proba-diff 0.30
-      --tsl-pct 0.014
-      --tp-pct 0.02
+      --tsl-pct 0.0102
+      --tp-pct 0.0156
       --trade-size-pct 0.05
       --leverage 20
       --partial-tp
@@ -70,11 +72,14 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.008
-      --dca-atr-multiplier 1.9
-      --dca-max-swing-distance 2.1
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.5
 
-  # OPTIMIZED: prob-threshold 0.58 -> 0.43 (ML F1 analysis)
+  # ============================================
+  # SOLUSDT - v1.2.sol
+  # UPDATED: prob-threshold 0.43 -> 0.5004 (ML optimal)
+  # ============================================
   bot-luk-sol-ict:
     <<: [*bot-base, *bot-common]
     container_name: luk-sol-ict
@@ -89,10 +94,10 @@ services:
       --ticker SOLUSDT
       --timeframe 15m
       --helper-timeframes 1h 4h 12h 1d
-      --prob-threshold 0.43
-      --min-proba-diff 0.30
-      --tsl-pct 0.014
-      --tp-pct 0.02
+      --prob-threshold 0.5004
+      --min-proba-diff 0.25
+      --tsl-pct 0.0098
+      --tp-pct 0.0150
       --trade-size-pct 0.05
       --leverage 20
       --partial-tp
@@ -100,11 +105,14 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.009
-      --dca-atr-multiplier 1.9
-      --dca-max-swing-distance 2.2
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.5
 
-  # OPTIMIZED: prob-threshold 0.58 -> 0.38
+  # ============================================
+  # ETHUSDT - v1.2.eth
+  # UPDATED: prob-threshold 0.38 -> 0.6085 (ML optimal)
+  # ============================================
   bot-eth:
     <<: [ *bot-base, *bot-common ]
     container_name: bot-eth
@@ -119,10 +127,10 @@ services:
       --ticker ETHUSDT
       --timeframe 15m
       --helper-timeframes 1h 2h 4h 6h 12h 1d
-      --prob-threshold 0.38
+      --prob-threshold 0.6085
       --min-proba-diff 0.30
-      --tsl-pct 0.014
-      --tp-pct 0.02
+      --tsl-pct 0.0098
+      --tp-pct 0.0151
       --trade-size-pct 0.05
       --leverage 20
       --partial-tp
@@ -130,11 +138,14 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.008
-      --dca-atr-multiplier 1.8
-      --dca-max-swing-distance 2.2
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.5
 
-  # OPTIMIZED: prob-threshold 0.58 -> 0.38
+  # ============================================
+  # LINKUSDT - v1.2.link
+  # UPDATED: prob-threshold 0.38 -> 0.7142 (ML optimal)
+  # ============================================
   bot-link:
     <<: [ *bot-base, *bot-common ]
     container_name: bot-link
@@ -149,10 +160,10 @@ services:
       --ticker LINKUSDT
       --timeframe 15m
       --helper-timeframes 1h 2h 4h 6h 12h 1d
-      --prob-threshold 0.38
-      --min-proba-diff 0.30
-      --tsl-pct 0.014
-      --tp-pct 0.02
+      --prob-threshold 0.7142
+      --min-proba-diff 0.36
+      --tsl-pct 0.0098
+      --tp-pct 0.0150
       --trade-size-pct 0.05
       --leverage 20
       --partial-tp
@@ -160,11 +171,14 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.01
-      --dca-atr-multiplier 1.9
-      --dca-max-swing-distance 2.1
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.8
 
-  # OPTIMIZED: prob-threshold 0.58 -> 0.38
+  # ============================================
+  # HBARUSDT - v1.2.hbar
+  # UPDATED: prob-threshold 0.38 -> 0.6838 (ML optimal)
+  # ============================================
   bot-hbar:
     <<: [ *bot-base, *bot-common ]
     container_name: bot-hbar
@@ -179,10 +193,10 @@ services:
       --ticker HBARUSDT
       --timeframe 15m
       --helper-timeframes 1h 2h 4h 6h 12h 1d
-      --prob-threshold 0.38
-      --min-proba-diff 0.30
-      --tsl-pct 0.014
-      --tp-pct 0.02
+      --prob-threshold 0.6838
+      --min-proba-diff 0.34
+      --tsl-pct 0.0099
+      --tp-pct 0.0153
       --trade-size-pct 0.05
       --leverage 20
       --partial-tp
@@ -190,11 +204,14 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.01
-      --dca-atr-multiplier 1.9
-      --dca-max-swing-distance 2.1
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.9
 
-  # OPTIMIZED: prob-threshold 0.58 -> 0.32 (lowest - most conservative model)
+  # ============================================
+  # SUIUSDT - v1.2.sui
+  # UPDATED: prob-threshold 0.32 -> 0.4654 (ML optimal)
+  # ============================================
   bot-sui:
     <<: [ *bot-base, *bot-common ]
     container_name: bot-sui
@@ -209,10 +226,10 @@ services:
       --ticker SUIUSDT
       --timeframe 15m
       --helper-timeframes 1h 2h 4h 6h 12h 1d
-      --prob-threshold 0.32
-      --min-proba-diff 0.25
-      --tsl-pct 0.014
-      --tp-pct 0.02
+      --prob-threshold 0.4654
+      --min-proba-diff 0.23
+      --tsl-pct 0.0099
+      --tp-pct 0.0152
       --trade-size-pct 0.05
       --leverage 20
       --partial-tp
@@ -220,12 +237,14 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.01
-      --dca-atr-multiplier 1.9
-      --dca-max-swing-distance 2.1
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.7
 
-  # OPTIMIZED: prob-threshold 0.33 -> 0.33 (already optimal from ML analysis!)
-  # NEARUSDT: LONG best F1 @ 0.30, SHORT @ 0.35, avg = 0.325 ≈ 0.33
+  # ============================================
+  # NEARUSDT - v1.2.near
+  # UPDATED: prob-threshold 0.33 -> 0.5815 (ML optimal)
+  # ============================================
   bot-near:
     <<: [ *bot-base, *bot-common ]
     container_name: bot-near
@@ -240,10 +259,10 @@ services:
       --ticker NEARUSDT
       --timeframe 15m
       --helper-timeframes 1h 2h 4h 6h 12h 1d
-      --prob-threshold 0.33
-      --min-proba-diff 0.30
-      --tsl-pct 0.014
-      --tp-pct 0.02
+      --prob-threshold 0.5815
+      --min-proba-diff 0.29
+      --tsl-pct 0.0099
+      --tp-pct 0.0152
       --trade-size-pct 0.05
       --leverage 20
       --partial-tp
@@ -251,7 +270,72 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.01
-      --dca-atr-multiplier 1.9
-      --dca-max-swing-distance 2.1
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 2.0
 
+  # ============================================
+  # TRXUSDT - v1.2.trx (NEW!)
+  # ML optimal: prob-threshold 0.6719
+  # ============================================
+  bot-trx:
+    <<: [ *bot-base, *bot-common ]
+    container_name: bot-trx
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=bot-trx
+    env_file:
+      - .env_luk
+    command: >
+      python bot.py
+      --version v1.2.trx
+      --ticker TRXUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 2h 4h 12h 1d
+      --prob-threshold 0.6719
+      --min-proba-diff 0.34
+      --tsl-pct 0.0079
+      --tp-pct 0.0121
+      --trade-size-pct 0.05
+      --leverage 20
+      --partial-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 16
+      --dca-mode
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.5
+
+  # ============================================
+  # KASUSDT - v1.2.kas (NEW!)
+  # ML optimal: prob-threshold 0.5537
+  # ============================================
+  bot-kas:
+    <<: [ *bot-base, *bot-common ]
+    container_name: bot-kas
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=bot-kas
+    env_file:
+      - .env_luk
+    command: >
+      python bot.py
+      --version v1.2.kas
+      --ticker KASUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 2h 4h 12h 1d
+      --prob-threshold 0.5537
+      --min-proba-diff 0.28
+      --tsl-pct 0.0098
+      --tp-pct 0.0150
+      --trade-size-pct 0.05
+      --leverage 20
+      --partial-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 16
+      --dca-mode
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.8
