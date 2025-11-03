@@ -733,18 +733,22 @@ class BybitAdapter:
             else:
                 raise
 
-    def get_open_orders(self, symbol_u: str) -> list:
+    def get_open_orders(self, symbol_u: str = None) -> list:
         """
-        Get all open (unfilled) orders for a symbol.
+        Get all open (unfilled) orders for a symbol, or all symbols if None.
+
+        Args:
+            symbol_u: Trading pair (optional). If None, returns ALL open orders.
 
         Returns:
             List of open orders with orderId, side, price, qty, etc.
         """
         try:
-            resp = self.client.get_open_orders(
-                category=self.category,
-                symbol=symbol_u
-            )
+            params = {"category": self.category}
+            if symbol_u:
+                params["symbol"] = symbol_u
+
+            resp = self.client.get_open_orders(**params)
             if str(resp.get("retCode")) not in ("0",):
                 raise BybitAPIError(f"get_open_orders -> {resp}")
 
@@ -753,6 +757,34 @@ class BybitAdapter:
 
         except Exception as e:
             log.error(f"Error getting open orders: {e}", exc_info=True)
+            return []
+
+    def get_open_orders_by_settle_coin(self, settle_coin: str = "USDT") -> list:
+        """
+        Get all open orders by settlement coin (e.g., USDT for all USDT perpetuals).
+
+        Args:
+            settle_coin: Settlement coin (default: USDT)
+
+        Returns:
+            List of open orders
+        """
+        try:
+            params = {
+                "category": self.category,
+                "settleCoin": settle_coin
+            }
+
+            resp = self.client.get_open_orders(**params)
+            if str(resp.get("retCode")) not in ("0",):
+                raise BybitAPIError(f"get_open_orders_by_settle_coin -> {resp}")
+
+            orders = (resp.get("result") or {}).get("list", [])
+            log.info(f"✓ Retrieved {len(orders)} open orders for settleCoin={settle_coin}")
+            return orders
+
+        except Exception as e:
+            log.error(f"Error getting open orders by settleCoin: {e}", exc_info=True)
             return []
 
     def cancel_order(self, symbol_u: str, order_id: str):
@@ -1442,4 +1474,291 @@ class BybitAdapter:
 
         except Exception as e:
             log.error(f"Error fetching closed P&L history: {e}", exc_info=True)
+            return []
+
+    def get_execution_list(self, symbol: str = None, start_time_ms: int = None, end_time_ms: int = None, limit: int = 100) -> List[Dict]:
+        """
+        Get execution list (trade fills) from Bybit.
+
+        This shows individual fills/executions for orders, including:
+        - Maker vs Taker classification (affects fees)
+        - Actual execution price vs order price (slippage)
+        - Execution fees paid
+        - Fill timestamps
+
+        Args:
+            symbol: Trading pair (e.g., SOLUSDT). If None, gets all symbols.
+            start_time_ms: Start timestamp in milliseconds
+            end_time_ms: End timestamp in milliseconds
+            limit: Max records to return (default 100, max 100)
+
+        Returns:
+            List of execution records
+
+        Example response:
+            {
+                'symbol': 'SOLUSDT',
+                'orderId': '...',
+                'orderLinkId': '...',
+                'side': 'Buy',
+                'orderPrice': '170.50',
+                'orderQty': '1.0',
+                'leavesQty': '0.0',
+                'orderType': 'Market',
+                'stopOrderType': 'UNKNOWN',
+                'execFee': '0.009405',  # Fee paid
+                'execId': '...',
+                'execPrice': '170.55',  # Actual fill price
+                'execQty': '1.0',
+                'execType': 'Trade',
+                'execValue': '170.55',
+                'execTime': '1698765432000',
+                'isMaker': False,  # False = Taker (0.055% fee), True = Maker (0.02% fee)
+                'feeRate': '0.00055',
+                'tradeIv': '',
+                'markIv': '',
+                'markPrice': '170.50',
+                'indexPrice': '170.48',
+                'underlyingPrice': '',
+                'blockTradeId': '',
+                'closedSize': '1.0',
+                'seq': 123456789
+            }
+        """
+        try:
+            params = {
+                "category": self.category,
+                "limit": min(limit, 100)
+            }
+
+            if symbol:
+                params["symbol"] = _norm_symbol(symbol)
+            if start_time_ms:
+                params["startTime"] = int(start_time_ms)
+            if end_time_ms:
+                params["endTime"] = int(end_time_ms)
+
+            log.info(f"📋 Fetching execution list: symbol={symbol}, limit={limit}")
+
+            response = self.client.get_executions(**params)
+
+            if str(response.get("retCode")) != "0":
+                log.error(f"Error response from Bybit: {response.get('retMsg')}")
+                return []
+
+            result = response.get("result", {})
+            executions = result.get("list", [])
+
+            log.info(f"✓ Retrieved {len(executions)} execution records")
+            return executions
+
+        except Exception as e:
+            log.error(f"Error fetching execution list: {e}", exc_info=True)
+            return []
+
+    def get_transaction_log(self, category: str = None, base_coin: str = "USDT", type: str = None,
+                           start_time_ms: int = None, end_time_ms: int = None, limit: int = 50) -> List[Dict]:
+        """
+        Get transaction log (account transactions including funding fees).
+
+        This shows ALL financial transactions on the account:
+        - Trades (buy/sell executions)
+        - Funding fees (periodic fees for holding positions)
+        - Transfers, deposits, withdrawals
+        - Position settlements
+
+        Args:
+            category: Product category (default: None = unified account)
+            base_coin: Base coin (default: USDT)
+            type: Transaction type filter (TRANSFER_IN, TRANSFER_OUT, TRADE, SETTLEMENT, DELIVERY, LIQUIDATION, BONUS, FEE_REFUND, INTEREST, CURRENCY_BUY, CURRENCY_SELL)
+            start_time_ms: Start timestamp in milliseconds
+            end_time_ms: End timestamp in milliseconds
+            limit: Max records (default 50, max 50 per request)
+
+        Returns:
+            List of transaction records
+
+        Example response:
+            {
+                'symbol': 'SOLUSDT',
+                'category': 'linear',
+                'side': 'Buy',
+                'transactionTime': '1698765432000',
+                'type': 'TRADE',  # or 'FUNDING_FEE', 'SETTLEMENT', etc.
+                'qty': '1.0',
+                'size': '1.0',
+                'currency': 'USDT',
+                'tradePrice': '170.50',
+                'funding': '-0.0051',  # Funding fee paid (negative = paid, positive = received)
+                'fee': '-0.009405',  # Trading fee
+                'cashFlow': '-170.509405',  # Net cash change
+                'change': '-170.509405',
+                'cashBalance': '829.49',  # Balance after transaction
+                'feeRate': '0.00055',
+                'bonusChange': '0',
+                'tradeId': '...',
+                'orderId': '...',
+                'orderLinkId': ''
+            }
+        """
+        try:
+            params = {
+                "accountType": "UNIFIED",
+                "limit": min(limit, 50)
+            }
+
+            if category:
+                params["category"] = category
+            if base_coin:
+                params["baseCoin"] = base_coin
+            if type:
+                params["type"] = type
+            if start_time_ms:
+                params["startTime"] = int(start_time_ms)
+            if end_time_ms:
+                params["endTime"] = int(end_time_ms)
+
+            log.info(f"💰 Fetching transaction log: baseCoin={base_coin}, type={type}, limit={limit}")
+
+            response = self.client.get_transaction_log(**params)
+
+            if str(response.get("retCode")) != "0":
+                log.error(f"Error response from Bybit: {response.get('retMsg')}")
+                return []
+
+            result = response.get("result", {})
+            transactions = result.get("list", [])
+
+            log.info(f"✓ Retrieved {len(transactions)} transaction records")
+            return transactions
+
+        except Exception as e:
+            log.error(f"Error fetching transaction log: {e}", exc_info=True)
+            return []
+
+    def get_order_history(self, symbol: str = None, order_status: str = None,
+                          start_time_ms: int = None, end_time_ms: int = None, limit: int = 50) -> List[Dict]:
+        """
+        Get order history (all orders including cancelled, rejected, filled).
+
+        Args:
+            symbol: Trading pair (e.g., SOLUSDT). If None, gets all symbols.
+            order_status: Order status filter (New, PartiallyFilled, Filled, Cancelled, Rejected, PartiallyFilledCanceled)
+            start_time_ms: Start timestamp in milliseconds
+            end_time_ms: End timestamp in milliseconds
+            limit: Max records (default 50, max 50)
+
+        Returns:
+            List of order records
+
+        Example response:
+            {
+                'orderId': '...',
+                'orderLinkId': '...',
+                'blockTradeId': '',
+                'symbol': 'SOLUSDT',
+                'price': '170.50',
+                'qty': '1.0',
+                'side': 'Buy',
+                'isLeverage': '0',
+                'positionIdx': 0,
+                'orderStatus': 'Filled',
+                'cancelType': 'UNKNOWN',
+                'rejectReason': 'EC_NoError',
+                'avgPrice': '170.55',
+                'leavesQty': '0.0',
+                'leavesValue': '0',
+                'cumExecQty': '1.0',
+                'cumExecValue': '170.55',
+                'cumExecFee': '0.009405',
+                'timeInForce': 'GTC',
+                'orderType': 'Market',
+                'stopOrderType': 'UNKNOWN',
+                'orderIv': '',
+                'triggerPrice': '0.00',
+                'takeProfit': '175.00',  # TP price
+                'stopLoss': '165.00',  # SL price
+                'tpTriggerBy': 'LastPrice',
+                'slTriggerBy': 'LastPrice',
+                'triggerDirection': 0,
+                'triggerBy': 'UNKNOWN',
+                'lastPriceOnCreated': '170.50',
+                'reduceOnly': False,
+                'closeOnTrigger': False,
+                'smpType': 'None',
+                'smpGroup': 0,
+                'smpOrderId': '',
+                'tpslMode': 'Full',
+                'tpLimitPrice': '0.00',
+                'slLimitPrice': '0.00',
+                'placeType': '',
+                'createdTime': '1698765430000',
+                'updatedTime': '1698765432000'
+            }
+        """
+        try:
+            params = {
+                "category": self.category,
+                "limit": min(limit, 50)
+            }
+
+            if symbol:
+                params["symbol"] = _norm_symbol(symbol)
+            if order_status:
+                params["orderStatus"] = order_status
+            if start_time_ms:
+                params["startTime"] = int(start_time_ms)
+            if end_time_ms:
+                params["endTime"] = int(end_time_ms)
+
+            log.info(f"📝 Fetching order history: symbol={symbol}, status={order_status}, limit={limit}")
+
+            response = self.client.get_order_history(**params)
+
+            if str(response.get("retCode")) != "0":
+                log.error(f"Error response from Bybit: {response.get('retMsg')}")
+                return []
+
+            result = response.get("result", {})
+            orders = result.get("list", [])
+
+            log.info(f"✓ Retrieved {len(orders)} order records")
+            return orders
+
+        except Exception as e:
+            log.error(f"Error fetching order history: {e}", exc_info=True)
+            return []
+
+    def get_all_positions(self) -> List[Dict]:
+        """
+        Get all active positions across all symbols.
+
+        Returns:
+            List of position dictionaries
+        """
+        try:
+            params = {
+                "category": self.category,
+                "settleCoin": "USDT"
+            }
+
+            log.info("📊 Fetching all positions...")
+
+            response = self.client.get_positions(**params)
+
+            if str(response.get("retCode")) != "0":
+                log.error(f"Error response from Bybit: {response.get('retMsg')}")
+                return []
+
+            result = response.get("result", {})
+            positions = result.get("list", [])
+
+            # Filter only positions with size > 0
+            active_positions = [p for p in positions if float(p.get('size', 0)) > 0]
+
+            log.info(f"✓ Retrieved {len(active_positions)} active positions (out of {len(positions)} total)")
+            return active_positions
+
+        except Exception as e:
+            log.error(f"Error fetching positions: {e}", exc_info=True)
             return []

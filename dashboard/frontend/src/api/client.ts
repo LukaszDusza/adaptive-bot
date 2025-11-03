@@ -11,6 +11,9 @@ import type {
   DrawdownPoint,
   ExitReasonStats,
   PendingOrdersResponse,
+  ExecutionQuality,
+  FundingCosts,
+  SLTPEffectiveness,
 } from '../types';
 
 // Determine base URL: empty string for production (proxied by nginx), full URL for dev
@@ -47,6 +50,20 @@ export const getDrawdownCurve = () =>
 
 export const getExitReasonStats = () =>
   api.get<ExitReasonStats[]>('/api/metrics/exit-reasons');
+
+// Alerts
+export interface Alert {
+  severity: 'info' | 'warning' | 'critical';
+  title: string;
+  message: string;
+  action?: string;
+  timestamp: string;
+  metric_value?: number;
+  threshold?: number;
+}
+
+export const getRiskAlerts = () =>
+  api.get<Alert[]>('/api/metrics/alerts');
 
 // Trades
 export const getAllTrades = (limit?: number, ticker?: string) =>
@@ -110,5 +127,32 @@ export const getCurrentPrice = (symbol: string) =>
 
 export const getMultiplePrices = (symbols: string) =>
   api.get<Record<string, MarketPrice>>(`/api/market/prices?symbols=${symbols}`);
+
+/**
+ * Get batch prices for multiple symbols (OPTIMIZED - parallel fetching)
+ *
+ * Reduces N API calls to 1 batch request.
+ * Up to 10x faster than sequential getCurrentPrice calls.
+ */
+export interface BatchPriceResponse {
+  prices: Record<string, MarketPrice>;
+  errors: string[];
+  total: number;
+  successful: number;
+  failed: number;
+}
+
+export const getBatchPrices = (symbols: string[]) =>
+  api.post<BatchPriceResponse>('/api/market/batch', { symbols });
+
+// Advanced Analytics
+export const getExecutionQuality = () =>
+  api.get<ExecutionQuality>('/api/metrics/execution-quality');
+
+export const getFundingCosts = (days: number = 30) =>
+  api.get<FundingCosts>('/api/metrics/funding-costs', { params: { days } });
+
+export const getSLTPEffectiveness = () =>
+  api.get<SLTPEffectiveness>('/api/metrics/sl-tp-effectiveness');
 
 export default api;

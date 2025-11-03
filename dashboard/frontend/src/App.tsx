@@ -1,10 +1,14 @@
 /**
  * Main Dashboard Application
  */
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { DashboardLayout } from './components/layout/DashboardLayout';
+import { useMetrics } from './hooks/useMetrics';
 import { MetricsCards } from './components/metrics/MetricsCards';
 import { QuickStats } from './components/metrics/QuickStats';
+import { ExecutionQualityCard } from './components/metrics/ExecutionQualityCard';
+import { FundingCostsCard } from './components/metrics/FundingCostsCard';
+import { SLTPEffectivenessCard } from './components/metrics/SLTPEffectivenessCard';
 import { DockerPanel } from './components/controls/DockerPanel';
 import { EquityCurveChart } from './components/charts/EquityCurveChart';
 import { DrawdownChart } from './components/charts/DrawdownChart';
@@ -13,6 +17,7 @@ import { RecentTradesTable } from './components/tables/RecentTradesTable';
 import { EmergencyCloseModal } from './components/controls/EmergencyCloseModal';
 import { PauseResumeToggle } from './components/controls/PauseResumeToggle';
 import { PendingOrdersPanel } from './components/controls/PendingOrdersPanel';
+import { AlertBanner } from './components/alerts/AlertBanner';
 import { useDashboardStore } from './store/dashboardStore';
 import { useWebSocket } from './hooks/useWebSocket';
 import { AlertTriangle, Shield } from 'lucide-react';
@@ -26,7 +31,10 @@ import {
   getEquityCurve,
   getDrawdownCurve,
   getExitReasonStats,
-  getCurrentPrice,
+  getBatchPrices,
+  getExecutionQuality,
+  getFundingCosts,
+  getSLTPEffectiveness,
   type MarketPrice,
 } from './api/client';
 
@@ -40,6 +48,9 @@ function App() {
     equityCurve,
     drawdownCurve,
     exitReasonStats,
+    executionQuality,
+    fundingCosts,
+    sltpEffectiveness,
     loading,
     error,
     setMetrics,
@@ -50,6 +61,9 @@ function App() {
     setEquityCurve,
     setDrawdownCurve,
     setExitReasonStats,
+    setExecutionQuality,
+    setFundingCosts,
+    setSLTPEffectiveness,
     setLoading,
     setError,
   } = useDashboardStore();
@@ -66,12 +80,15 @@ function App() {
   // PnL history for mini chart (last 50 points)
   const [pnlHistory, setPnlHistory] = useState<Record<string, Array<{time: string, pnl: number}>>>({});
 
-  // Scroll to active trades
-  const scrollToActiveTrades = () => {
+  // Memoized metrics calculations (performance optimization)
+  const { todayPnL, weeklyPnL } = useMetrics(trades);
+
+  // Scroll to active trades (memoized callback)
+  const scrollToActiveTrades = useCallback(() => {
     if (activeTradesRef.current) {
       activeTradesRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
-  };
+  }, []);
 
   // Connect to WebSocket
   useWebSocket();
@@ -91,6 +108,9 @@ function App() {
         equityCurveRes,
         drawdownCurveRes,
         exitReasonStatsRes,
+        executionQualityRes,
+        fundingCostsRes,
+        sltpEffectivenessRes,
       ] = await Promise.all([
         getOverallMetrics(),
         getTickerMetrics(),
@@ -100,6 +120,9 @@ function App() {
         getEquityCurve(),
         getDrawdownCurve(),
         getExitReasonStats(),
+        getExecutionQuality(),
+        getFundingCosts(30),
+        getSLTPEffectiveness(),
       ]);
 
       setMetrics(metricsRes.data);
@@ -110,6 +133,9 @@ function App() {
       setEquityCurve(equityCurveRes.data);
       setDrawdownCurve(drawdownCurveRes.data);
       setExitReasonStats(exitReasonStatsRes.data);
+      setExecutionQuality(executionQualityRes.data);
+      setFundingCosts(fundingCostsRes.data);
+      setSLTPEffectiveness(sltpEffectivenessRes.data);
     } catch (err: any) {
       console.error('Failed to fetch dashboard data:', err);
       setError(err.message || 'Failed to load dashboard data');
@@ -126,62 +152,57 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Fetch current prices for active positions
+  // Fetch current prices for active positions (OPTIMIZED: batch request)
   useEffect(() => {
     const fetchPrices = async () => {
       if (activeTrades.length === 0) return;
 
-      const pricePromises = activeTrades.map(async (trade) => {
-        try {
-          const res = await getCurrentPrice(trade.ticker);
-          return { ticker: trade.ticker, price: res.data, trade };
-        } catch (err) {
-          console.error(`Failed to fetch price for ${trade.ticker}:`, err);
-          return null;
-        }
-      });
+      try {
+        // Extract unique tickers
+        const uniqueTickers = [...new Set(activeTrades.map(t => t.ticker))];
 
-      const prices = await Promise.all(pricePromises);
-      const priceMap: Record<string, MarketPrice> = {};
+        // Batch request - 1 API call instead of N
+        const res = await getBatchPrices(uniqueTickers);
+        const priceMap: Record<string, MarketPrice> = res.data.prices;
 
-      // Update PnL history using functional update to avoid dependency issues
-      setPnlHistory((prevHistory) => {
-        const newPnlHistory = { ...prevHistory };
+        // Update PnL history using functional update to avoid dependency issues
+        setPnlHistory((prevHistory) => {
+          const newPnlHistory = { ...prevHistory };
 
-        prices.forEach((p) => {
-          if (p && p.trade.entry_price && p.trade.quantity) {
-            // Calculate PnL
-            let pnl = 0;
-            if (p.trade.side === 'Long') {
-              pnl = (p.price.last_price - p.trade.entry_price) * p.trade.quantity;
-            } else {
-              pnl = (p.trade.entry_price - p.price.last_price) * p.trade.quantity;
-            }
-
-            // Add to history (keep last 50 points)
-            const tradeKey = p.trade.trade_id;
-            if (!newPnlHistory[tradeKey]) {
-              newPnlHistory[tradeKey] = [];
-            }
-
-            newPnlHistory[tradeKey] = [
-              ...newPnlHistory[tradeKey],
-              {
-                time: new Date().toLocaleTimeString(),
-                pnl: pnl
+          activeTrades.forEach((trade) => {
+            const price = priceMap[trade.ticker];
+            if (price && trade.entry_price && trade.quantity) {
+              // Calculate PnL
+              let pnl = 0;
+              if (trade.side === 'Long') {
+                pnl = (price.last_price - trade.entry_price) * trade.quantity;
+              } else {
+                pnl = (trade.entry_price - price.last_price) * trade.quantity;
               }
-            ].slice(-50); // Keep only last 50 points
-          }
+
+              // Add to history (keep last 50 points)
+              const tradeKey = trade.trade_id;
+              if (!newPnlHistory[tradeKey]) {
+                newPnlHistory[tradeKey] = [];
+              }
+
+              newPnlHistory[tradeKey] = [
+                ...newPnlHistory[tradeKey],
+                {
+                  time: new Date().toLocaleTimeString(),
+                  pnl: pnl
+                }
+              ].slice(-50); // Keep only last 50 points
+            }
+          });
+
+          return newPnlHistory;
         });
 
-        return newPnlHistory;
-      });
-
-      prices.forEach((p) => {
-        if (p) priceMap[p.ticker] = p.price;
-      });
-
-      setMarketPrices(priceMap);
+        setMarketPrices(priceMap);
+      } catch (err: any) {
+        console.error('Failed to fetch batch prices:', err);
+      }
     };
 
     fetchPrices();
@@ -219,6 +240,9 @@ function App() {
   return (
     <DashboardLayout>
       <div className="space-y-8">
+        {/* Risk Alerts Banner */}
+        <AlertBanner />
+
         {/* Header with Controls */}
         <div className="flex items-center justify-between">
           <div>
@@ -248,42 +272,26 @@ function App() {
           </div>
         </div>
 
-        {/* Quick Stats Bar */}
+        {/* Quick Stats Bar (OPTIMIZED - memoized calculations) */}
         {metrics && (
           <QuickStats
             totalTrades={metrics.total_trades}
             activeTrades={metrics.active_trades}
-            todayPnL={(() => {
-              const today = new Date();
-              today.setHours(0, 0, 0, 0);
-              const todayTrades = trades.filter(t => t.end_time && new Date(t.end_time) >= today);
-              const pnl = todayTrades.reduce((sum, t) => sum + (t.summary?.pnl || 0), 0);
-              console.log('📊 Today PnL calculation:', {
-                totalTrades: trades.length,
-                todayTrades: todayTrades.length,
-                todayPnL: pnl,
-                trades: todayTrades.map(t => ({ ticker: t.ticker, pnl: t.summary?.pnl }))
-              });
-              return pnl;
-            })()}
-            weeklyPnL={(() => {
-              const weekAgo = new Date();
-              weekAgo.setDate(weekAgo.getDate() - 7);
-              const weekTrades = trades.filter(t => t.end_time && new Date(t.end_time) >= weekAgo);
-              const pnl = weekTrades.reduce((sum, t) => sum + (t.summary?.pnl || 0), 0);
-              console.log('📊 Weekly PnL calculation:', {
-                totalTrades: trades.length,
-                weekTrades: weekTrades.length,
-                weeklyPnL: pnl
-              });
-              return pnl;
-            })()}
+            todayPnL={todayPnL}
+            weeklyPnL={weeklyPnL}
             onActiveClick={scrollToActiveTrades}
           />
         )}
 
         {/* Main Metrics */}
         {metrics && <MetricsCards metrics={metrics} />}
+
+        {/* Advanced Analytics */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <ExecutionQualityCard data={executionQuality} loading={loading} />
+          <FundingCostsCard data={fundingCosts} loading={loading} />
+          <SLTPEffectivenessCard data={sltpEffectiveness} loading={loading} />
+        </div>
 
         {/* Pending Orders Panel */}
         <PendingOrdersPanel autoRefresh={true} refreshInterval={10000} />
@@ -294,10 +302,6 @@ function App() {
             <h2 className="text-xl font-bold mb-4">Active Positions ({activeTrades.length})</h2>
             <div className="space-y-2">
               {activeTrades.map((trade) => {
-                // Parse notes to get partial_tp_taken and dca_fills
-                const notesMatch = trade.notes?.match(/DCA fills: (\d+)/);
-                const dcaFills = notesMatch ? parseInt(notesMatch[1]) : 0;
-
                 // Parse partial_tp_taken - check for "partial_tp_taken=True" or events data
                 const partialTpMatch = trade.notes?.match(/partial_tp_taken=(True|False)/);
                 const partialTpTaken = partialTpMatch ? partialTpMatch[1] === 'True' :
@@ -306,23 +310,13 @@ function App() {
                 // Parse dynamic_tp_levels_taken from events data
                 const dynamicTpLevels = trade.events?.[0]?.data?.dynamic_tp_levels_taken ?? 0;
 
-                // Calculate unrealized PnL if we have current price
+                // Get current price for display
                 const currentPrice = marketPrices[trade.ticker]?.last_price;
-                let unrealizedPnL: number | null = null;
-                let pnlPercentage: number | null = null;
 
-                if (currentPrice && trade.entry_price && trade.quantity) {
-                  // Handle both "LONG"/"SHORT" (from API) and "Long"/"Short" (legacy)
-                  const sideUpper = trade.side.toUpperCase();
-
-                  if (sideUpper === 'LONG') {
-                    unrealizedPnL = (currentPrice - trade.entry_price) * trade.quantity;
-                  } else {
-                    // SHORT
-                    unrealizedPnL = (trade.entry_price - currentPrice) * trade.quantity;
-                  }
-                  pnlPercentage = (unrealizedPnL / (trade.entry_price * trade.quantity)) * 100;
-                }
+                // Use PnL from backend (already calculated from Bybit API)
+                // This is the REAL unrealized PnL from the exchange
+                const unrealizedPnL = trade.summary?.pnl ?? null;
+                const pnlPercentage = trade.summary?.pnl_percent ?? null;
 
                 // Check if position is secured (SL at breakeven)
                 const isSecured = trade.current_sl && trade.entry_price &&
@@ -389,17 +383,7 @@ function App() {
                       {/* Limit Orders */}
                       <div className="p-3 bg-dark-card rounded border border-dark-border">
                         <div className="text-xs font-semibold text-dark-text-secondary mb-2">LIMIT ORDERS STATUS</div>
-                        <div className="grid grid-cols-3 gap-2 text-sm">
-                          <div>
-                            <div className="text-dark-text-secondary text-xs">DCA Limits</div>
-                            <div className="font-mono font-bold text-xs">
-                              {dcaFills > 0 ? (
-                                <span className="text-blue-400">{dcaFills} filled</span>
-                              ) : (
-                                <span className="text-gray-500">0 filled</span>
-                              )}
-                            </div>
-                          </div>
+                        <div className="grid grid-cols-2 gap-2 text-sm">
                           <div>
                             <div className="text-dark-text-secondary text-xs">Partial TP</div>
                             <div className="font-mono font-bold text-xs">
@@ -455,9 +439,6 @@ function App() {
                           <Shield size={12} />
                           Secured
                         </span>
-                      )}
-                      {dcaFills > 0 && (
-                        <span className="badge badge-info">DCA: {dcaFills}</span>
                       )}
                       {partialTpTaken && (
                         <span className="badge badge-success">Partial TP ✓</span>

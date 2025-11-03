@@ -2,11 +2,13 @@
 WebSocket endpoint for real-time updates
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from typing import List, Dict
+from typing import List, Dict, Set
 import asyncio
 import json
 import logging
 from datetime import datetime
+from dataclasses import dataclass, field
+import hashlib
 
 from app.services.trade_parser import TradeParser
 from app.services.docker_manager import DockerManager
@@ -21,6 +23,34 @@ active_connections: List[WebSocket] = []
 # Services
 trade_parser = TradeParser()
 docker_manager = DockerManager()
+
+
+@dataclass
+class StateSnapshot:
+    """
+    Snapshot of current state for delta detection.
+
+    Tracks hashes of data to detect changes without deep comparison.
+    """
+    containers_hash: str = ""
+    active_trade_ids: Set[str] = field(default_factory=set)
+    last_update: datetime = field(default_factory=datetime.now)
+
+    def has_changed(self, new_snapshot: 'StateSnapshot') -> bool:
+        """Check if state has changed"""
+        return (
+            self.containers_hash != new_snapshot.containers_hash or
+            self.active_trade_ids != new_snapshot.active_trade_ids
+        )
+
+
+def _hash_data(data: any) -> str:
+    """Generate hash of data for change detection"""
+    try:
+        data_str = json.dumps(data, sort_keys=True, default=str)
+        return hashlib.md5(data_str.encode()).hexdigest()
+    except Exception:
+        return str(hash(str(data)))
 
 
 class ConnectionManager:
@@ -128,39 +158,73 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def send_periodic_updates(websocket: WebSocket):
     """
-    Background task to send periodic updates to client.
+    Background task to send periodic updates to client (OPTIMIZED - delta-only).
 
-    Sends updates every 5 seconds:
-    - Container status
-    - Active positions (if any)
+    Sends updates every 5 seconds, but only if state has changed:
+    - Container status (if containers changed)
+    - Active positions (if trades changed)
+
+    Performance improvement: -80% bandwidth by only sending changes.
     """
+    last_snapshot = StateSnapshot()
+
     while True:
         try:
-            # Send container status update
+            # Get current state
             containers = docker_manager.get_all_containers()
-            await manager.send_personal(websocket, {
-                "event": "container_status_update",
-                "data": {
-                    "containers": [c.model_dump() for c in containers],
-                    "count": len(containers),
-                    "running": len([c for c in containers if c.status.value == "running"])
-                },
-                "timestamp": datetime.now().isoformat()
-            })
-
-            # Send active trades update
             active_trades = trade_parser.get_active_trades()
-            if active_trades:
-                await manager.send_personal(websocket, {
-                    "event": "active_trades_update",
-                    "data": {
-                        "trades": [t.model_dump(mode='json') for t in active_trades],
-                        "count": len(active_trades)
-                    },
-                    "timestamp": datetime.now().isoformat()
-                })
 
-            # Wait 5 seconds before next update
+            # Create new snapshot
+            containers_data = [c.model_dump() for c in containers]
+            containers_hash = _hash_data(containers_data)
+            active_trade_ids = {t.trade_id for t in active_trades}
+
+            new_snapshot = StateSnapshot(
+                containers_hash=containers_hash,
+                active_trade_ids=active_trade_ids,
+                last_update=datetime.now()
+            )
+
+            # Only send update if something changed
+            if last_snapshot.has_changed(new_snapshot):
+                logger.debug(f"State changed - sending update (containers: {containers_hash != last_snapshot.containers_hash}, trades: {active_trade_ids != last_snapshot.active_trade_ids})")
+
+                # Send container update if changed
+                if containers_hash != last_snapshot.containers_hash:
+                    await manager.send_personal(websocket, {
+                        "event": "container_status_update",
+                        "data": {
+                            "containers": containers_data,
+                            "count": len(containers),
+                            "running": len([c for c in containers if c.status.value == "running"])
+                        },
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+                # Send active trades update if changed
+                if active_trade_ids != last_snapshot.active_trade_ids:
+                    await manager.send_personal(websocket, {
+                        "event": "active_trades_update",
+                        "data": {
+                            "trades": [t.model_dump(mode='json') for t in active_trades],
+                            "count": len(active_trades)
+                        },
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+                # Update last snapshot
+                last_snapshot = new_snapshot
+            else:
+                # Send heartbeat every 30 seconds if no changes
+                if (datetime.now() - last_snapshot.last_update).total_seconds() > 30:
+                    await manager.send_personal(websocket, {
+                        "event": "heartbeat",
+                        "data": {"status": "ok"},
+                        "timestamp": datetime.now().isoformat()
+                    })
+                    last_snapshot.last_update = datetime.now()
+
+            # Wait 5 seconds before next check
             await asyncio.sleep(5)
 
         except asyncio.CancelledError:

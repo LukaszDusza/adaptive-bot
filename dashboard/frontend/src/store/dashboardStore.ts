@@ -10,6 +10,9 @@ import type {
   EquityCurvePoint,
   DrawdownPoint,
   ExitReasonStats,
+  ExecutionQuality,
+  FundingCosts,
+  SLTPEffectiveness,
 } from '../types';
 
 interface DashboardState {
@@ -22,6 +25,11 @@ interface DashboardState {
   equityCurve: EquityCurvePoint[];
   drawdownCurve: DrawdownPoint[];
   exitReasonStats: ExitReasonStats[];
+
+  // Advanced Analytics
+  executionQuality: ExecutionQuality | null;
+  fundingCosts: FundingCosts | null;
+  sltpEffectiveness: SLTPEffectiveness | null;
 
   // UI State
   loading: boolean;
@@ -37,6 +45,9 @@ interface DashboardState {
   setEquityCurve: (curve: EquityCurvePoint[]) => void;
   setDrawdownCurve: (curve: DrawdownPoint[]) => void;
   setExitReasonStats: (stats: ExitReasonStats[]) => void;
+  setExecutionQuality: (data: ExecutionQuality) => void;
+  setFundingCosts: (data: FundingCosts) => void;
+  setSLTPEffectiveness: (data: SLTPEffectiveness) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   setSelectedTicker: (ticker: string | null) => void;
@@ -52,6 +63,9 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   equityCurve: [],
   drawdownCurve: [],
   exitReasonStats: [],
+  executionQuality: null,
+  fundingCosts: null,
+  sltpEffectiveness: null,
   loading: false,
   error: null,
   selectedTicker: null,
@@ -65,6 +79,9 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   setEquityCurve: (equityCurve) => set({ equityCurve }),
   setDrawdownCurve: (drawdownCurve) => set({ drawdownCurve }),
   setExitReasonStats: (exitReasonStats) => set({ exitReasonStats }),
+  setExecutionQuality: (executionQuality) => set({ executionQuality }),
+  setFundingCosts: (fundingCosts) => set({ fundingCosts }),
+  setSLTPEffectiveness: (sltpEffectiveness) => set({ sltpEffectiveness }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   setSelectedTicker: (selectedTicker) => set({ selectedTicker }),

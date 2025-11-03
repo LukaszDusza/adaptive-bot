@@ -10,7 +10,7 @@ import logging
 
 from app.models import (
     Trade, MetricsResponse, TickerMetrics, EquityCurvePoint,
-    ExitReasonStats, DrawdownPoint, TradeDurationBin
+    ExitReasonStats, DrawdownPoint, TradeDurationBin, FeeAnalysis, StrategyComparison
 )
 
 logger = logging.getLogger(__name__)
@@ -304,6 +304,105 @@ class AnalyticsService:
         max_dd_pct = (max_dd / peak_value * 100) if peak_value > 0 else 0.0
 
         return float(max_dd), float(max_dd_pct)
+
+    def calculate_fee_analysis(self, trades: List[Trade]) -> FeeAnalysis:
+        """
+        Calculate fee impact analysis.
+
+        Shows how much of the profit is consumed by trading fees.
+
+        Returns:
+            FeeAnalysis with fee breakdown and impact
+        """
+        completed_trades = [t for t in trades if t.summary]
+
+        if not completed_trades:
+            return FeeAnalysis(
+                total_fees=0.0,
+                fee_impact_pct=0.0,
+                fees_by_ticker={},
+                avg_fee_per_trade=0.0,
+                gross_pnl=0.0,
+                net_pnl=0.0,
+                total_trades=0
+            )
+
+        # Calculate totals
+        total_fees = sum(t.summary.fees_paid for t in completed_trades)
+        net_pnl = sum(t.summary.pnl for t in completed_trades)
+        gross_pnl = net_pnl + total_fees  # Add fees back to get gross
+
+        # Fee impact as percentage of gross profit
+        if gross_pnl > 0:
+            fee_impact_pct = (total_fees / gross_pnl) * 100
+        else:
+            fee_impact_pct = 0.0
+
+        # Fees by ticker
+        fees_by_ticker = defaultdict(float)
+        for trade in completed_trades:
+            fees_by_ticker[trade.ticker] += trade.summary.fees_paid
+
+        # Average fee per trade
+        avg_fee_per_trade = total_fees / len(completed_trades)
+
+        return FeeAnalysis(
+            total_fees=total_fees,
+            fee_impact_pct=fee_impact_pct,
+            fees_by_ticker=dict(fees_by_ticker),
+            avg_fee_per_trade=avg_fee_per_trade,
+            gross_pnl=gross_pnl,
+            net_pnl=net_pnl,
+            total_trades=len(completed_trades)
+        )
+
+    def compare_strategies(self, trades: List[Trade], group_by: str = 'side') -> List[StrategyComparison]:
+        """
+        Compare strategies grouped by side, ticker, or other criteria.
+
+        Args:
+            trades: List of trades
+            group_by: 'side', 'ticker', or other grouping field
+
+        Returns:
+            List of StrategyComparison sorted by Sharpe ratio (best first)
+        """
+        completed_trades = [t for t in trades if t.summary]
+
+        # Group trades
+        groups = defaultdict(list)
+        for trade in completed_trades:
+            if group_by == 'side':
+                key = trade.side.value
+            elif group_by == 'ticker':
+                key = trade.ticker
+            else:
+                key = str(getattr(trade, group_by, 'Unknown'))
+
+            groups[key].append(trade)
+
+        # Calculate metrics for each group
+        comparisons = []
+        for strategy_name, strategy_trades in groups.items():
+            metrics = self.calculate_overall_metrics(strategy_trades)
+
+            comparisons.append(StrategyComparison(
+                name=strategy_name,
+                total_pnl=metrics.total_pnl,
+                win_rate=metrics.win_rate,
+                total_trades=metrics.total_trades,
+                sharpe_ratio=metrics.sharpe_ratio,
+                max_drawdown_percent=metrics.max_drawdown_percent,
+                profit_factor=metrics.profit_factor,
+                avg_trade_duration_hours=metrics.avg_trade_duration_hours
+            ))
+
+        # Sort by Sharpe ratio (risk-adjusted returns)
+        return sorted(
+            comparisons,
+            key=lambda x: x.sharpe_ratio if x.sharpe_ratio is not None else -999,
+            reverse=True
+        )
 
     def _empty_metrics(self, active_trades: int = 0) -> MetricsResponse:
         """Return empty metrics response"""

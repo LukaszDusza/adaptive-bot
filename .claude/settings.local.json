@@ -84,7 +84,8 @@
       "Bash(./check_models.sh:*)",
       "Bash(./clean_git_cache.sh)",
       "Bash(git add:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(docker system prune:*)"
     ],
     "deny": [],
     "ask": []

@@ -55,12 +55,77 @@ async def get_all_trades(
 @router.get("/active", response_model=List[Trade])
 async def get_active_trades():
     """
-    Get all currently active trades (positions).
+    Get all currently active trades (positions) LIVE from BYBIT API.
 
-    Returns only trades that are still open (no end_time).
+    SOURCE OF TRUTH: Real-time data from Bybit exchange.
+    Returns actual open positions with current prices and PnL.
     """
-    active_trades = trade_parser.get_active_trades()
-    return active_trades
+    if not bybit_service or not bybit_service.is_available():
+        logger.warning("⚠️  Bybit service not available - falling back to local state files")
+        return trade_parser.get_active_trades()
+
+    try:
+        # Get LIVE positions from Bybit API
+        positions = bybit_service.get_active_positions_from_bybit()
+
+        if not positions:
+            logger.info("No active positions found on Bybit")
+            return []
+
+        # Convert Bybit position format to Trade format
+        trades = []
+        for pos in positions:
+            # Calculate current PnL
+            entry_price = pos.get('entry_price', 0)
+            quantity = pos.get('quantity', 0)
+            unrealized_pnl = pos.get('unrealized_pnl', 0)
+
+            # Calculate PnL percentage
+            pnl_percent = 0.0
+            if entry_price > 0 and quantity > 0:
+                position_value = entry_price * quantity
+                pnl_percent = (unrealized_pnl / position_value) * 100
+
+            # Map side: 'Buy' -> 'Long', 'Sell' -> 'Short'
+            side = 'Long' if pos.get('side') == 'Buy' else 'Short'
+
+            trade = Trade(
+                trade_id=f"{pos.get('ticker')}_{pos.get('side')}",
+                ticker=pos.get('ticker', ''),
+                side=TradeSide(side),
+                start_time=pos.get('created_time', datetime.now().isoformat()),
+                end_time=None,
+                entry_price=entry_price,
+                exit_price=None,
+                quantity=quantity,
+                leverage=pos.get('leverage', 1),
+                initial_sl=pos.get('stop_loss'),
+                initial_tp=pos.get('take_profit'),
+                current_sl=pos.get('stop_loss'),
+                current_tp=pos.get('take_profit'),
+                summary={
+                    'pnl': unrealized_pnl,
+                    'pnl_percent': pnl_percent,
+                    'exit_reason': '',
+                    'duration_seconds': 0,
+                    'max_favorable_excursion': None,
+                    'max_adverse_excursion': None,
+                    'fees_paid': 0
+                },
+                events=[],
+                indicators=None,
+                is_active=True,
+                notes=f"LIVE from Bybit | Created: {pos.get('created_time', 'N/A')}"
+            )
+            trades.append(trade)
+
+        logger.info(f"✓ Retrieved {len(trades)} LIVE positions from Bybit")
+        return trades
+
+    except Exception as e:
+        logger.error(f"Failed to get active positions from Bybit: {e}")
+        logger.warning("Falling back to local state files")
+        return trade_parser.get_active_trades()
 
 
 @router.get("/pending-orders", response_model=PendingOrdersResponse)
@@ -94,76 +159,78 @@ async def get_pending_orders(tickers: Optional[str] = Query(None, description="C
     if tickers:
         ticker_list = [t.strip().upper() for t in tickers.split(",")]
     else:
-        # Get tickers from:
-        # 1. Active trades (actual positions)
-        # 2. All bot_state files (bots monitoring tickers, even without active positions)
-        active_trades = trade_parser.get_active_trades()
-        ticker_set = set([trade.ticker for trade in active_trades])
-
-        # Also include tickers from all state files (even those without active positions)
-        # This ensures we show pending orders for tickers being monitored by bots
-        import re
-        from pathlib import Path
-        state_dir = Path(settings.BOT_STATE_DIR)
-        if state_dir.exists():
-            for state_file in state_dir.glob("*_state.json"):
-                # Extract ticker from filename: TICKER_15m_plus_..._state.json
-                match = re.match(r'(.+?)_\d+[mhd]_plus_', state_file.stem)
-                if match:
-                    ticker_set.add(match.group(1))
-
-        ticker_list = list(ticker_set)
-
-        if not ticker_list:
-            # No tickers to monitor, return empty response
-            return PendingOrdersResponse(
-                orders=[],
-                total_count=0,
-                by_ticker={},
-                last_updated=datetime.now()
-            )
-
-    logger.info(f"Fetching pending orders for tickers: {ticker_list}")
+        # Get ALL open orders from Bybit (no ticker filter)
+        # This will show ALL pending orders including HBAR and any other ticker
+        logger.info("No tickers specified - fetching ALL open orders from Bybit")
+        ticker_list = None  # None = fetch all open orders
 
     all_orders = []
     by_ticker = {}
 
-    # Get active positions to filter out orphaned conditional orders
+    # Get active positions from Bybit to filter out orphaned conditional orders
     # Orphaned orders = Untriggered SL/TP orders left after position closed
-    active_positions_tickers = set()
+    # Map: ticker -> side (e.g., {'SOLUSDT': 'Buy', 'ETHUSDT': 'Sell'})
+    active_positions_map = {}
     try:
-        active_trades = trade_parser.get_active_trades()
-        active_positions_tickers = {trade.ticker for trade in active_trades}
-        logger.info(f"Active position tickers: {active_positions_tickers}")
+        active_positions = bybit_service.get_active_positions_from_bybit()
+        active_positions_map = {pos.get('ticker'): pos.get('side') for pos in active_positions}
+        logger.info(f"Active positions from Bybit: {active_positions_map}")
     except Exception as e:
-        logger.warning(f"Failed to get active trades for filtering: {e}")
+        logger.warning(f"Failed to get active positions for filtering: {e}")
 
-    # Fetch orders for each ticker using BybitService
-    orders_by_ticker = bybit_service.get_multiple_open_orders(ticker_list)
+    # Fetch orders from Bybit
+    if ticker_list is None:
+        # Get ALL open orders from Bybit (no filter)
+        logger.info("Fetching ALL open orders from Bybit")
+        orders_by_ticker = bybit_service.get_all_open_orders()
+    else:
+        # Get orders for specific tickers
+        logger.info(f"Fetching pending orders for tickers: {ticker_list}")
+        orders_by_ticker = bybit_service.get_multiple_open_orders(ticker_list)
+
+    # DEBUG: Log raw response from Bybit
+    total_raw_orders = sum(len(orders) for orders in orders_by_ticker.values())
+    logger.info(f"📊 RAW DATA FROM BYBIT: {len(orders_by_ticker)} tickers, {total_raw_orders} total orders")
+    logger.info(f"📊 Tickers in raw response: {list(orders_by_ticker.keys())}")
+    for ticker, orders in orders_by_ticker.items():
+        logger.info(f"📊 {ticker}: {len(orders)} orders")
+        for order in orders:
+            logger.info(f"   - Order {order.get('orderId')}: status={order.get('orderStatus')}, type={order.get('orderType')}, side={order.get('side')}")
 
     # Process orders
     for ticker, order_list in orders_by_ticker.items():
         # Filter criteria:
         # - Always include: New, PartiallyFilled (actual limit orders)
-        # - Include Untriggered ONLY if ticker has active position (valid SL/TP)
-        # - Exclude Untriggered without position (orphaned SL/TP from closed trades)
-        has_active_position = ticker in active_positions_tickers
+        # - Include Untriggered ONLY if ticker+side match active position (valid SL/TP)
+        # - Exclude Untriggered with wrong side or no position (orphaned SL/TP from closed trades)
 
         for order in order_list:
             order_status = order.get("orderStatus", "")
+            order_side = order.get("side", "")  # "Buy" or "Sell"
+
+            # Check if ticker+side match active position
+            active_position_side = active_positions_map.get(ticker)
+            has_matching_position = (active_position_side == order_side)
 
             # Filter logic:
             # 1. Always show "New" and "PartiallyFilled" - these are real pending limit orders
-            # 2. Show "Untriggered" ONLY if position exists - these are active SL/TP
-            # 3. Skip "Untriggered" without position - these are orphaned SL/TP from closed trades
+            # 2. Show "Untriggered" ONLY if position exists AND side matches - these are active SL/TP
+            # 3. Skip "Untriggered" with wrong side or no position - these are orphaned SL/TP from closed trades
             if order_status in {"New", "PartiallyFilled"}:
                 should_include = True
-            elif order_status == "Untriggered" and has_active_position:
+                logger.info(f"✅ Including {ticker} {order_side} order (status={order_status})")
+            elif order_status == "Untriggered" and has_matching_position:
                 should_include = True
+                logger.info(f"✅ Including {ticker} {order_side} Untriggered order (matching active position)")
             else:
                 should_include = False
-                if order_status == "Untriggered" and not has_active_position:
-                    logger.debug(f"Filtering orphaned Untriggered order for {ticker} (no active position)")
+                if order_status == "Untriggered":
+                    if not active_position_side:
+                        logger.info(f"❌ FILTERING {ticker} {order_side} Untriggered: no active position")
+                    else:
+                        logger.info(f"❌ FILTERING {ticker} {order_side} Untriggered: position side is {active_position_side}, order side is {order_side}")
+                else:
+                    logger.info(f"❌ FILTERING {ticker} {order_side} order: status={order_status}")
 
             if should_include:
                 try:

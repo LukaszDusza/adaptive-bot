@@ -133,3 +133,36 @@ export interface PendingOrdersResponse {
   by_ticker: Record<string, number>;
   last_updated: string;
 }
+
+export interface ExecutionQuality {
+  total_executions: number;
+  avg_slippage_pct: number;
+  maker_count: number;
+  taker_count: number;
+  maker_ratio: number;
+  taker_ratio: number;
+  best_slippage_pct: number;
+  worst_slippage_pct: number;
+  total_fees: number;
+  avg_fee_per_execution: number;
+}
+
+export interface FundingCosts {
+  total_funding_fees: number;
+  funding_count: number;
+  avg_funding_per_event: number;
+  daily_avg_funding: number;
+  monthly_projected_funding: number;
+  funding_by_symbol: Record<string, number>;
+}
+
+export interface SLTPEffectiveness {
+  total_orders: number;
+  tp_hit_count: number;
+  sl_hit_count: number;
+  tp_hit_rate: number;
+  sl_hit_rate: number;
+  avg_tp_distance_pct: number;
+  avg_sl_distance_pct: number;
+  risk_reward_ratio: number;
+}

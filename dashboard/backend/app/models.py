@@ -207,6 +207,65 @@ class TradeDurationBin(BaseModel):
     avg_pnl: float
 
 
+class FeeAnalysis(BaseModel):
+    """Fee impact analysis"""
+    total_fees: float
+    fee_impact_pct: float  # Percentage of gross profit consumed by fees
+    fees_by_ticker: Dict[str, float]
+    avg_fee_per_trade: float
+    gross_pnl: float  # PnL before fees
+    net_pnl: float  # PnL after fees
+    total_trades: int
+
+
+class StrategyComparison(BaseModel):
+    """Comparison of different strategies (side, ticker, etc.)"""
+    name: str
+    total_pnl: float
+    win_rate: float
+    total_trades: int
+    sharpe_ratio: Optional[float] = None
+    max_drawdown_percent: float
+    profit_factor: Optional[float] = None
+    avg_trade_duration_hours: float
+
+
+class ExecutionQuality(BaseModel):
+    """Execution quality analysis (slippage, maker/taker)"""
+    total_executions: int
+    avg_slippage_pct: float
+    maker_count: int
+    taker_count: int
+    maker_ratio: float
+    taker_ratio: float
+    best_slippage_pct: float
+    worst_slippage_pct: float
+    total_fees: float
+    avg_fee_per_execution: float
+
+
+class FundingCosts(BaseModel):
+    """Funding costs analysis"""
+    total_funding_fees: float
+    funding_count: int
+    avg_funding_per_event: float
+    daily_avg_funding: float
+    monthly_projected_funding: float
+    funding_by_symbol: Dict[str, float]
+
+
+class SLTPEffectiveness(BaseModel):
+    """SL/TP effectiveness analysis"""
+    total_orders: int
+    tp_hit_count: int
+    sl_hit_count: int
+    tp_hit_rate: float
+    sl_hit_rate: float
+    avg_tp_distance_pct: float
+    avg_sl_distance_pct: float
+    risk_reward_ratio: float
+
+
 # ============================================================================
 # REQUEST MODELS
 # ============================================================================
