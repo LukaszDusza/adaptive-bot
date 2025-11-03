@@ -114,10 +114,48 @@ async def get_single_ticker_metrics(ticker: str):
 @router.get("/equity-curve", response_model=List[EquityCurvePoint])
 async def get_equity_curve():
     """
-    Get cumulative equity curve (P&L over time).
+    Get cumulative equity curve (P&L over time) from BYBIT API.
+
+    SOURCE OF TRUTH: Uses real data from Bybit exchange (closed P&L history).
+    Falls back to logs if Bybit API is not available.
 
     Returns list of EquityCurvePoint sorted by timestamp.
     """
+    # TRY BYBIT API FIRST (SOURCE OF TRUTH)
+    if bybit_service and bybit_service.is_available():
+        try:
+            # Get equity curve from Bybit API (last 100 trades)
+            bybit_equity_data = bybit_service.build_equity_curve_from_bybit(limit=100)
+
+            if bybit_equity_data:
+                # Convert to EquityCurvePoint format
+                # Calculate running max equity for drawdown calculation
+                running_max_equity = 0.0
+                equity_curve = []
+
+                for i, point in enumerate(bybit_equity_data):
+                    equity = point['equity']
+                    running_max_equity = max(running_max_equity, equity)
+
+                    # Calculate drawdown from peak
+                    if running_max_equity > 0:
+                        drawdown = ((running_max_equity - equity) / running_max_equity) * 100
+                    else:
+                        drawdown = 0.0
+
+                    equity_curve.append(EquityCurvePoint(
+                        timestamp=point['timestamp'],
+                        cumulative_pnl=equity,  # Use actual equity from Bybit
+                        trade_count=i + 1,  # Sequential trade count
+                        drawdown=drawdown  # Drawdown percentage from peak
+                    ))
+
+                return equity_curve
+        except Exception as e:
+            print(f"⚠️  Failed to get equity curve from Bybit API: {e}")
+            print("   Falling back to logs...")
+
+    # FALLBACK: Use logs if Bybit API unavailable
     trades = trade_parser.get_all_trades()
     equity_curve = analytics.calculate_equity_curve(trades)
     return equity_curve
@@ -162,3 +200,43 @@ async def get_duration_histogram():
     trades = trade_parser.get_all_trades()
     duration_hist = analytics.calculate_duration_histogram(trades)
     return duration_hist
+
+
+@router.get("/wallet-balance")
+async def get_wallet_balance():
+    """
+    Get current wallet balance (equity) from Bybit API.
+
+    SOURCE OF TRUTH: Real balance from exchange.
+
+    Returns:
+        {
+            "equity": 1234.56,
+            "available": true,
+            "timestamp": "2025-11-02T21:30:00"
+        }
+    """
+    from datetime import datetime
+
+    if not bybit_service or not bybit_service.is_available():
+        return {
+            "equity": 0.0,
+            "available": False,
+            "error": "Bybit API not configured",
+            "timestamp": datetime.now().isoformat()
+        }
+
+    try:
+        equity = bybit_service.get_wallet_balance()
+        return {
+            "equity": equity,
+            "available": True,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        return {
+            "equity": 0.0,
+            "available": False,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }

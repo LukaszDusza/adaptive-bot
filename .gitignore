@@ -838,3 +838,4 @@ docker-compose.yaml.backup.*
 
 # Docker volumes (if accidentally created locally)
 /price_action/models/cache/
+/price_action/.env

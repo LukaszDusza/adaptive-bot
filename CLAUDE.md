@@ -77,10 +77,19 @@ price_action/
 ├── models/               # Trained models organized by version
 ├── logs/                 # Bot logs (trades, candles, indicators)
 ├── bot_state/            # Bot state persistence (survives restarts)
-└── run_model_workflow.sh # Interactive workflow menu
+├── run_model_workflow.sh # Interactive workflow menu (Linux/Mac)
+├── run_model_workflow.py # Interactive workflow menu (Cross-platform)
+├── run_model_workflow.bat # Windows launcher
+└── WORKFLOW_USAGE.md     # Workflow usage documentation
 ```
 
 **Important**: Only files in the main `price_action/` directory are part of the active pipeline. Files in `experiments/` and `archive/` are not integrated into the workflow and should be used manually if needed.
+
+**Workflow Scripts:**
+- `run_model_workflow.sh` - Original bash script (Linux/Mac)
+- `run_model_workflow.py` - **NEW: Cross-platform Python version (Windows/Linux/Mac)**
+- `run_model_workflow.bat` - Windows launcher (calls Python script)
+- See `WORKFLOW_USAGE.md` for detailed usage instructions
 
 ### Data Flow
 

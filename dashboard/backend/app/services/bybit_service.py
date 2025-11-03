@@ -170,3 +170,127 @@ class BybitService:
         except Exception as e:
             logger.error(f"Failed to get price for {ticker}: {e}")
             return 0.0
+
+    def get_wallet_balance(self) -> float:
+        """
+        Get current wallet equity (USDT) from Bybit.
+
+        Returns:
+            Current equity in USDT or 0.0 on error
+        """
+        if not self.adapter:
+            logger.warning("BybitAdapter not initialized - cannot get balance")
+            return 0.0
+
+        try:
+            balance = self.adapter.get_balance(use_available=False)
+            logger.info(f"✓ Current wallet equity: ${balance:.2f}")
+            return balance
+        except Exception as e:
+            logger.error(f"Failed to get wallet balance: {e}")
+            return 0.0
+
+    def get_closed_pnl_history(self, symbol: str = None, limit: int = 100) -> list:
+        """
+        Get closed P&L history from Bybit.
+
+        Args:
+            symbol: Trading pair (e.g., SOLUSDT). If None, gets all symbols.
+            limit: Max records to return (default 100, max 100)
+
+        Returns:
+            List of closed P&L records with timestamp and cumulative PnL
+        """
+        if not self.adapter:
+            logger.warning("BybitAdapter not initialized - cannot get P&L history")
+            return []
+
+        try:
+            # Get closed P&L from Bybit
+            pnl_records = self.adapter.get_closed_pnl_history(
+                symbol=symbol,
+                limit=limit
+            )
+
+            logger.info(f"✓ Retrieved {len(pnl_records)} closed P&L records from Bybit")
+            return pnl_records
+        except Exception as e:
+            logger.error(f"Failed to get closed P&L history: {e}")
+            return []
+
+    def build_equity_curve_from_bybit(self, limit: int = 100) -> list:
+        """
+        Build equity curve from real Bybit data (closed P&L history).
+
+        This is the SOURCE OF TRUTH - gets actual trading results from the exchange.
+
+        Args:
+            limit: Number of historical records to fetch (max 100 per API call)
+
+        Returns:
+            List of dicts with 'timestamp' and 'equity' keys, sorted chronologically
+        """
+        if not self.adapter:
+            logger.warning("BybitAdapter not initialized - cannot build equity curve")
+            return []
+
+        try:
+            # Get current balance
+            current_equity = self.get_wallet_balance()
+
+            # Get closed P&L history
+            pnl_records = self.get_closed_pnl_history(limit=limit)
+
+            if not pnl_records:
+                logger.warning("No P&L history available from Bybit")
+                return []
+
+            # Sort by timestamp ascending (oldest first)
+            pnl_records.sort(key=lambda x: int(x.get('createdTime', 0)))
+
+            # Build equity curve by working backwards from current equity
+            equity_curve = []
+            running_equity = current_equity
+
+            # Add current point
+            from datetime import datetime
+            equity_curve.append({
+                'timestamp': datetime.now().isoformat(),
+                'equity': running_equity,
+                'cumulative_pnl': 0.0  # Current is baseline
+            })
+
+            # Work backwards through closed trades
+            cumulative_pnl = 0.0
+            for record in reversed(pnl_records):
+                closed_pnl = float(record.get('closedPnl', 0))
+                cumulative_pnl -= closed_pnl  # Subtract because we're going backwards
+
+                # Equity at this point in time = current equity - cumulative PnL since then
+                historical_equity = current_equity - cumulative_pnl
+
+                timestamp_ms = int(record.get('createdTime', 0))
+                timestamp = datetime.fromtimestamp(timestamp_ms / 1000).isoformat()
+
+                equity_curve.append({
+                    'timestamp': timestamp,
+                    'equity': historical_equity,
+                    'cumulative_pnl': cumulative_pnl,
+                    'symbol': record.get('symbol', ''),
+                    'side': record.get('side', ''),
+                    'pnl': closed_pnl
+                })
+
+            # Reverse to get chronological order (oldest to newest)
+            equity_curve.reverse()
+
+            logger.info(f"✓ Built equity curve with {len(equity_curve)} points from Bybit API")
+            logger.info(f"  Starting equity: ${equity_curve[0]['equity']:.2f}")
+            logger.info(f"  Current equity: ${equity_curve[-1]['equity']:.2f}")
+            logger.info(f"  Total PnL: ${equity_curve[-1]['equity'] - equity_curve[0]['equity']:.2f}")
+
+            return equity_curve
+
+        except Exception as e:
+            logger.error(f"Failed to build equity curve from Bybit: {e}")
+            return []

@@ -63,7 +63,7 @@ services:
       --min-proba-diff 0.30
       --tsl-pct 0.014
       --tp-pct 0.02
-      --trade-size-pct 0.02
+      --trade-size-pct 0.05
       --leverage 20
       --partial-tp
       --hedge-mode
@@ -93,16 +93,16 @@ services:
       --min-proba-diff 0.30
       --tsl-pct 0.014
       --tp-pct 0.02
-      --trade-size-pct 0.02
+      --trade-size-pct 0.05
       --leverage 20
       --partial-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.008
+      --dca-level1-pct 0.009
       --dca-atr-multiplier 1.9
-      --dca-max-swing-distance 2.1
+      --dca-max-swing-distance 2.2
 
   # OPTIMIZED: prob-threshold 0.58 -> 0.38
   bot-eth:
@@ -123,16 +123,16 @@ services:
       --min-proba-diff 0.30
       --tsl-pct 0.014
       --tp-pct 0.02
-      --trade-size-pct 0.02
+      --trade-size-pct 0.05
       --leverage 20
       --partial-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.005
+      --dca-level1-pct 0.008
       --dca-atr-multiplier 1.8
-      --dca-max-swing-distance 2.0
+      --dca-max-swing-distance 2.2
 
   # OPTIMIZED: prob-threshold 0.58 -> 0.38
   bot-link:
@@ -153,7 +153,7 @@ services:
       --min-proba-diff 0.30
       --tsl-pct 0.014
       --tp-pct 0.02
-      --trade-size-pct 0.02
+      --trade-size-pct 0.05
       --leverage 20
       --partial-tp
       --hedge-mode
@@ -183,7 +183,7 @@ services:
       --min-proba-diff 0.30
       --tsl-pct 0.014
       --tp-pct 0.02
-      --trade-size-pct 0.02
+      --trade-size-pct 0.05
       --leverage 20
       --partial-tp
       --hedge-mode
@@ -213,7 +213,7 @@ services:
       --min-proba-diff 0.25
       --tsl-pct 0.014
       --tp-pct 0.02
-      --trade-size-pct 0.02
+      --trade-size-pct 0.05
       --leverage 20
       --partial-tp
       --hedge-mode
@@ -244,7 +244,7 @@ services:
       --min-proba-diff 0.30
       --tsl-pct 0.014
       --tp-pct 0.02
-      --trade-size-pct 0.02
+      --trade-size-pct 0.05
       --leverage 20
       --partial-tp
       --hedge-mode
