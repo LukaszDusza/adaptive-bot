@@ -46,6 +46,7 @@ services:
   # ============================================
   # DOGEUSDT - v1.2.doge
   # UPDATED: prob-threshold 0.38 -> 0.6039 (ML optimal)
+  # OPTIMIZED: TP 0.0156->0.025, TSL 0.0102->0.008, Dynamic TP (R:R fix)
   # ============================================
   bot-luk-doge-dca:
     <<: [*bot-base, *bot-common]
@@ -63,11 +64,11 @@ services:
       --helper-timeframes 1h 4h 6h 12h 1d
       --prob-threshold 0.6039
       --min-proba-diff 0.30
-      --tsl-pct 0.0102
-      --tp-pct 0.0156
+      --tsl-pct 0.008
+      --tp-pct 0.025
       --trade-size-pct 0.05
       --leverage 20
-      --partial-tp
+      --dynamic-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
@@ -79,6 +80,7 @@ services:
   # ============================================
   # SOLUSDT - v1.2.sol
   # UPDATED: prob-threshold 0.43 -> 0.5004 (ML optimal)
+  # OPTIMIZED: TP 0.0150->0.025, TSL 0.0098->0.008, Dynamic TP (R:R fix)
   # ============================================
   bot-luk-sol-ict:
     <<: [*bot-base, *bot-common]
@@ -96,11 +98,11 @@ services:
       --helper-timeframes 1h 4h 12h 1d
       --prob-threshold 0.5004
       --min-proba-diff 0.25
-      --tsl-pct 0.0098
-      --tp-pct 0.0150
+      --tsl-pct 0.008
+      --tp-pct 0.025
       --trade-size-pct 0.05
       --leverage 20
-      --partial-tp
+      --dynamic-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
@@ -111,7 +113,8 @@ services:
 
   # ============================================
   # ETHUSDT - v1.2.eth
-  # UPDATED: prob-threshold 0.38 -> 0.6085 (ML optimal)
+  # UPDATED: prob-threshold 0.6085 -> 0.75 (increased due to poor performance)
+  # OPTIMIZED: TP 0.0151->0.025, TSL 0.0098->0.008, Dynamic TP (R:R fix)
   # ============================================
   bot-eth:
     <<: [ *bot-base, *bot-common ]
@@ -127,13 +130,13 @@ services:
       --ticker ETHUSDT
       --timeframe 15m
       --helper-timeframes 1h 2h 4h 6h 12h 1d
-      --prob-threshold 0.6085
+      --prob-threshold 0.75
       --min-proba-diff 0.30
-      --tsl-pct 0.0098
-      --tp-pct 0.0151
+      --tsl-pct 0.008
+      --tp-pct 0.025
       --trade-size-pct 0.05
       --leverage 20
-      --partial-tp
+      --dynamic-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
@@ -145,6 +148,7 @@ services:
   # ============================================
   # LINKUSDT - v1.2.link
   # UPDATED: prob-threshold 0.38 -> 0.7142 (ML optimal)
+  # OPTIMIZED: TP 0.0150->0.025, TSL 0.0098->0.008, Dynamic TP (R:R fix)
   # ============================================
   bot-link:
     <<: [ *bot-base, *bot-common ]
@@ -162,11 +166,11 @@ services:
       --helper-timeframes 1h 2h 4h 6h 12h 1d
       --prob-threshold 0.7142
       --min-proba-diff 0.36
-      --tsl-pct 0.0098
-      --tp-pct 0.0150
+      --tsl-pct 0.008
+      --tp-pct 0.025
       --trade-size-pct 0.05
       --leverage 20
-      --partial-tp
+      --dynamic-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
@@ -178,6 +182,7 @@ services:
   # ============================================
   # HBARUSDT - v1.2.hbar
   # UPDATED: prob-threshold 0.38 -> 0.6838 (ML optimal)
+  # OPTIMIZED: TP 0.0153->0.025, TSL 0.0099->0.008, Dynamic TP (R:R fix)
   # ============================================
   bot-hbar:
     <<: [ *bot-base, *bot-common ]
@@ -195,11 +200,11 @@ services:
       --helper-timeframes 1h 2h 4h 6h 12h 1d
       --prob-threshold 0.6838
       --min-proba-diff 0.34
-      --tsl-pct 0.0099
-      --tp-pct 0.0153
+      --tsl-pct 0.008
+      --tp-pct 0.025
       --trade-size-pct 0.05
       --leverage 20
-      --partial-tp
+      --dynamic-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
@@ -211,6 +216,7 @@ services:
   # ============================================
   # SUIUSDT - v1.2.sui
   # UPDATED: prob-threshold 0.32 -> 0.4654 (ML optimal)
+  # OPTIMIZED: TP 0.0152->0.025, TSL 0.0099->0.008, Dynamic TP (R:R fix)
   # ============================================
   bot-sui:
     <<: [ *bot-base, *bot-common ]
@@ -228,11 +234,11 @@ services:
       --helper-timeframes 1h 2h 4h 6h 12h 1d
       --prob-threshold 0.4654
       --min-proba-diff 0.23
-      --tsl-pct 0.0099
-      --tp-pct 0.0152
+      --tsl-pct 0.008
+      --tp-pct 0.025
       --trade-size-pct 0.05
       --leverage 20
-      --partial-tp
+      --dynamic-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
@@ -244,6 +250,7 @@ services:
   # ============================================
   # NEARUSDT - v1.2.near
   # UPDATED: prob-threshold 0.33 -> 0.5815 (ML optimal)
+  # OPTIMIZED: TP 0.0152->0.025, TSL 0.0099->0.008, Dynamic TP (R:R fix)
   # ============================================
   bot-near:
     <<: [ *bot-base, *bot-common ]
@@ -261,11 +268,11 @@ services:
       --helper-timeframes 1h 2h 4h 6h 12h 1d
       --prob-threshold 0.5815
       --min-proba-diff 0.29
-      --tsl-pct 0.0099
-      --tp-pct 0.0152
+      --tsl-pct 0.008
+      --tp-pct 0.025
       --trade-size-pct 0.05
       --leverage 20
-      --partial-tp
+      --dynamic-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
@@ -277,6 +284,7 @@ services:
   # ============================================
   # TRXUSDT - v1.2.trx (NEW!)
   # ML optimal: prob-threshold 0.6719
+  # OPTIMIZED: TP 0.0121->0.025, TSL 0.0079->0.008, Dynamic TP (R:R fix)
   # ============================================
   bot-trx:
     <<: [ *bot-base, *bot-common ]
@@ -294,11 +302,11 @@ services:
       --helper-timeframes 1h 2h 4h 12h 1d
       --prob-threshold 0.6719
       --min-proba-diff 0.34
-      --tsl-pct 0.0079
-      --tp-pct 0.0121
+      --tsl-pct 0.008
+      --tp-pct 0.025
       --trade-size-pct 0.05
       --leverage 20
-      --partial-tp
+      --dynamic-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16
@@ -310,6 +318,7 @@ services:
   # ============================================
   # KASUSDT - v1.2.kas (NEW!)
   # ML optimal: prob-threshold 0.5537
+  # OPTIMIZED: TP 0.0150->0.025, TSL 0.0098->0.008, Dynamic TP (R:R fix)
   # ============================================
   bot-kas:
     <<: [ *bot-base, *bot-common ]
@@ -327,11 +336,11 @@ services:
       --helper-timeframes 1h 2h 4h 12h 1d
       --prob-threshold 0.5537
       --min-proba-diff 0.28
-      --tsl-pct 0.0098
-      --tp-pct 0.0150
+      --tsl-pct 0.008
+      --tp-pct 0.025
       --trade-size-pct 0.05
       --leverage 20
-      --partial-tp
+      --dynamic-tp
       --hedge-mode
       --limit-order
       --limit-order-candles 16

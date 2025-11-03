@@ -67,7 +67,7 @@ export const getRiskAlerts = () =>
 
 // Trades
 export const getAllTrades = (limit?: number, ticker?: string) =>
-  api.get<Trade[]>('/api/trades/', { params: { limit, ticker } });
+  api.get<Trade[]>('/api/trades/closed', { params: { limit, ticker } });
 
 export const getActiveTrades = () =>
   api.get<Trade[]>('/api/trades/active');

@@ -355,6 +355,111 @@ async def cancel_all_pending_orders(ticker: str):
     }
 
 
+@router.get("/closed", response_model=List[Trade])
+async def get_closed_trades_from_bybit(limit: Optional[int] = Query(50, description="Max number of trades to return")):
+    """
+    Get closed trades LIVE from BYBIT API (closed P&L history).
+
+    SOURCE OF TRUTH: Real closed trades from Bybit exchange.
+    Returns actual historical trades with real PnL, exit prices, and timestamps.
+
+    Args:
+        limit: Maximum number of trades (default: 50, max: 100)
+
+    Returns:
+        List of Trade objects from Bybit closed P&L history
+    """
+    if not bybit_service or not bybit_service.is_available():
+        logger.warning("⚠️  Bybit service not available - returning empty list")
+        return []
+
+    try:
+        # Get closed P&L records from Bybit
+        pnl_records = bybit_service.get_closed_pnl_history(limit=min(limit, 100))
+
+        if not pnl_records:
+            logger.info("No closed trades found on Bybit")
+            return []
+
+        # Convert Bybit closed PnL format to Trade format
+        trades = []
+        for record in pnl_records:
+            # Parse timestamps
+            created_time = record.get('createdTime', 0)
+            updated_time = record.get('updatedTime', 0)
+
+            # Convert milliseconds to ISO format
+            start_time = datetime.fromtimestamp(int(created_time) / 1000).isoformat() if created_time else None
+            end_time = datetime.fromtimestamp(int(updated_time) / 1000).isoformat() if updated_time else None
+
+            # Parse PnL and prices
+            closed_pnl = float(record.get('closedPnl', 0))
+            avg_entry_price = float(record.get('avgEntryPrice', 0))
+            avg_exit_price = float(record.get('avgExitPrice', 0))
+            closed_size = float(record.get('closedSize', 0))
+
+            # Calculate PnL percentage
+            pnl_percent = 0.0
+            if avg_entry_price > 0 and closed_size > 0:
+                position_value = avg_entry_price * closed_size
+                pnl_percent = (closed_pnl / position_value) * 100
+
+            # Determine exit reason from PnL
+            exit_reason = ""
+            if closed_pnl > 0:
+                exit_reason = "TP"  # Take Profit
+            elif closed_pnl < 0:
+                exit_reason = "SL"  # Stop Loss
+            else:
+                exit_reason = "Manual"  # Breakeven
+
+            # Map side: 'Buy' -> 'Long', 'Sell' -> 'Short'
+            side_raw = record.get('side', 'Buy')
+            side = 'Long' if side_raw == 'Buy' else 'Short'
+
+            # Calculate duration
+            duration_seconds = 0
+            if created_time and updated_time:
+                duration_seconds = (int(updated_time) - int(created_time)) // 1000
+
+            trade = Trade(
+                trade_id=f"{record.get('symbol')}_{created_time}",
+                ticker=record.get('symbol', ''),
+                side=TradeSide(side),
+                start_time=start_time,
+                end_time=end_time,
+                entry_price=avg_entry_price,
+                exit_price=avg_exit_price,
+                quantity=closed_size,
+                leverage=int(record.get('leverage', 1)),
+                initial_sl=None,
+                initial_tp=None,
+                current_sl=None,
+                current_tp=None,
+                summary={
+                    'pnl': closed_pnl,
+                    'pnl_percent': pnl_percent,
+                    'exit_reason': exit_reason,
+                    'duration_seconds': duration_seconds,
+                    'max_favorable_excursion': None,
+                    'max_adverse_excursion': None,
+                    'fees_paid': float(record.get('cumEntryValue', 0)) * 0.00055  # Estimate
+                },
+                events=[],
+                indicators=None,
+                is_active=False,
+                notes=f"LIVE from Bybit | Closed: {end_time}"
+            )
+            trades.append(trade)
+
+        logger.info(f"✓ Retrieved {len(trades)} closed trades from Bybit")
+        return trades
+
+    except Exception as e:
+        logger.error(f"Failed to get closed trades from Bybit: {e}")
+        return []
+
+
 @router.get("/{trade_id}", response_model=Trade)
 async def get_trade_by_id(trade_id: str):
     """
