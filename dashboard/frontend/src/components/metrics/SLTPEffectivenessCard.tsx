@@ -41,51 +41,54 @@ export const SLTPEffectivenessCard: React.FC<SLTPEffectivenessCardProps> = ({ da
       </div>
 
       <div className="space-y-4">
-        {/* Total Orders Analyzed */}
+        {/* Total Trades Analyzed */}
         <div>
-          <div className="text-sm text-dark-text-secondary">Orders Analyzed</div>
+          <div className="text-sm text-dark-text-secondary">Closed Trades Analyzed</div>
           <div className="text-2xl font-bold text-dark-text-primary">
             {data.total_orders}
           </div>
+          <div className="text-xs text-dark-text-secondary mt-1">
+            From Bybit closed P&L history
+          </div>
         </div>
 
-        {/* TP Hit Rate */}
+        {/* TP Hit Rate (Winning Trades) */}
         <div className="border-t border-dark-border pt-3">
           <div className="flex items-center justify-between">
-            <span className="text-sm text-dark-text-secondary">Take Profit Hit Rate</span>
+            <span className="text-sm text-dark-text-secondary">Winning Trades (TP Hit)</span>
             <TrendingUp className="text-profit" size={16} />
           </div>
           <div className="text-xl font-semibold text-profit">
             {formatPercent(data.tp_hit_rate)}
           </div>
           <div className="text-xs text-dark-text-secondary mt-1">
-            {data.tp_hit_count} TP orders | Avg distance: {formatDistance(data.avg_tp_distance_pct)}
+            {data.tp_hit_count} profitable closes | Avg gain: {formatDistance(data.avg_tp_distance_pct)}
           </div>
         </div>
 
-        {/* SL Hit Rate */}
+        {/* SL Hit Rate (Losing Trades) */}
         <div className="border-t border-dark-border pt-3">
           <div className="flex items-center justify-between">
-            <span className="text-sm text-dark-text-secondary">Stop Loss Hit Rate</span>
+            <span className="text-sm text-dark-text-secondary">Losing Trades (SL Hit)</span>
             <Shield className="text-loss" size={16} />
           </div>
           <div className="text-xl font-semibold text-loss">
             {formatPercent(data.sl_hit_rate)}
           </div>
           <div className="text-xs text-dark-text-secondary mt-1">
-            {data.sl_hit_count} SL orders | Avg distance: {formatDistance(data.avg_sl_distance_pct)}
+            {data.sl_hit_count} loss closes | Avg loss: {formatDistance(data.avg_sl_distance_pct)}
           </div>
         </div>
 
-        {/* TP vs SL Ratio Visual */}
+        {/* Win/Loss Distribution Visual */}
         <div className="border-t border-dark-border pt-3">
-          <div className="text-sm text-dark-text-secondary mb-2">TP vs SL Distribution</div>
+          <div className="text-sm text-dark-text-secondary mb-2">Win/Loss Distribution</div>
           <div className="flex items-center gap-4">
             <div className="flex-1">
-              <div className="text-sm font-medium text-profit">TP {formatPercent(data.tp_hit_rate)}</div>
+              <div className="text-sm font-medium text-profit">Wins {formatPercent(data.tp_hit_rate)}</div>
             </div>
             <div className="flex-1">
-              <div className="text-sm font-medium text-loss">SL {formatPercent(data.sl_hit_rate)}</div>
+              <div className="text-sm font-medium text-loss">Losses {formatPercent(data.sl_hit_rate)}</div>
             </div>
           </div>
 
@@ -101,14 +104,14 @@ export const SLTPEffectivenessCard: React.FC<SLTPEffectivenessCardProps> = ({ da
         {/* Risk/Reward Ratio */}
         <div className="border-t border-dark-border pt-3">
           <div className="flex items-center justify-between">
-            <span className="text-sm text-dark-text-secondary">Risk/Reward Ratio</span>
+            <span className="text-sm text-dark-text-secondary">Avg Win / Avg Loss Ratio</span>
             <Award className="text-yellow-500" size={16} />
           </div>
           <div className="text-xl font-semibold text-dark-text-primary">
             {data.risk_reward_ratio > 0 ? data.risk_reward_ratio.toFixed(2) : 'N/A'}
           </div>
           <div className={`text-xs mt-1 ${data.risk_reward_ratio >= 2 ? 'text-profit' : data.risk_reward_ratio >= 1 ? 'text-yellow-500' : 'text-loss'}`}>
-            {data.risk_reward_ratio >= 2 ? '✓ Excellent' : data.risk_reward_ratio >= 1 ? '⚠ Fair' : '✗ Poor'}
+            {data.risk_reward_ratio >= 2 ? '✓ Excellent (2:1+)' : data.risk_reward_ratio >= 1 ? '⚠ Fair (1:1+)' : '✗ Poor (<1:1)'}
           </div>
         </div>
       </div>

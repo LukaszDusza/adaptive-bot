@@ -41,19 +41,22 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
   return (
     <div className="stat-card">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-dark-text-primary">Funding Costs (30d)</h3>
+        <h3 className="text-lg font-semibold text-dark-text-primary">Funding Costs (30d) ~Est.</h3>
         <TrendingDown className="text-yellow-500" size={20} />
       </div>
 
       <div className="space-y-4">
         {/* Total Funding Fees */}
         <div>
-          <div className="text-sm text-dark-text-secondary">Total Funding Fees</div>
+          <div className="text-sm text-dark-text-secondary">Estimated Total Funding</div>
           <div className="text-2xl font-bold text-loss">
             -{formatCurrency(data.total_funding_fees)}
           </div>
           <div className="text-xs text-dark-text-secondary mt-1">
-            {data.funding_count} funding events
+            Based on {data.funding_count} closed trades
+          </div>
+          <div className="text-xs text-yellow-500 mt-1">
+            ⓘ Estimated @ 0.01%/8h avg rate
           </div>
         </div>
 

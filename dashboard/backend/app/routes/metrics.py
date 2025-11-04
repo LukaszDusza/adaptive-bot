@@ -159,36 +159,43 @@ async def get_equity_curve():
 
     SOURCE OF TRUTH: Uses real data from Bybit exchange (closed P&L history).
 
+    Equity curve starts from November 1, 2025 (zero level).
+    All PnL is calculated relative to equity on that date.
+
     Returns list of EquityCurvePoint sorted by timestamp.
     """
     _check_bybit_available()
 
-    # Get closed P&L history to calculate starting equity correctly
-    stats = bybit_service.get_trade_history_stats_from_bybit(limit=100)
-    total_realized_pnl = stats.get('total_pnl', 0.0)
-
-    # Get current equity
-    current_equity = bybit_service.get_wallet_balance()
-
-    # Calculate TRUE starting equity (before all trading)
-    # Current equity = Starting equity + Total realized PnL
-    # Therefore: Starting equity = Current equity - Total realized PnL
-    starting_equity = current_equity - total_realized_pnl
-
-    # Get equity curve from Bybit API (last 100 trades)
-    bybit_equity_data = bybit_service.build_equity_curve_from_bybit(limit=100)
+    # Get equity curve from Bybit API (last 200 trades for better history)
+    bybit_equity_data = bybit_service.build_equity_curve_from_bybit(limit=200)
 
     if not bybit_equity_data:
         return []
+
+    # Filter data from November 1, 2025 onwards
+    from datetime import datetime
+    nov_1_2025 = datetime(2025, 11, 1, 0, 0, 0)
+
+    filtered_data = [
+        point for point in bybit_equity_data
+        if datetime.fromisoformat(point['timestamp']) >= nov_1_2025
+    ]
+
+    if not filtered_data:
+        # If no data after Nov 1, return empty (or use first available point)
+        return []
+
+    # Use equity on Nov 1, 2025 as the starting point (zero level)
+    starting_equity = filtered_data[0]['equity']
 
     # Convert to EquityCurvePoint format
     running_max_pnl = 0.0
     equity_curve = []
 
-    for i, point in enumerate(bybit_equity_data):
+    for i, point in enumerate(filtered_data):
         equity = point['equity']
 
-        # Calculate cumulative PnL relative to TRUE starting equity
+        # Calculate cumulative PnL relative to Nov 1, 2025 equity
         cumulative_pnl = equity - starting_equity
 
         # Track peak PnL for drawdown calculation
@@ -416,48 +423,165 @@ async def get_funding_costs(days: int = 30):
     """
     Get funding costs analysis from BYBIT API (CACHED - 60s TTL).
 
-    Analyzes funding fees paid for holding positions over time.
+    NOTE: Funding costs require special Bybit API permissions.
+    Currently returns estimated data from closed P&L instead.
 
-    Args:
-        days: Number of days to analyze (default 30)
-
-    Returns:
-        - Total funding fees paid
-        - Daily average funding cost
-        - Monthly projected cost
-        - Breakdown by symbol
-
-    Useful for:
-    - Understanding true cost of holding positions
-    - Deciding when to close positions (before funding time)
-    - Comparing funding costs across different symbols
+    Returns approximate funding costs based on trade duration and sizes.
     """
     _check_bybit_available()
 
-    costs = bybit_service.analyze_funding_costs(days=days)
+    # Get closed trades to estimate funding costs
+    pnl_records = bybit_service.get_closed_pnl_history(limit=100)
 
-    return FundingCosts(**costs)
+    if not pnl_records:
+        return FundingCosts(
+            total_funding_fees=0.0,
+            funding_count=0,
+            avg_funding_per_event=0.0,
+            daily_avg_funding=0.0,
+            monthly_projected_funding=0.0,
+            funding_by_symbol={}
+        )
+
+    # Estimate funding based on cumEntryValue
+    # Bybit funding rate is typically 0.01% per 8 hours = 0.03% per day
+    # So daily funding = position_value * 0.0003
+    from collections import defaultdict
+    from datetime import datetime, timedelta
+
+    funding_by_symbol = defaultdict(float)
+    total_estimated_funding = 0.0
+
+    # Filter recent trades (last 30 days)
+    cutoff_time = datetime.now() - timedelta(days=days)
+    cutoff_ms = int(cutoff_time.timestamp() * 1000)
+
+    recent_trades = [r for r in pnl_records if int(r.get('createdTime', 0)) >= cutoff_ms]
+
+    for record in recent_trades:
+        entry_value = float(record.get('cumEntryValue', 0))
+        created_ms = int(record.get('createdTime', 0))
+        updated_ms = int(record.get('updatedTime', 0))
+
+        # Estimate duration in hours
+        duration_hours = (updated_ms - created_ms) / (1000 * 3600)
+
+        # Estimate funding: entry_value * 0.01% per 8 hours
+        funding_periods = duration_hours / 8
+        estimated_funding = entry_value * 0.0001 * funding_periods  # 0.01% = 0.0001
+
+        total_estimated_funding += estimated_funding
+
+        symbol = record.get('symbol', 'UNKNOWN')
+        funding_by_symbol[symbol] += estimated_funding
+
+    funding_count = len(recent_trades)
+    avg_per_event = total_estimated_funding / funding_count if funding_count > 0 else 0.0
+    daily_avg = total_estimated_funding / days if days > 0 else 0.0
+
+    return FundingCosts(
+        total_funding_fees=total_estimated_funding,
+        funding_count=funding_count,
+        avg_funding_per_event=avg_per_event,
+        daily_avg_funding=daily_avg,
+        monthly_projected_funding=daily_avg * 30,
+        funding_by_symbol=dict(funding_by_symbol)
+    )
 
 
 @router.get("/sl-tp-effectiveness", response_model=SLTPEffectiveness)
 @cached(ttl=30, key_prefix="sl_tp_effectiveness")
 async def get_sl_tp_effectiveness():
     """
-    Get SL/TP effectiveness analysis from BYBIT API (CACHED - 30s TTL).
+    Get SL/TP effectiveness analysis from BYBIT CLOSED P&L (CACHED - 30s TTL).
 
-    Analyzes order history to show:
-    - TP hit rate (how often you hit take profit)
-    - SL hit rate (how often you hit stop loss)
-    - Average TP/SL distances
-    - Risk/Reward ratio
+    IMPROVED: Now analyzes ACTUAL closed trades instead of order history.
+    Shows real win/loss patterns from Bybit closed P&L data.
+
+    Returns:
+    - TP hit rate (profitable closes)
+    - SL hit rate (loss closes)
+    - Average profit for TP trades
+    - Average loss for SL trades
+    - Risk/Reward ratio (avg win / avg loss)
 
     Useful for:
     - Evaluating strategy effectiveness
-    - Optimizing TP/SL placement
-    - Understanding win/loss patterns
+    - Understanding actual win/loss patterns
+    - Measuring real TP vs SL performance
     """
     _check_bybit_available()
 
-    effectiveness = bybit_service.analyze_sl_tp_effectiveness(limit=100)
+    # Get closed P&L history from Bybit
+    pnl_records = bybit_service.get_closed_pnl_history(limit=200)
 
-    return SLTPEffectiveness(**effectiveness)
+    if not pnl_records:
+        return SLTPEffectiveness(
+            total_orders=0,
+            tp_hit_count=0,
+            sl_hit_count=0,
+            tp_hit_rate=0.0,
+            sl_hit_rate=0.0,
+            avg_tp_distance_pct=0.0,
+            avg_sl_distance_pct=0.0,
+            risk_reward_ratio=0.0
+        )
+
+    # Analyze actual closed trades
+    tp_trades = []  # Profitable trades (assumed TP hit)
+    sl_trades = []  # Loss trades (assumed SL hit)
+    breakeven_trades = []  # Breakeven trades
+
+    tp_profits = []
+    sl_losses = []
+
+    for record in pnl_records:
+        closed_pnl = float(record.get('closedPnl', 0))
+        avg_entry = float(record.get('avgEntryPrice', 0))
+        avg_exit = float(record.get('avgExitPrice', 0))
+        side = record.get('side', 'Buy')
+
+        # Calculate actual price movement percentage
+        if avg_entry > 0:
+            if side == 'Buy':
+                # LONG: profit if exit > entry
+                price_change_pct = ((avg_exit - avg_entry) / avg_entry) * 100
+            else:
+                # SHORT: profit if exit < entry
+                price_change_pct = ((avg_entry - avg_exit) / avg_entry) * 100
+
+            # Categorize by PnL
+            if closed_pnl > 0.001:  # Profit (TP assumed)
+                tp_trades.append(record)
+                tp_profits.append(abs(price_change_pct))
+            elif closed_pnl < -0.001:  # Loss (SL assumed)
+                sl_trades.append(record)
+                sl_losses.append(abs(price_change_pct))
+            else:
+                breakeven_trades.append(record)
+
+    total_analyzed = len(pnl_records)
+    tp_count = len(tp_trades)
+    sl_count = len(sl_trades)
+
+    # Calculate rates
+    tp_rate = (tp_count / total_analyzed) if total_analyzed > 0 else 0.0
+    sl_rate = (sl_count / total_analyzed) if total_analyzed > 0 else 0.0
+
+    # Calculate average distances (price movement percentages)
+    avg_tp_dist = (sum(tp_profits) / len(tp_profits)) if tp_profits else 0.0
+    avg_sl_dist = (sum(sl_losses) / len(sl_losses)) if sl_losses else 0.0
+
+    # Calculate Risk/Reward ratio
+    rr_ratio = (avg_tp_dist / avg_sl_dist) if avg_sl_dist > 0 else 0.0
+
+    return SLTPEffectiveness(
+        total_orders=total_analyzed,
+        tp_hit_count=tp_count,
+        sl_hit_count=sl_count,
+        tp_hit_rate=tp_rate,
+        sl_hit_rate=sl_rate,
+        avg_tp_distance_pct=avg_tp_dist,
+        avg_sl_distance_pct=avg_sl_dist,
+        risk_reward_ratio=rr_ratio
+    )

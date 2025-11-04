@@ -79,10 +79,15 @@ export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({ data }) => {
   return (
     <div className="card">
       <div className="flex items-center justify-between mb-6">
-        <h2 className="text-xl font-bold flex items-center gap-2">
-          <TrendingUp className="text-profit" />
-          Equity Curve
-        </h2>
+        <div>
+          <h2 className="text-xl font-bold flex items-center gap-2">
+            <TrendingUp className="text-profit" />
+            Equity Curve
+          </h2>
+          <p className="text-xs text-dark-text-secondary mt-1">
+            Starting from Nov 1, 2025 (zero level)
+          </p>
+        </div>
         <div className="flex gap-6 text-sm">
           <div>
             <span className="text-dark-text-secondary">Final P&L: </span>
@@ -126,8 +131,8 @@ export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({ data }) => {
             dataKey="pnl"
             stroke="#10b981"
             strokeWidth={2}
-            dot={{ fill: '#10b981', r: 3 }}
-            activeDot={{ r: 5 }}
+            dot={false}
+            activeDot={{ r: 6 }}
             name="Cumulative P&L"
           />
         </LineChart>

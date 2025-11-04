@@ -413,9 +413,12 @@ async def get_closed_trades_from_bybit(limit: Optional[int] = Query(50, descript
             else:
                 exit_reason = "Manual"  # Breakeven
 
-            # Map side: 'Buy' -> 'Long', 'Sell' -> 'Short'
+            # Map side: In Bybit closed PnL, 'side' refers to the CLOSING transaction
+            # Buy = closed by buying = original position was SHORT
+            # Sell = closed by selling = original position was LONG
+            # So we need to REVERSE the mapping
             side_raw = record.get('side', 'Buy')
-            side = 'Long' if side_raw == 'Buy' else 'Short'
+            side = 'Short' if side_raw == 'Buy' else 'Long'  # REVERSED!
 
             # Calculate duration
             duration_seconds = 0

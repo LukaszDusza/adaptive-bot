@@ -325,9 +325,51 @@ function App() {
                 const unrealizedPnL = trade.summary?.pnl ?? null;
                 const pnlPercentage = trade.summary?.pnl_percent ?? null;
 
-                // Check if position is secured (SL at breakeven)
-                const isSecured = trade.current_sl && trade.entry_price &&
-                  Math.abs(trade.current_sl - trade.entry_price) / trade.entry_price < 0.001; // Within 0.1%
+                // Calculate potential PnL for TP and SL
+                const tpPrice = trade.initial_tp || trade.current_tp;
+                const slPrice = trade.current_sl || trade.initial_sl;
+                const entryPrice = trade.entry_price;
+                const quantity = trade.quantity || 0;
+                const isLong = trade.side.toUpperCase() === 'LONG';
+
+                // Check if position is secured (SL in profit zone)
+                let isSecured = false;
+                if (slPrice && entryPrice) {
+                  if (isLong) {
+                    // For LONG: SL is secured if it's above entry (in profit)
+                    isSecured = slPrice > entryPrice;
+                  } else {
+                    // For SHORT: SL is secured if it's below entry (in profit)
+                    isSecured = slPrice < entryPrice;
+                  }
+                }
+
+                let potentialTpPnL = null;
+                let potentialTpPnLPercent = null;
+                let potentialSlPnL = null;
+                let potentialSlPnLPercent = null;
+
+                if (entryPrice && quantity > 0) {
+                  const entryValue = entryPrice * quantity;
+
+                  if (tpPrice) {
+                    if (isLong) {
+                      potentialTpPnL = (tpPrice - entryPrice) * quantity;
+                    } else {
+                      potentialTpPnL = (entryPrice - tpPrice) * quantity;
+                    }
+                    potentialTpPnLPercent = (potentialTpPnL / entryValue) * 100;
+                  }
+
+                  if (slPrice) {
+                    if (isLong) {
+                      potentialSlPnL = (slPrice - entryPrice) * quantity;
+                    } else {
+                      potentialSlPnL = (entryPrice - slPrice) * quantity;
+                    }
+                    potentialSlPnLPercent = (potentialSlPnL / entryValue) * 100;
+                  }
+                }
 
                 return (
                   <div
@@ -377,11 +419,33 @@ function App() {
                       </div>
                       <div>
                         <div className="text-dark-text-secondary">TP Target</div>
-                        <div className="font-mono font-medium text-profit">${trade.initial_tp?.toFixed(5)}</div>
+                        {tpPrice ? (
+                          <div>
+                            <div className="font-mono font-medium text-profit">${tpPrice.toFixed(5)}</div>
+                            {potentialTpPnL !== null && (
+                              <div className="text-xs text-profit mt-0.5">
+                                +${formatPnL(potentialTpPnL)} ({potentialTpPnLPercent?.toFixed(2)}%)
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-dark-text-secondary">-</div>
+                        )}
                       </div>
                       <div>
                         <div className="text-dark-text-secondary">Stop Loss</div>
-                        <div className="font-mono font-medium text-loss">${trade.current_sl?.toFixed(5)}</div>
+                        {slPrice ? (
+                          <div>
+                            <div className="font-mono font-medium text-loss">${slPrice.toFixed(5)}</div>
+                            {potentialSlPnL !== null && (
+                              <div className="text-xs text-loss mt-0.5">
+                                {potentialSlPnL >= 0 ? '+' : ''}${formatPnL(potentialSlPnL)} ({potentialSlPnLPercent?.toFixed(2)}%)
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-dark-text-secondary">-</div>
+                        )}
                       </div>
                     </div>
 
