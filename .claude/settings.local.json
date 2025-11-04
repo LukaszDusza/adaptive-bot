@@ -85,7 +85,8 @@
       "Bash(./clean_git_cache.sh)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(docker system prune:*)"
+      "Bash(docker system prune:*)",
+      "Bash(docker container logs:*)"
     ],
     "deny": [],
     "ask": []

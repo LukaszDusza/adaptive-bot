@@ -1,0 +1,56 @@
+{
+  "version": "v1.2.1000pepe",
+  "ticker": "1000PEPEUSDT",
+  "timeframe": "15m",
+  "helper_timeframes": [
+    "1h",
+    "2h",
+    "4h",
+    "12h",
+    "1d"
+  ],
+  "side": "long",
+  "n_label_trials": 300,
+  "n_model_trials": 700,
+  "best_label_params": {
+    "barrier_size": 0.015103314839246283,
+    "time_limit": 11
+  },
+  "best_model_params": {
+    "n_estimators": 514,
+    "learning_rate": 0.010486683091723114,
+    "reg_alpha": 12.266855077534055,
+    "reg_lambda": 6.3370153566717935,
+    "num_leaves": 36,
+    "colsample_bytree": 0.7097292292272405,
+    "subsample": 0.7194388074520008,
+    "subsample_freq": 4,
+    "min_child_samples": 186
+  },
+  "optimal_threshold": 0.47112169639428725,
+  "recommended_min_proba_diff": 0.24,
+  "n_features_selected": 76,
+  "n_features_total": 266,
+  "n_samples_train": 47035,
+  "n_samples_calibration": 6171,
+  "n_samples_holdout": 6791,
+  "pipeline_version": "v2.1",
+  "fixes_applied": [
+    "FIX #1: Symmetric barriers (PT=SL) - eliminates positive bias",
+    "FIX #2: Removed SMOTE - use class_weight='balanced'",
+    "FIX #3: Added 2% gap to walk-forward CV - prevents data leakage",
+    "FIX #4: Removed balance penalty - natural label distribution",
+    "FIX #5: 3-way split (train/calib/holdout) - proper threshold tuning"
+  ],
+  "enhancements_v2.1": [
+    "POPRAWKA #1: Heuristic min_proba_diff recommendation",
+    "POPRAWKA #2: CV-based feature selection (5 folds)",
+    "POPRAWKA #4: Pruning after fold 1 (was fold 0)",
+    "POPRAWKA #5: Early stopping for final model",
+    "POPRAWKA #6: Parametrized min_recall_target",
+    "POPRAWKA #7: Gap size respects feature lookback (min 200)",
+    "POPRAWKA #8: Expanded hyperparameter ranges",
+    "POPRAWKA #9: Feature drift monitoring (KS test)",
+    "POPRAWKA #10: Fine-grained threshold search (21 values)"
+  ]
+}

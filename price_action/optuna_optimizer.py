@@ -308,11 +308,16 @@ class BacktesterOptimizer:
                 fold_metrics_list.append(fold_metrics)
                 fold_dd_list.append(fold_metrics.get('max_drawdown_pct', 100))
 
-                # EARLY STOPPING: After first fold, report intermediate value for pruning
+                # EARLY STOPPING: After first fold, prune if performance is terrible
+                # NOTE: trial.report() and trial.should_prune() NOT supported for multi-objective studies
+                # Use simple heuristic instead: prune if PnL < -50% or drawdown > 80%
                 if fold_idx == 0:
-                    trial.report(fold_metrics.get('total_pnl_usd', -999999), fold_idx)
-                    if trial.should_prune():
-                        raise optuna.TrialPruned(f"Pruned after fold {fold_idx} (poor performance)")
+                    fold_pnl_pct = fold_metrics.get('total_return_pct', -999)
+                    fold_dd_pct = fold_metrics.get('max_drawdown_pct', 100)
+
+                    if fold_pnl_pct < -50 or fold_dd_pct > 80:
+                        logging.warning(f"Pruning trial: Poor fold 0 performance (PnL={fold_pnl_pct:.1f}%, DD={fold_dd_pct:.1f}%)")
+                        raise optuna.TrialPruned(f"Pruned after fold {fold_idx} (PnL={fold_pnl_pct:.1f}%, DD={fold_dd_pct:.1f}%)")
 
             except optuna.TrialPruned:
                 # Re-raise TrialPruned to signal early stopping
@@ -445,11 +450,9 @@ class BacktesterOptimizer:
             seed=42               # Reproducible results
         )
 
-        pruner = optuna.pruners.MedianPruner(
-            n_startup_trials=10,  # Don't prune first 10 trials
-            n_warmup_steps=1,     # Prune after 1st fold (of 3)
-            interval_steps=1      # Check every fold
-        )
+        # NOTE: MedianPruner requires trial.report() which is NOT supported for multi-objective studies
+        # Use NopPruner (no-op) instead - we still have heuristic pruning in objective function
+        pruner = optuna.pruners.NopPruner()
 
         # Create multi-objective study (3 objectives, all to maximize)
         # Objective 1: PnL (highest priority)

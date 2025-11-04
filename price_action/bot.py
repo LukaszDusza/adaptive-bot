@@ -2156,11 +2156,26 @@ class TradingBot:
                         # SHORT: Sell higher (limit above current price)
                         limit_price = current_price * (1 + self.config.LIMIT_OFFSET_PCT)
 
+                    # CRITICAL FIX: Calculate SL/TP BEFORE placing order for immediate protection
+                    # SL/TP will be embedded in the limit order and activate when order fills
+                    if decision == "BUY":
+                        planned_sl = limit_price * (1 - self.config.TSL_PCT)
+                        planned_tp = limit_price * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+                    else:
+                        planned_sl = limit_price * (1 + self.config.TSL_PCT)
+                        planned_tp = limit_price * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+
                     logging.warning(f"📋 Placing LIMIT order: {position_type}")
                     logging.warning(f"   Current: {current_price:.4f} | Limit: {limit_price:.4f} | Offset: {self.config.LIMIT_OFFSET_PCT*100:.2f}%")
+                    tp_display = f"{planned_tp:.4f}" if planned_tp > 0 else "OFF"
+                    logging.warning(f"   🛡️  Order will have SL: {planned_sl:.4f} | TP: {tp_display}")
 
-                    # Place limit order
-                    resp = self.adapter.limit_open(self.config.TICKER, side_str, qty, limit_price)
+                    # Place limit order WITH SL/TP protection
+                    resp = self.adapter.limit_open(
+                        self.config.TICKER, side_str, qty, limit_price,
+                        stop_loss=planned_sl,
+                        take_profit=planned_tp if planned_tp > 0 else None
+                    )
                     order_id = (resp.get("result") or {}).get("orderId")
 
                     if not order_id:
@@ -2186,10 +2201,13 @@ class TradingBot:
                         "current_price": float(current_price),
                         "quantity": float(qty),
                         "side": position_type,
-                        "max_wait_seconds": self.config.MAX_WAITING_LIMIT_ORDER
+                        "max_wait_seconds": self.config.MAX_WAITING_LIMIT_ORDER,
+                        "sl_price": float(planned_sl),
+                        "tp_price": float(planned_tp) if planned_tp > 0 else None
                     })
 
                     logging.info(f"✓ Limit order placed: {order_id} | Wait max {self.config.MAX_WAITING_LIMIT_ORDER}s")
+                    logging.info(f"   🛡️  Position will be PROTECTED when order fills: SL={planned_sl:.4f} | TP={tp_display}")
                     return  # Exit - will check order status in run_cycle()
 
             # ========== MARKET ORDER MODE (original logic) ==========
