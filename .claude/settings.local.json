@@ -86,7 +86,7 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(docker system prune:*)",
-      "Bash(docker container logs:*)"
+      "Bash(xargs:*)"
     ],
     "deny": [],
     "ask": []

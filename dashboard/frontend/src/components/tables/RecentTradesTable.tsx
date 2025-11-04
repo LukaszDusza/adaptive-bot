@@ -107,10 +107,15 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
   };
 
   const formatCurrency = (value: number) => {
+    // For small PnL values (< $0.01), show 3 decimal places to avoid confusion
+    // e.g., $0.003 instead of $0.00 (which looks like zero but is actually positive)
+    const decimals = Math.abs(value) < 0.01 && value !== 0 ? 3 : 2;
+
     return new Intl.NumberFormat('en-US', {
       style: 'currency',
       currency: 'USD',
-      minimumFractionDigits: 2,
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
     }).format(value);
   };
 

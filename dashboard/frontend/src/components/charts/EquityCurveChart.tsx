@@ -21,6 +21,13 @@ interface EquityCurveChartProps {
 }
 
 export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({ data }) => {
+  // Helper function to format PnL with dynamic precision
+  const formatPnL = (value: number): string => {
+    // For small PnL values (< $0.01), show 3 decimal places to avoid confusion
+    const decimals = Math.abs(value) < 0.01 && value !== 0 ? 3 : 2;
+    return value.toFixed(decimals);
+  };
+
   if (!data || data.length === 0) {
     return (
       <div className="card">
@@ -58,7 +65,7 @@ export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({ data }) => {
         <div className="bg-dark-card border border-dark-border rounded p-3 shadow-lg">
           <p className="text-sm text-dark-text-secondary mb-1">{data.timestamp}</p>
           <p className={`font-bold ${data.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-            PnL: ${data.pnl.toFixed(2)}
+            PnL: ${formatPnL(data.pnl)}
           </p>
           <p className="text-sm text-dark-text-secondary">
             Trades: {data.trades}
@@ -80,16 +87,16 @@ export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({ data }) => {
           <div>
             <span className="text-dark-text-secondary">Final P&L: </span>
             <span className={`font-bold ${finalPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-              ${finalPnL.toFixed(2)}
+              ${formatPnL(finalPnL)}
             </span>
           </div>
           <div>
             <span className="text-dark-text-secondary">Peak: </span>
-            <span className="font-bold text-profit">${peakPnL.toFixed(2)}</span>
+            <span className="font-bold text-profit">${formatPnL(peakPnL)}</span>
           </div>
           <div>
             <span className="text-dark-text-secondary">Valley: </span>
-            <span className="font-bold text-loss">${valleyPnL.toFixed(2)}</span>
+            <span className="font-bold text-loss">${formatPnL(valleyPnL)}</span>
           </div>
         </div>
       </div>

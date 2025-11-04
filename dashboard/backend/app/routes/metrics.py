@@ -163,6 +163,18 @@ async def get_equity_curve():
     """
     _check_bybit_available()
 
+    # Get closed P&L history to calculate starting equity correctly
+    stats = bybit_service.get_trade_history_stats_from_bybit(limit=100)
+    total_realized_pnl = stats.get('total_pnl', 0.0)
+
+    # Get current equity
+    current_equity = bybit_service.get_wallet_balance()
+
+    # Calculate TRUE starting equity (before all trading)
+    # Current equity = Starting equity + Total realized PnL
+    # Therefore: Starting equity = Current equity - Total realized PnL
+    starting_equity = current_equity - total_realized_pnl
+
     # Get equity curve from Bybit API (last 100 trades)
     bybit_equity_data = bybit_service.build_equity_curve_from_bybit(limit=100)
 
@@ -170,22 +182,24 @@ async def get_equity_curve():
         return []
 
     # Convert to EquityCurvePoint format
-    running_max_equity = 0.0
+    running_max_pnl = 0.0
     equity_curve = []
 
     for i, point in enumerate(bybit_equity_data):
         equity = point['equity']
-        running_max_equity = max(running_max_equity, equity)
 
-        # Calculate drawdown from peak
-        if running_max_equity > 0:
-            drawdown = ((running_max_equity - equity) / running_max_equity) * 100
-        else:
-            drawdown = 0.0
+        # Calculate cumulative PnL relative to TRUE starting equity
+        cumulative_pnl = equity - starting_equity
+
+        # Track peak PnL for drawdown calculation
+        running_max_pnl = max(running_max_pnl, cumulative_pnl)
+
+        # Calculate drawdown from peak PnL
+        drawdown = running_max_pnl - cumulative_pnl
 
         equity_curve.append(EquityCurvePoint(
             timestamp=point['timestamp'],
-            cumulative_pnl=equity,
+            cumulative_pnl=cumulative_pnl,
             trade_count=i + 1,
             drawdown=drawdown
         ))
@@ -208,11 +222,25 @@ async def get_drawdown_curve():
     if not equity_curve:
         return []
 
+    # FIX: Calculate percentage drawdown correctly
+    # Get starting equity for proper percentage calculation
+    starting_equity = bybit_service.get_wallet_balance()  # Current balance
+    # Subtract total PnL to get starting balance
+    if equity_curve:
+        final_pnl = equity_curve[-1].cumulative_pnl
+        starting_equity = starting_equity - final_pnl
+
     drawdown_curve = []
     for point in equity_curve:
-        # Calculate percentage drawdown
-        peak = point.cumulative_pnl + point.drawdown
-        dd_percent = (point.drawdown / peak * 100) if peak > 0 else 0.0
+        # Peak = starting equity + peak PnL
+        peak_pnl = point.cumulative_pnl + point.drawdown
+        peak_equity = starting_equity + peak_pnl
+
+        # Calculate percentage drawdown relative to peak equity
+        if peak_equity > 0:
+            dd_percent = (point.drawdown / peak_equity) * 100
+        else:
+            dd_percent = 0.0
 
         drawdown_curve.append(DrawdownPoint(
             timestamp=point.timestamp,
