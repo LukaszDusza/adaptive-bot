@@ -98,80 +98,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed  # ENHANCEMENT #
 import hashlib  # ENHANCEMENT #2: Persistent disk cache for features
 from pathlib import Path  # ENHANCEMENT #2: Cache directory management
 from feature_config import FEATURE_CONFIG  # ENHANCEMENT #8: Centralized configuration
+from logging_config import setup_logging, get_tqdm_settings  # Centralized logging
+
+# Setup logger for this module
+logger = setup_logging(__name__)
 from logging.handlers import RotatingFileHandler  # ETAP 2.1: File logging
 
 # ============================================================================
-# ETAP 2.1: LOGGING INFRASTRUCTURE SETUP
+# LOGGING: Using centralized logging_config module (imported above)
 # ============================================================================
-
-def setup_logging(log_dir: str = "logs", module_name: str = "data_preparer"):
-    """
-    Configure logging with file and console handlers.
-
-    ETAP 2.1: Professional logging setup:
-    - File handler: DEBUG+ to logs/training_YYYY-MM-DD_HH-MM-SS.log
-    - Console handler: WARNING+ (clean output for user)
-    - Rotating logs: 10 files × 10MB each
-    - Format: [timestamp] [LEVEL] module:line - message
-
-    Args:
-        log_dir: Directory for log files
-        module_name: Module name for log file naming
-    """
-    # Create logs directory
-    log_path = Path(log_dir)
-    log_path.mkdir(parents=True, exist_ok=True)
-
-    # Generate log filename with timestamp
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    log_file = log_path / f"{module_name}_{timestamp}.log"
-
-    # Create formatters
-    file_formatter = logging.Formatter(
-        '[%(asctime)s] [%(levelname)-8s] %(name)s:%(lineno)d - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-    console_formatter = logging.Formatter(
-        '[%(levelname)s] %(message)s'
-    )
-
-    # Get root logger
-    logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)  # Capture everything
-
-    # Remove existing handlers to avoid duplicates
-    logger.handlers.clear()
-
-    # File handler: DEBUG and above (everything)
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=10*1024*1024,  # 10MB per file
-        backupCount=10,  # Keep 10 old files
-        encoding='utf-8'
-    )
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
-
-    # Console handler: WARNING and above (clean output)
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.WARNING)
-    console_handler.setFormatter(console_formatter)
-    logger.addHandler(console_handler)
-
-    # Log startup message
-    logger.info("="*80)
-    logger.info(f"Logging initialized for {module_name}")
-    logger.info(f"Log file: {log_file}")
-    logger.info(f"Console level: WARNING+")
-    logger.info(f"File level: DEBUG+")
-    logger.info("="*80)
-
-    return logger
-
-# Initialize logging when module is imported
-_logger = setup_logging(log_dir="logs", module_name="data_preparer")
+# Old setup_logging() function removed - now using logging_config.setup_logging()
 
 # ============================================================================
 # ENHANCEMENT #9: FEATURE IMPORTANCE FEEDBACK LOOP
@@ -200,16 +136,16 @@ def _load_feature_importance_rankings(ticker: str, timeframe: str, helper_timefr
     rankings_path = Path(f"models/{version}/{strategy_id}/feature_importance_rankings.csv")
 
     if not rankings_path.exists():
-        logging.info(f"💡 Feature importance rankings not found: {rankings_path}")
+        logger.info(f"💡 Feature importance rankings not found: {rankings_path}")
         return pd.DataFrame()
 
     try:
         rankings_df = pd.read_csv(rankings_path)
-        logging.info(f"✅ Loaded feature importance rankings from: {rankings_path}")
-        logging.info(f"   Total features ranked: {len(rankings_df)}")
+        logger.info(f"✅ Loaded feature importance rankings from: {rankings_path}")
+        logger.info(f"   Total features ranked: {len(rankings_df)}")
         return rankings_df
     except Exception as e:
-        logging.warning(f"⚠️  Failed to load feature importance rankings: {e}")
+        logger.warning(f"⚠️  Failed to load feature importance rankings: {e}")
         return pd.DataFrame()
 
 
@@ -241,9 +177,9 @@ def get_weak_features_to_skip(ticker: str, timeframe: str, helper_timeframes: li
     weak_features = rankings_df[rankings_df['cumulative_importance'] > cumulative_threshold]['feature'].tolist()
 
     if weak_features:
-        logging.info(f"📊 ENHANCEMENT #9: Identified {len(weak_features)} weak features to skip")
-        logging.info(f"   Threshold: {cumulative_threshold*100:.0f}% cumulative importance")
-        logging.info(f"   Examples: {', '.join(weak_features[:5])}")
+        logger.info(f"📊 ENHANCEMENT #9: Identified {len(weak_features)} weak features to skip")
+        logger.info(f"   Threshold: {cumulative_threshold*100:.0f}% cumulative importance")
+        logger.info(f"   Examples: {', '.join(weak_features[:5])}")
 
     return weak_features
 
@@ -510,11 +446,11 @@ def remove_correlated_features(df: pd.DataFrame,
     Returns:
         Tuple[DataFrame, List[str]]: DataFrame z usuniętymi cechami, lista usuniętych cech
     """
-    logging.info(f"\n{'='*60}")
-    logging.info("ANALIZA KORELACJI CECH")
-    logging.info(f"{'='*60}")
-    logging.info(f"Próg korelacji: {correlation_threshold}")
-    logging.info(f"Początkowa liczba cech: {df.shape[1]}")
+    logger.info(f"\n{'='*60}")
+    logger.info("ANALIZA KORELACJI CECH")
+    logger.info(f"{'='*60}")
+    logger.info(f"Próg korelacji: {correlation_threshold}")
+    logger.info(f"Początkowa liczba cech: {df.shape[1]}")
     # Domyślna lista ważnych cech
     if keep_important is None:
         keep_important = [
@@ -554,7 +490,7 @@ def remove_correlated_features(df: pd.DataFrame,
         cols_to_analyze.remove(target_col)
     
     # Macierz korelacji
-    logging.info(f"Obliczanie macierzy korelacji dla {len(cols_to_analyze)} cech...")
+    logger.info(f"Obliczanie macierzy korelacji dla {len(cols_to_analyze)} cech...")
     corr_matrix = df[cols_to_analyze].corr().abs()
     
     # Górny trójkąt
@@ -598,26 +534,26 @@ def remove_correlated_features(df: pd.DataFrame,
                         to_drop.add(corr_feature)
     
     # Raport
-    logging.info(f"\nZnaleziono {len(high_corr_pairs)} par cech o korelacji > {correlation_threshold}")
+    logger.info(f"\nZnaleziono {len(high_corr_pairs)} par cech o korelacji > {correlation_threshold}")
     if high_corr_pairs:
-        logging.info("\nTop 10 najwyższych korelacji:")
+        logger.info("\nTop 10 najwyższych korelacji:")
         sorted_pairs = sorted(high_corr_pairs, key=lambda x: x['correlation'], reverse=True)
         for pair in sorted_pairs[:10]:
-            logging.info(f"  {pair['feature1']:40s} <-> {pair['feature2']:40s} : {pair['correlation']:.3f}")
+            logger.info(f"  {pair['feature1']:40s} <-> {pair['feature2']:40s} : {pair['correlation']:.3f}")
     to_drop_list = list(to_drop)
-    logging.info(f"\nUsuwam {len(to_drop_list)} skorelowanych cech")
+    logger.info(f"\nUsuwam {len(to_drop_list)} skorelowanych cech")
     if to_drop_list:
-        logging.info("\nPrzykładowe usunięte cechy (max 20):")
+        logger.info("\nPrzykładowe usunięte cechy (max 20):")
         for feature in sorted(to_drop_list)[:20]:
-            logging.info(f"  - {feature}")
+            logger.info(f"  - {feature}")
         if len(to_drop_list) > 20:
-            logging.info(f"  ... i {len(to_drop_list) - 20} więcej")
+            logger.info(f"  ... i {len(to_drop_list) - 20} więcej")
     # Usuń
     df_cleaned = df.drop(columns=to_drop_list, errors='ignore')
     
-    logging.info(f"\nKońcowa liczba cech: {df_cleaned.shape[1]}")
-    logging.info(f"Usunięto: {len(to_drop_list)} cech ({len(to_drop_list)/len(cols_to_analyze)*100:.1f}%)")
-    logging.info(f"{'='*60}\n")
+    logger.info(f"\nKońcowa liczba cech: {df_cleaned.shape[1]}")
+    logger.info(f"Usunięto: {len(to_drop_list)} cech ({len(to_drop_list)/len(cols_to_analyze)*100:.1f}%)")
+    logger.info(f"{'='*60}\n")
     return df_cleaned, to_drop_list
 
 
@@ -997,7 +933,7 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
     Returns:
         DataFrame z dodanymi ICT features
     """
-    logging.info("  === ICT & SMART MONEY CONCEPTS ===")
+    logger.info("  === ICT & SMART MONEY CONCEPTS ===")
     if parallel:
         # ENHANCEMENT #10: Parallel feature computation (2-3x speedup)
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1016,11 +952,13 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
         with ThreadPoolExecutor(max_workers=min(7, len(detection_tasks))) as executor:
             future_to_name = {executor.submit(func, df_copy): name for name, func, df_copy in detection_tasks}
 
-            with tqdm(total=len(detection_tasks), desc="    🔧 ICT detections", ncols=80, leave=False) as pbar:
+            tqdm_settings = get_tqdm_settings()
+            with tqdm(total=len(detection_tasks), desc="    🔧 ICT detections", **tqdm_settings) as pbar:
                 for future in as_completed(future_to_name):
                     name = future_to_name[future]
                     results[name] = future.result()
-                    pbar.set_postfix_str(f"{name}")
+                    if not tqdm_settings['disable']:
+                        pbar.set_postfix_str(f"{name}")
                     pbar.update(1)
 
         # Merge all results into df
@@ -1031,32 +969,32 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
                 df = pd.concat([df, result_df[new_cols]], axis=1)
     else:
         # Sequential (original implementation)
-        logging.info("    → Fair Value Gaps (FVG)...")
+        logger.info("    → Fair Value Gaps (FVG)...")
         df = detect_fair_value_gaps(df)
 
-        logging.info("    → Liquidity Sweeps...")
+        logger.info("    → Liquidity Sweeps...")
         df = detect_liquidity_sweeps(df, lookback=20)
 
-        logging.info("    → Order Blocks...")
+        logger.info("    → Order Blocks...")
         df = detect_order_blocks(df, impulse_threshold=0.015)
 
-        logging.info("    → Breaker Blocks...")
+        logger.info("    → Breaker Blocks...")
         df = detect_breaker_blocks(df)
 
-        logging.info("    → Market Structure Shifts (MSS)...")
+        logger.info("    → Market Structure Shifts (MSS)...")
         df = detect_market_structure_shift(df, swing_period=10)
 
-        logging.info("    → Institutional Candles...")
+        logger.info("    → Institutional Candles...")
         df = detect_institutional_candles(df)
 
-        logging.info("    → Liquidity Voids...")
+        logger.info("    → Liquidity Voids...")
         df = detect_liquidity_voids(df, volume_threshold=0.5)
     
     # ========================================================================
     # COMPOSITE ICT SCORE - agregacja wszystkich sygnałów ICT
     # To jest KLUCZOWA cecha - model powinien jej dać dużą wagę
     # ========================================================================
-    logging.info("    → Composite ICT Score (HIGH IMPORTANCE)...")
+    logger.info("    → Composite ICT Score (HIGH IMPORTANCE)...")
     # PERFORMANCE FIX: Batch adding ICT features to avoid DataFrame fragmentation
     ict_features = {}
 
@@ -1080,7 +1018,7 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
     # EXPERIMENT 3A: ROLLING ICT FEATURES - Zmniejszenie sparsity
     # Ciągłe features zamiast sparse binary → LightGBM preferuje continuous
     # ========================================================================
-    logging.info("    → Rolling ICT Features (EXPERIMENT 3A - reduce sparsity)...")
+    logger.info("    → Rolling ICT Features (EXPERIMENT 3A - reduce sparsity)...")
     # 1. Rolling average ICT composite score (smoothed signal)
     ict_features['ict_composite_score_ma_10'] = ict_features['ict_composite_score'].rolling(10, min_periods=1).mean()
 
@@ -1109,11 +1047,11 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
     ob_occurred = (df['order_block'] != 0)
     ict_features['bars_since_last_ob'] = _calculate_bars_since_event_vectorized(ob_occurred, cap=50)
 
-    logging.info("    ✓ Rolling ICT Features: 7 nowych continuous features dodanych")
+    logger.info("    ✓ Rolling ICT Features: 7 nowych continuous features dodanych")
     # ========================================================================
     # SMART MONEY CONTEXT FEATURES - dodatkowe cechy kontekstowe
     # ========================================================================
-    logging.info("    → Smart Money Context Features...")
+    logger.info("    → Smart Money Context Features...")
     # Czy jesteśmy przy Order Block + FVG (bardzo silny sygnał)
     ict_features['ob_with_fvg'] = (
         ((df['testing_bullish_ob'] == 1) & (df['fvg_signal'] == 1)) |
@@ -1143,7 +1081,7 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
     # Batch add all ICT features at once
     df = pd.concat([df, pd.DataFrame(ict_features, index=df.index)], axis=1)
     
-    logging.info("    ✓ ICT/Smart Money: 37+ nowych cech dodanych (30 base + 7 rolling features)")
+    logger.info("    ✓ ICT/Smart Money: 37+ nowych cech dodanych (30 base + 7 rolling features)")
     return df
 
 
@@ -1522,7 +1460,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     import warnings
     warnings.filterwarnings('ignore', message='DataFrame is highly fragmented')
 
-    logging.info(f"Obliczanie cech dla interwału bazowego (level={feature_level})...")
+    logger.info(f"⚙️  Computing features (level={feature_level})...")
     # ENHANCEMENT #8: Load configuration instead of hardcoded values
     SWING_WINDOW = FEATURE_CONFIG['price_action']['swing_window']
     VOLUME_MA_WINDOW = FEATURE_CONFIG['indicators']['volume_ma_window']
@@ -1553,7 +1491,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Add price_range to df_out (required by old models)
     df_out['price_range'] = _cache['price_range']
 
-    logging.info("  1. Struktura rynku...")
+    logger.debug("  1. Struktura rynku...")
     swing_high, swing_low = df_out['high'].rolling(window=SWING_WINDOW).max(), df_out['low'].rolling(
         window=SWING_WINDOW).min()
     df_out[f'dist_from_swing_high_{SWING_WINDOW}'] = (df_out['close'] - swing_high) / swing_high
@@ -1570,20 +1508,20 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     df_out['dist_from_s1'] = (df_out['close'] - df_out['s1']) / df_out['s1']
     df_out['dist_from_r1'] = (df_out['close'] - df_out['r1']) / df_out['r1']
 
-    logging.info("  2. Analiza wolumenu...")
+    logger.debug("  2. Analiza wolumenu...")
     df_out[f'volume_vs_ma_{VOLUME_MA_WINDOW}'] = df_out['volume'] / df_out['volume'].rolling(
         window=VOLUME_MA_WINDOW).mean()
     up_volume, down_volume = df_out['volume'].where(df_out['close'] > df_out['open'], 0), df_out['volume'].where(
         df_out['close'] < df_out['open'], 0)
     df_out['rvol_ratio'] = up_volume.rolling(window=50).sum() / (down_volume.rolling(window=50).sum() + 1e-5)
 
-    logging.info("  3. Cechy świecowe...")
+    logger.debug("  3. Cechy świecowe...")
     body_size, wick_size = abs(df_out['close'] - df_out['open']), df_out['high'] - df_out['low']
     df_out['body_to_wick_ratio'] = body_size / wick_size
     df_out['upper_wick_size'] = (df_out['high'] - np.maximum(df_out['open'], df_out['close'])) / wick_size
     df_out['lower_wick_size'] = (np.minimum(df_out['open'], df_out['close']) - df_out['low']) / wick_size
 
-    logging.info("  4. Zmienność i prędkość...")
+    logger.debug("  4. Zmienność i prędkość...")
     atr_result = _safe_atr(df_out, 14)
     # pandas_ta sometimes returns DataFrame, ensure we get Series
     if isinstance(atr_result, pd.DataFrame):
@@ -1606,11 +1544,11 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
         bbw = (bbands[bbu_col] - bbands[bbl_col]) / bbands[bbm_col]
         df_out['bbw'], df_out['bbw_squeeze'] = bbw, bbw / bbw.rolling(window=100).mean()
 
-    logging.info("  5. Cechy oparte o VWAP...")
+    logger.debug("  5. Cechy oparte o VWAP...")
     df_out['vwap'] = ta.vwap(high=df_out['high'], low=df_out['low'], close=df_out['close'], volume=df_out['volume'])
     df_out['dist_from_vwap'] = (df_out['close'] - df_out['vwap']) / df_out['vwap']
 
-    logging.info("  6. Momentum i sygnały odwrócenia (ADAPTIVE)...")
+    logger.debug("  6. Momentum i sygnały odwrócenia (ADAPTIVE)...")
     # Standard RSI (dla kompatybilności)
     rsi = _safe_rsi(df_out, 14)
     rsi_7 = _safe_rsi(df_out, 7)
@@ -1653,14 +1591,14 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
 
     # COMPOSITE INDICATOR #2: Momentum Quality Score
     # PERFORMANCE FIX: Use batched approach to avoid DataFrame fragmentation
-    logging.info("  🔬 Composite #2: Momentum Quality Score...")
+    logger.info("  🔬 Composite #2: Momentum Quality Score...")
     composite_momentum = {}
     composite_momentum['momentum_quality_score'] = _calculate_momentum_quality_score(df_out)
     df_out = pd.concat([df_out, pd.DataFrame(composite_momentum, index=df_out.index)], axis=1)
 
     # OPTIMIZATION: Price structure features - trend quality indicators
     # OPTIMIZED: Vectorized approach (100-200x faster than loop)
-    logging.info("  6B. Price structure analysis (higher highs/lows)...")
+    logger.debug("  6B. Price structure analysis (higher highs/lows)...")
     window = 20
 
     # Vectorized calculation using numpy arrays
@@ -1684,7 +1622,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Batch add price structure features at once
     df_out = pd.concat([df_out, pd.DataFrame(price_structure_features, index=df_out.index)], axis=1)
 
-    logging.info("  7. Cechy mikrostruktury rynku...")
+    logger.debug("  7. Cechy mikrostruktury rynku...")
     # PERFORMANCE FIX: Batch adding microstructure features to avoid DataFrame fragmentation
     microstructure_features = {}
 
@@ -1705,7 +1643,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Batch add microstructure features at once
     df_out = pd.concat([df_out, pd.DataFrame(microstructure_features, index=df_out.index)], axis=1)
 
-    logging.info("  8. Zaawansowane cechy wolumenu...")
+    logger.debug("  8. Zaawansowane cechy wolumenu...")
     # PERFORMANCE FIX: Batch adding volume features to avoid DataFrame fragmentation
     volume_features = {}
 
@@ -1733,7 +1671,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Batch add volume features at once (no need to add avg_trade_size_raw - it's not needed)
     df_out = pd.concat([df_out, pd.DataFrame(volume_features, index=df_out.index)], axis=1)
 
-    logging.info("  8B. Order Flow Proxies (bez orderbook)...")
+    logger.debug("  8B. Order Flow Proxies (bez orderbook)...")
     # PERFORMANCE FIX: Batch adding to avoid DataFrame fragmentation
     # BATCH 1: Base features (needed as dependencies for later calculations)
     base_order_flow = {}
@@ -1811,7 +1749,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
 
     # COMPOSITE INDICATOR #1: Volume Regime Score
     # PERFORMANCE FIX: Use batched approach to avoid DataFrame fragmentation
-    logging.info("  🔬 Composite #1: Volume Regime Score...")
+    logger.info("  🔬 Composite #1: Volume Regime Score...")
     composite_volume = {}
     composite_volume['volume_regime_score'] = _calculate_volume_regime_score(df_out)
     df_out = pd.concat([df_out, pd.DataFrame(composite_volume, index=df_out.index)], axis=1)
@@ -1848,7 +1786,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Add TIER 2C features to dataframe
     df_out = pd.concat([df_out, pd.DataFrame(tier2c_features, index=df_out.index)], axis=1)
 
-    logging.info("  9. Cechy zmienności i range'u...")
+    logger.debug("  9. Cechy zmienności i range'u...")
     volatility_features = {}
     
     # True Range Percentile
@@ -1865,7 +1803,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Add volatility features to dataframe
     df_out = pd.concat([df_out, pd.DataFrame(volatility_features, index=df_out.index)], axis=1)
 
-    logging.info("  10. Kombinacje cech (interakcje)...")
+    logger.debug("  10. Kombinacje cech (interakcje)...")
     # RSI x Volume (momentum z potwierdzeniem wolumenu)
     interaction_features = {}
     interaction_features['rsi_volume_interaction'] = df_out['rsi_14'] * df_out['volume_vs_ma_20']
@@ -1890,7 +1828,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # FIX: These were missing for main timeframe - only existed for helpers
     # Required by confluence features in calculate_confluence_features()
     # ========================================================================
-    logging.info("  10B. Moving averages and trend features...")
+    logger.debug("  10B. Moving averages and trend features...")
 
     # BATCH 1: Calculate SMAs first
     sma_features = {}
@@ -1915,14 +1853,14 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Skip features 11-19 if feature_level='basic'
     # ========================================================================
     if feature_level == FEATURE_LEVEL_BASIC:
-        logging.info(f"  ⏭️  Skipping TIER 2 features (11-19) - basic mode")
+        logger.info(f"  ⏭️  Skipping TIER 2 features (11-19) - basic mode")
         # Jump to end of function (TIER 1 only)
         df_out.replace([np.inf, -np.inf], np.nan, inplace=True)
         df_out = df_out.copy()  # Defragment
         return df_out
 
     # TIER 2 continues here for standard/full modes
-    logging.info("  11. Zaawansowane momentum indicators (REGIME-AWARE)...")
+    logger.debug("  11. Zaawansowane momentum indicators (REGIME-AWARE)...")
     momentum_features = {}
 
     # === PRIORYTET 4: REGIME DETECTION NAJPIERW ===
@@ -1988,7 +1926,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
 
     df_out = pd.concat([df_out, pd.DataFrame(momentum_features, index=df_out.index)], axis=1)
 
-    logging.info("  12. Cechy czasowe (temporal features) - REMOVED per optimization recommendations...")
+    logger.debug("  12. Cechy czasowe (temporal features) - REMOVED per optimization recommendations...")
     # OPTIMIZATION: Temporal features removed to reduce overfitting to time patterns
     # Model should focus on price action, not clock-based patterns
     # Previously: hour_sin, hour_cos, day_sin, day_cos, is_weekend, session
@@ -1997,7 +1935,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Defragment DataFrame mid-way to avoid PerformanceWarnings in subsequent sections
     df_out = df_out.copy()
 
-    logging.info("  13. Volume-Price Divergence (NORMALIZED)...")
+    logger.debug("  13. Volume-Price Divergence (NORMALIZED)...")
     # FIX NON-STATIONARY: Normalize cumulative features using rolling windows
 
     # On-Balance Volume (OBV) - NORMALIZED
@@ -2030,7 +1968,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Chaikin Money Flow (CMF)
     df_out['cmf_20'] = (ad_multiplier * df_out['volume']).rolling(20).sum() / (df_out['volume'].rolling(20).sum() + 1e-8)
 
-    logging.info("  14. TIER 2A: Market Regime Classification...")
+    logger.debug("  14. TIER 2A: Market Regime Classification...")
     # ADX (Average Directional Index) - siła trendu
     adx = df_out.ta.adx(high='high', low='low', close='close', length=14)
     if adx is not None and not adx.empty:
@@ -2057,7 +1995,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     
     df_out.drop(columns=['bullish_candle'], inplace=True, errors='ignore')
 
-    logging.info("  15. TIER 2: Dodatkowe interakcje cech...")
+    logger.debug("  15. TIER 2: Dodatkowe interakcje cech...")
     # Volume × Volatility (czy wysokie volume = wysokie volatility?)
     if 'volatility_regime' in df_out.columns:
         df_out['volume_volatility_interaction'] = df_out['volume_vs_ma_20'] * df_out['volatility_regime']
@@ -2074,7 +2012,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     if 'hour_sin' in df_out.columns and 'volatility_regime' in df_out.columns:
         df_out['time_volatility_interaction'] = df_out['hour_sin'] * df_out['volatility_regime']
 
-    logging.info("  16. TIER 2: Bid-ask spread proxies...")
+    logger.debug("  16. TIER 2: Bid-ask spread proxies...")
     # High-Low spread jako proxy dla liquidity
     df_out['hl_spread'] = (df_out['high'] - df_out['low']) / (df_out['close'] + 1e-8)
     df_out['hl_spread_ma'] = df_out['hl_spread'].rolling(20).mean()
@@ -2095,7 +2033,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # ENHANCEMENT #3: Memory cleanup after TIER 2 features
     gc.collect()
 
-    logging.info("  17. TIER 3: Support/Resistance Detection...")
+    logger.debug("  17. TIER 3: Support/Resistance Detection...")
     # Rolling highs/lows jako S/R proxies (prostsza wersja bez scipy)
     df_out['resistance_50'] = df_out['high'].rolling(50).max()
     df_out['support_50'] = df_out['low'].rolling(50).min()
@@ -2118,7 +2056,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     df_out['support_strength'] = (df_out['low'] <= df_out['support_50'] * 1.005).astype(int).rolling(20).sum()
     
     # OPTIMIZATION: Enhanced S/R strength features
-    logging.info("  17B. Enhanced S/R strength analysis...")
+    logger.debug("  17B. Enhanced S/R strength analysis...")
     sr_threshold = 0.005  # 0.5%
     lookback = 100
     
@@ -2155,7 +2093,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     price_change_on_break_down = (df_out['support_50'] - df_out['close']) / df_out['support_50']
     df_out['support_break_momentum'] = (price_change_on_break_down * volume_ratio_on_break).where(support_breaks, 0)
 
-    logging.info("  18. TIER 3: Advanced Price Action Patterns...")
+    logger.debug("  18. TIER 3: Advanced Price Action Patterns...")
     # Użyj nowych funkcji pattern detection
     df_out['three_line_strike'] = _detect_three_line_strike(df_out)
     df_out['morning_evening_star'] = _detect_morning_evening_star(df_out)
@@ -2170,7 +2108,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     df_out['closed_near_high'] = ((df_out['close'].shift(1) - df_out['low'].shift(1)) / (df_out['high'].shift(1) - df_out['low'].shift(1) + 1e-8) > 0.8).astype(int)
     df_out['closed_near_low'] = ((df_out['close'].shift(1) - df_out['low'].shift(1)) / (df_out['high'].shift(1) - df_out['low'].shift(1) + 1e-8) < 0.2).astype(int)
 
-    logging.info("  19. TIER 3: Support/Resistance Interaction Features...")
+    logger.debug("  19. TIER 3: Support/Resistance Interaction Features...")
     # Support/Resistance × Volume (czy testy S/R mają volume confirmation?)
     df_out['resistance_volume_interaction'] = df_out['dist_from_resistance'] * df_out['volume_vs_ma_20']
     df_out['support_volume_interaction'] = df_out['dist_from_support'] * df_out['volume_vs_ma_20']
@@ -2189,7 +2127,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
         df_out['support_rsi_interaction'] = df_out['testing_support'] * (1 - df_out['rsi_14'] / 100)
 
     # COMPOSITE INDICATOR #3: S/R Context Score (3 features)
-    logging.info("  🔬 Composite #3: S/R Context Score...")
+    logger.info("  🔬 Composite #3: S/R Context Score...")
     sr_context_features = _calculate_sr_context(df_out)
     df_out = pd.concat([df_out, pd.DataFrame(sr_context_features, index=df_out.index)], axis=1)
 
@@ -2201,7 +2139,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # Skip features 20-22 if feature_level='standard'
     # ========================================================================
     if feature_level == FEATURE_LEVEL_STANDARD:
-        logging.info(f"  ⏭️  Skipping TIER 3-4 features (20-22) - standard mode")
+        logger.info(f"  ⏭️  Skipping TIER 3-4 features (20-22) - standard mode")
         # Jump to end of function (TIER 1-2 only)
         df_out.replace([np.inf, -np.inf], np.nan, inplace=True)
         df_out = df_out.copy()  # Defragment
@@ -2209,7 +2147,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
 
     # TIER 3-4 continues here for full mode only
     # POPRAWKA #3: TIER 4 - Enhanced Momentum Features dla LONG
-    logging.info("  20. POPRAWKA #3: TIER 4 - Enhanced Momentum Features dla LONG...")
+    logger.debug("  20. POPRAWKA #3: TIER 4 - Enhanced Momentum Features dla LONG...")
     # ENHANCEMENT #10: Use parallel ICT computation if enabled in config
     parallel_ict = FEATURE_CONFIG['performance'].get('parallel_ict', True)
     enhanced_momentum_features = {}
@@ -2255,7 +2193,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     df_out = pd.concat([df_out, pd.DataFrame(enhanced_momentum_features, index=df_out.index)], axis=1)
 
     # === PRIORYTET 3: VOLUME-CONFIRMED MOMENTUM (continuous versions) ===
-    logging.info("  20B. Volume-Confirmed Momentum Features...")
+    logger.debug("  20B. Volume-Confirmed Momentum Features...")
     volume_momentum = {}
 
     # Volume-weighted price momentum (VOL * price change)
@@ -2292,19 +2230,19 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     )
 
     df_out = pd.concat([df_out, pd.DataFrame(volume_momentum, index=df_out.index)], axis=1)
-    logging.info(f"     ✓ Dodano {len(volume_momentum)} volume-momentum features")
+    logger.info(f"     ✓ Dodano {len(volume_momentum)} volume-momentum features")
     # === KONIEC PRIORYTET 3 ===
 
     # ========================================================================
     # NOWE: Dodanie wskaźników kompozytowych
     # ========================================================================
-    logging.info("  21. Wskaźniki kompozytowe (uproszczone sygnały)...")
+    logger.debug("  21. Wskaźniki kompozytowe (uproszczone sygnały)...")
     df_out = add_oversold_overbought_signal(df_out)
     df_out = add_market_state_indicator(df_out)
     df_out = add_momentum_regime(df_out)
     df_out = add_volume_confirmation_score(df_out)
     df_out = add_multi_factor_sentiment(df_out)
-    logging.info("     ✓ Dodano 5 nowych wskaźników kompozytowych")
+    logger.info("     ✓ Dodano 5 nowych wskaźników kompozytowych")
     # ========================================================================
 
     # ENHANCEMENT #3: Memory cleanup after TIER 4 composite indicators
@@ -2316,10 +2254,10 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     # OPTIMIZATION: ICT features mają 0% selection rate (tylko 2 z 37 selected)
     # Wyłączone aby zaoszczędzić 20% czasu training (z 138 min → 110 min)
     # Funkcja add_ict_smart_money_features() pozostaje w kodzie do przyszłego użytku
-    logging.info("  22. ICT & Smart Money Concepts (HIGH PRIORITY + EXPERIMENT 3A)...")
+    logger.debug("  22. ICT & Smart Money Concepts (HIGH PRIORITY + EXPERIMENT 3A)...")
     # ENHANCEMENT #10: Use parallel computation for 2-3x speedup
     df_out = add_ict_smart_money_features(df_out, parallel=parallel_ict)
-    logging.info("     ✓ ICT/Smart Money: 37+ cech dodanych (30 base + 7 rolling for reduced sparsity)")
+    logger.info("     ✓ ICT/Smart Money: 37+ cech dodanych (30 base + 7 rolling for reduced sparsity)")
     # ========================================================================
 
     # ENHANCEMENT #3: Memory cleanup after ICT features (most expensive tier)
@@ -2863,7 +2801,7 @@ def _validate_data_preparer_inputs(ticker: str, timeframe: str, limit: int, help
     if errors:
         raise ValueError("Input validation failed:\n" + "\n".join(f"  ❌ {e}" for e in errors))
 
-    logging.info(f"✅ Input validation passed: {ticker} {timeframe} limit={limit} helpers={helper_timeframes}")
+    logger.info(f"✅ Input validation passed: {ticker} {timeframe} limit={limit} helpers={helper_timeframes}")
 
 
 # ============================================================================
@@ -2944,7 +2882,7 @@ def _load_feature_cache(cache_key: str, ticker: str, timeframe: str, helper_time
 
     # Check if cache exists
     if not data_path.exists() or not metadata_path.exists():
-        logging.info(f"💾 Cache miss - no cache file for key {cache_key[:8]}...")
+        logger.info(f"💾 Cache miss - no cache file for key {cache_key[:8]}...")
         return pd.DataFrame()
 
     try:
@@ -2956,13 +2894,13 @@ def _load_feature_cache(cache_key: str, ticker: str, timeframe: str, helper_time
         if (metadata.get('ticker') != ticker or
             metadata.get('timeframe') != timeframe or
             metadata.get('helper_timeframes') != helper_timeframes):
-            logging.warning(f"⚠️  Cache parameters mismatch - invalidating cache")
+            logger.warning(f"⚠️  Cache parameters mismatch - invalidating cache")
             return pd.DataFrame()
 
         # CRITICAL FIX #3: Validate feature_level matches
         cached_feature_level = metadata.get('feature_level')
         if cached_feature_level != feature_level:
-            logging.warning(
+            logger.warning(
                 f"⚠️  Cache feature_level mismatch: cached={cached_feature_level}, "
                 f"requested={feature_level} - invalidating cache"
             )
@@ -2976,7 +2914,7 @@ def _load_feature_cache(cache_key: str, ticker: str, timeframe: str, helper_time
         actual_columns = set(cached_df.columns)
 
         if cached_columns and cached_columns != actual_columns:
-            logging.warning(
+            logger.warning(
                 f"⚠️  Cache column mismatch detected:\n"
                 f"   Metadata columns: {len(cached_columns)}\n"
                 f"   Actual columns: {len(actual_columns)}\n"
@@ -2986,7 +2924,7 @@ def _load_feature_cache(cache_key: str, ticker: str, timeframe: str, helper_time
 
         cache_age_hours = (pd.Timestamp.now() - pd.Timestamp(metadata['last_updated'])).total_seconds() / 3600
 
-        logging.info(
+        logger.info(
             f"✅ Cache hit! Loaded {len(cached_df)} rows × {len(cached_df.columns)} features ({feature_level}) "
             f"(age: {cache_age_hours:.1f}h, last: {metadata['last_timestamp']})"
         )
@@ -2994,7 +2932,7 @@ def _load_feature_cache(cache_key: str, ticker: str, timeframe: str, helper_time
         return cached_df
 
     except Exception as e:
-        logging.warning(f"⚠️  Cache load failed: {e} - will recompute")
+        logger.warning(f"⚠️  Cache load failed: {e} - will recompute")
         return pd.DataFrame()
 
 
@@ -3016,7 +2954,7 @@ def _save_feature_cache(df: pd.DataFrame, cache_key: str, ticker: str, timeframe
         feature_level: Feature complexity level (basic/standard/full)
     """
     if df.empty:
-        logging.warning("⚠️  Skipping cache save - empty DataFrame")
+        logger.warning("⚠️  Skipping cache save - empty DataFrame")
         return
 
     try:
@@ -3045,13 +2983,13 @@ def _save_feature_cache(df: pd.DataFrame, cache_key: str, ticker: str, timeframe
             json.dump(metadata, f, indent=2)
 
         file_size_mb = data_path.stat().st_size / 1024 / 1024
-        logging.info(
+        logger.info(
             f"💾 Cache saved: {len(df)} rows × {len(df.columns)} features ({feature_level}) "
             f"({file_size_mb:.1f} MB) to {cache_key[:8]}..."
         )
 
     except Exception as e:
-        logging.warning(f"⚠️  Cache save failed: {e} - continuing without cache")
+        logger.warning(f"⚠️  Cache save failed: {e} - continuing without cache")
 
 
 def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_timeframes, date_from, fetch_max):
@@ -3103,7 +3041,7 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
     def fetch_single_timeframe(tf, tf_limit):
         """Fetch a single timeframe (runs in thread)"""
         try:
-            logging.info(f"  🔄 Fetching {tf} (limit={tf_limit})...")
+            logger.info(f"  🔄 Fetching {tf} (limit={tf_limit})...")
             raw_data = adapter.fetch_ohlcv(
                 symbol=ticker,
                 timeframe=tf,
@@ -3113,7 +3051,7 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
             )
             return (tf, raw_data)
         except Exception as e:
-            logging.error(f"  ❌ Failed to fetch {tf}: {e}")
+            logger.error(f"  ❌ Failed to fetch {tf}: {e}")
             return (tf, None)
 
     # Prepare all fetch tasks
@@ -3123,7 +3061,7 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
             helper_limit = calc_helper_limit(helper_tf)
             tasks.append((helper_tf, helper_limit))
 
-    logging.info(f"🚀 ENHANCEMENT #1: Parallel fetching {len(tasks)} timeframes...")
+    logger.info(f"🚀 ENHANCEMENT #1: Parallel fetching {len(tasks)} timeframes...")
 
     # Execute all fetches in parallel
     results = {}
@@ -3131,21 +3069,23 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
         future_to_tf = {executor.submit(fetch_single_timeframe, tf, lim): tf for tf, lim in tasks}
 
         # ENHANCEMENT #9: Progress bar for API fetching
-        with tqdm(total=len(tasks), desc="⬇️  Fetching timeframes", ncols=80, leave=False) as pbar:
+        tqdm_settings = get_tqdm_settings()
+        with tqdm(total=len(tasks), desc="⬇️  Fetching timeframes", **tqdm_settings) as pbar:
             for future in as_completed(future_to_tf):
                 tf, raw_data = future.result()
                 if raw_data:
                     results[tf] = raw_data
-                    pbar.set_postfix_str(f"{tf}: {len(raw_data)} candles")
-                    logging.debug(f"  ✅ {tf}: {len(raw_data)} candles fetched")
+                    if not tqdm_settings['disable']:
+                        pbar.set_postfix_str(f"{tf}: {len(raw_data)} candles")
+                    logger.debug(f"  ✅ {tf}: {len(raw_data)} candles fetched")
                 else:
-                    logging.warning(f"  ⚠️  {tf}: NO DATA")
+                    logger.warning(f"  ⚠️  {tf}: NO DATA")
                 pbar.update(1)
 
     # Process results
     base_raw_data = results.get(timeframe)
     if not base_raw_data:
-        logging.error(f"❌ Base timeframe {timeframe} returned EMPTY DATA!")
+        logger.error(f"❌ Base timeframe {timeframe} returned EMPTY DATA!")
         return None, {}
 
     base_df = to_dataframe(base_raw_data)
@@ -3162,7 +3102,7 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
                 helper_df.sort_index(inplace=True)
                 helper_dfs[helper_tf] = helper_df
 
-    logging.info(f"✅ Parallel fetch complete: base={len(base_df)} rows, helpers={len(helper_dfs)} timeframes")
+    logger.info(f"✅ Parallel fetch complete: base={len(base_df)} rows, helpers={len(helper_dfs)} timeframes")
     return base_df, helper_dfs
 
 
@@ -3199,19 +3139,19 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         DataFrame with features
     """
     if fetch_max_history:
-        logging.info(f"📊 Fetching MAXIMUM available history: ticker={ticker}, timeframe={timeframe}, helpers={helper_timeframes}")
-        logging.info(f"⚠️  fetch_max_history=True - IGNORING limit parameter, fetching ALL available data from Bybit")
+        logger.info(f"📊 Fetching MAXIMUM available history: ticker={ticker}, timeframe={timeframe}, helpers={helper_timeframes}")
+        logger.info(f"⚠️  fetch_max_history=True - IGNORING limit parameter, fetching ALL available data from Bybit")
     else:
-        logging.info(f"📊 Fetching data: ticker={ticker}, timeframe={timeframe}, limit={limit}, helpers={helper_timeframes}")
+        logger.info(f"📊 Fetching data: ticker={ticker}, timeframe={timeframe}, limit={limit}, helpers={helper_timeframes}")
 
     if date_from:
-        logging.warning(f"⚠️  UWAGA: Dane będą pobrane wstecz od daty: {date_from}")
+        logger.warning(f"⚠️  UWAGA: Dane będą pobrane wstecz od daty: {date_from}")
     else:
-        logging.info(f"ℹ️  No date_from specified, fetching backwards from current time")
+        logger.info(f"ℹ️  No date_from specified, fetching backwards from current time")
 
     # ENHANCEMENT #7: Resolve feature level (with backwards compatibility)
     resolved_feature_level = _resolve_feature_level(feature_level, skip_slow_features)
-    logging.info(f"🎚️  Feature level: {resolved_feature_level} ({
+    logger.info(f"🎚️  Feature level: {resolved_feature_level} ({
         '~50' if resolved_feature_level == FEATURE_LEVEL_BASIC else
         '~150' if resolved_feature_level == FEATURE_LEVEL_STANDARD else
         '~300'
@@ -3246,7 +3186,7 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             # - Live bot (regular fetches): cache age ~< timeframe → always fresh
             # - Backtest/training: allows some staleness for better cache reuse
             if cache_age_minutes < timeframe_minutes * 1.5:  # 1.5x timeframe = production threshold
-                logging.info(
+                logger.info(
                     f"🎯 CACHE HIT - Fresh data returned "
                     f"(age: {cache_age_minutes:.1f}min < {timeframe_minutes:.1f}min)"
                 )
@@ -3256,7 +3196,7 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
                     return cached_df[available]
                 return cached_df
             else:
-                logging.info(
+                logger.info(
                     f"⏰ Cache stale (age: {cache_age_minutes:.1f}min), "
                     f"will fetch fresh data and update cache"
                 )
@@ -3277,36 +3217,38 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     )
 
     if base_df is None or base_df.empty:
-        logging.error(f"❌ Failed to fetch data for {ticker} {timeframe}!")
+        logger.error(f"❌ Failed to fetch data for {ticker} {timeframe}!")
         return pd.DataFrame()
 
     # BUG FIX #1: Remove duplicates from base_df BEFORE merging helper features
     if base_df.index.duplicated().any():
         n_duplicates = base_df.index.duplicated().sum()
-        logging.warning(f"⚠️  Wykryto {n_duplicates} duplikatów w base_df. Usuwanie (keep='first')...")
+        logger.warning(f"⚠️  Wykryto {n_duplicates} duplikatów w base_df. Usuwanie (keep='first')...")
         base_df = base_df[~base_df.index.duplicated(keep='first')]
-        logging.info(f"✓ Usunięto duplikaty z base_df. Pozostało {len(base_df)} unikalnych wpisów.")
+        logger.info(f"✓ Usunięto duplikaty z base_df. Pozostało {len(base_df)} unikalnych wpisów.")
 
-    logging.info(f"✅ Pobrano {len(base_df)} zamkniętych świec dla interwału bazowego {timeframe}.")
-    logging.info(f"📊 Base DataFrame shape after loading: {base_df.shape}")
+    logger.info(f"✅ Pobrano {len(base_df)} zamkniętych świec dla interwału bazowego {timeframe}.")
+    logger.info(f"📊 Base DataFrame shape after loading: {base_df.shape}")
 
     # Process helper timeframes (data already fetched in parallel)
     if helper_timeframes and helper_dfs_dict:
         # ENHANCEMENT #9: Progress bar for helper timeframe processing
-        with tqdm(total=len(helper_timeframes), desc="⚙️  Processing helpers", ncols=80, leave=False) as pbar:
+        tqdm_settings = get_tqdm_settings()
+        with tqdm(total=len(helper_timeframes), desc="⚙️  Processing helpers", **tqdm_settings) as pbar:
             for helper_tf in helper_timeframes:
                 if helper_tf not in helper_dfs_dict:
-                    logging.warning(f"⚠️  {helper_tf}: Skipped (no data fetched)")
+                    logger.warning(f"⚠️  {helper_tf}: Skipped (no data fetched)")
                     pbar.update(1)
                     continue
 
-                pbar.set_postfix_str(f"{helper_tf}")
+                if not tqdm_settings['disable']:
+                    pbar.set_postfix_str(f"{helper_tf}")
                 helper_df = helper_dfs_dict[helper_tf]
 
                 # BUG FIX #1: Remove duplicates from helper_df BEFORE calculating features
                 if helper_df.index.duplicated().any():
                     n_dup = helper_df.index.duplicated().sum()
-                    logging.warning(f"⚠️  {helper_tf}: Wykryto {n_dup} duplikatów. Usuwanie (keep='first')...")
+                    logger.warning(f"⚠️  {helper_tf}: Wykryto {n_dup} duplikatów. Usuwanie (keep='first')...")
                     helper_df = helper_df[~helper_df.index.duplicated(keep='first')]
 
                 helper_features = _calculate_helper_features(helper_df.copy(), feature_level=resolved_feature_level)
@@ -3315,7 +3257,7 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
                 # BUG FIX #1: Ensure helper_features has no duplicates before merge
                 if helper_features.index.duplicated().any():
                     n_dup = helper_features.index.duplicated().sum()
-                    logging.warning(f"⚠️  {helper_tf} features: {n_dup} duplikatów. Usuwanie (keep='first')...")
+                    logger.warning(f"⚠️  {helper_tf} features: {n_dup} duplikatów. Usuwanie (keep='first')...")
                     helper_features = helper_features[~helper_features.index.duplicated(keep='first')]
 
                 base_df = pd.merge_asof(base_df, helper_features, left_index=True, right_index=True, direction='backward')
@@ -3324,20 +3266,20 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     # BUG FIX #1: Safety check - should rarely trigger now that we handle duplicates before merge
     if base_df.index.duplicated().any():
         n_duplicates = base_df.index.duplicated().sum()
-        logging.warning(
+        logger.warning(
             f"⚠️  UNEXPECTED: {n_duplicates} duplikatów w indeksie po merge! "
             f"Usuwanie (keep='first'), ale to może wskazywać na problem w merge_asof."
         )
         base_df = base_df[~base_df.index.duplicated(keep='first')]
-        logging.info(f"✓ Usunięto duplikaty. Pozostało {len(base_df)} unikalnych wpisów.")
+        logger.info(f"✓ Usunięto duplikaty. Pozostało {len(base_df)} unikalnych wpisów.")
 
-    logging.info(f"📊 DataFrame shape before feature calculation: {base_df.shape}")
+    logger.info(f"📊 DataFrame shape before feature calculation: {base_df.shape}")
     final_df = _calculate_base_features(base_df, feature_level=resolved_feature_level)
-    logging.info(f"📊 DataFrame shape after feature calculation: {final_df.shape}")
+    logger.info(f"📊 DataFrame shape after feature calculation: {final_df.shape}")
 
     # OPTIMIZATION: Multi-timeframe confluence features
     if helper_timeframes:
-        logging.info("\n🔄 Calculating multi-timeframe confluence features...")
+        logger.info("\n🔄 Calculating multi-timeframe confluence features...")
         # Trend alignment score - are trends aligned across timeframes?
         trend_signals = []
         for helper_tf in helper_timeframes:
@@ -3347,7 +3289,7 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         
         if trend_signals:
             final_df['trend_alignment_score'] = sum(trend_signals) / len(trend_signals)
-            logging.info(f"   ✓ Added trend_alignment_score across {len(trend_signals)} timeframes")
+            logger.info(f"   ✓ Added trend_alignment_score across {len(trend_signals)} timeframes")
         # Swing alignment score - are we near swing highs/lows across timeframes?
         swing_high_signals = []
         swing_low_signals = []
@@ -3363,10 +3305,10 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         
         if swing_high_signals:
             final_df['near_swing_high_alignment'] = sum(swing_high_signals) / len(swing_high_signals)
-            logging.info(f"   ✓ Added near_swing_high_alignment across {len(swing_high_signals)} timeframes")
+            logger.info(f"   ✓ Added near_swing_high_alignment across {len(swing_high_signals)} timeframes")
         if swing_low_signals:
             final_df['near_swing_low_alignment'] = sum(swing_low_signals) / len(swing_low_signals)
-            logging.info(f"   ✓ Added near_swing_low_alignment across {len(swing_low_signals)} timeframes")
+            logger.info(f"   ✓ Added near_swing_low_alignment across {len(swing_low_signals)} timeframes")
         # Multi-timeframe momentum consensus
         momentum_signals = []
         for helper_tf in helper_timeframes:
@@ -3377,13 +3319,13 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         
         if momentum_signals:
             final_df['momentum_alignment_score'] = sum(momentum_signals) / len(momentum_signals)
-            logging.info(f"   ✓ Added momentum_alignment_score across {len(momentum_signals)} timeframes")
-        logging.info("✓ Multi-timeframe confluence features completed\n")
+            logger.info(f"   ✓ Added momentum_alignment_score across {len(momentum_signals)} timeframes")
+        logger.info("✓ Multi-timeframe confluence features completed\n")
     # ========================================================================
     # NEW ADVANCED FEATURES (expert analysis implementation)
     # ========================================================================
     if not skip_slow_features:
-        logging.info("\n🔬 Calculating ADVANCED features (confluence, pivot S/R, patterns)...")
+        logger.info("\n🔬 Calculating ADVANCED features (confluence, pivot S/R, patterns)...")
         # Progress bar for advanced features
         advanced_tasks = [
             ("Confluence features", lambda: calculate_confluence_features(final_df)),
@@ -3402,9 +3344,9 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             confluence_df = advanced_tasks[0][1]()
             if len(confluence_df.columns) > 0:
                 final_df = pd.concat([final_df, confluence_df], axis=1)
-                logging.info(f"   ✓ Added {len(confluence_df.columns)} confluence features")
+                logger.info(f"   ✓ Added {len(confluence_df.columns)} confluence features")
             else:
-                logging.warning(f"   ⚠ Skipped (missing required columns)")
+                logger.warning(f"   ⚠ Skipped (missing required columns)")
             pbar.update(1)
 
             # PRIORITY 2: Pivot-based dynamic S/R
@@ -3412,7 +3354,7 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             pivot_sr_df = advanced_tasks[1][1]()
             if len(pivot_sr_df.columns) > 0:
                 final_df = pd.concat([final_df, pivot_sr_df], axis=1)
-                logging.info(f"   ✓ Added {len(pivot_sr_df.columns)} pivot S/R features")
+                logger.info(f"   ✓ Added {len(pivot_sr_df.columns)} pivot S/R features")
             pbar.update(1)
 
             # PRIORITY 3: Double top/bottom patterns
@@ -3420,30 +3362,30 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             pattern_df = advanced_tasks[2][1]()
             if len(pattern_df.columns) > 0:
                 final_df = pd.concat([final_df, pattern_df], axis=1)
-                logging.info(f"   ✓ Added {len(pattern_df.columns)} pattern features")
+                logger.info(f"   ✓ Added {len(pattern_df.columns)} pattern features")
             pbar.update(1)
 
-        logging.info("✓ Advanced features completed\n")
+        logger.info("✓ Advanced features completed\n")
     else:
-        logging.info("\n⚡ SKIPPING slow features (skip_slow_features=True) - FAST MODE for live bot\n")
+        logger.info("\n⚡ SKIPPING slow features (skip_slow_features=True) - FAST MODE for live bot\n")
     # ========================================================================
     # UPROSZCZENIE: Brak usuwania weak features w data_preparer
     # Feature selection jest wykonywana TYLKO w model_pipeline.py
     # Bot/Backtest używają model_features_to_preserve do wyboru kolumn
     # ========================================================================
-    logging.info("\n" + "="*70)
-    logging.info("FEATURE MANAGEMENT: Simplified approach")
-    logging.info("="*70)
-    logging.info(f"📊 Total features generated: {final_df.shape[1]}")
+    logger.info("\n" + "="*70)
+    logger.info("FEATURE MANAGEMENT: Simplified approach")
+    logger.info("="*70)
+    logger.info(f"📊 Total features generated: {final_df.shape[1]}")
     if model_features_to_preserve:
-        logging.info(f"🔧 Model features to preserve (passed from bot/backtest): {len(model_features_to_preserve)}")
-        logging.info(f"   Note: Feature selection will be applied by caller, not here")
+        logger.info(f"🔧 Model features to preserve (passed from bot/backtest): {len(model_features_to_preserve)}")
+        logger.info(f"   Note: Feature selection will be applied by caller, not here")
     else:
-        logging.info(f"ℹ️  No model_features_to_preserve specified")
-        logging.info(f"   All {final_df.shape[1]} features will be returned")
-        logging.info(f"   Feature selection will happen in model_pipeline.py (during training)")
-    logging.info("="*70 + "\n")
-    logging.info(f"\nKształt danych przed czyszczeniem (usunięciem wierszy z NaN): {final_df.shape}")
+        logger.info(f"ℹ️  No model_features_to_preserve specified")
+        logger.info(f"   All {final_df.shape[1]} features will be returned")
+        logger.info(f"   Feature selection will happen in model_pipeline.py (during training)")
+    logger.info("="*70 + "\n")
+    logger.info(f"\nKształt danych przed czyszczeniem (usunięciem wierszy z NaN): {final_df.shape}")
     initial_rows = len(final_df)
 
     # ========================================================================
@@ -3451,36 +3393,36 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     # ========================================================================
     # Dzielenie przez 0 może dawać inf (np. volume_acceleration, ratios)
     # Replace inf/-inf → NaN, potem dropna() usunie te wiersze
-    logging.info("🧹 Czyszczenie inf values...")
+    logger.info("🧹 Czyszczenie inf values...")
     inf_counts = np.isinf(final_df.select_dtypes(include=[np.number])).sum()
     total_infs = inf_counts.sum()
     if total_infs > 0:
-        logging.warning(f"   ⚠️  Found {total_infs} inf values across {(inf_counts > 0).sum()} columns")
+        logger.warning(f"   ⚠️  Found {total_infs} inf values across {(inf_counts > 0).sum()} columns")
         # Show top 5 columns with most infs
         top_inf_cols = inf_counts.nlargest(5)
         for col, count in top_inf_cols.items():
             if count > 0:
-                logging.info(f"      - {col}: {count} inf values")
+                logger.info(f"      - {col}: {count} inf values")
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-    logging.info(f"   ✅ Replaced {total_infs} inf values with NaN")
+    logger.info(f"   ✅ Replaced {total_infs} inf values with NaN")
     # DEBUG: Check which columns have all NaN
     nan_counts = final_df.isna().sum()
     all_nan_cols = nan_counts[nan_counts == len(final_df)]
     if len(all_nan_cols) > 0:
-        logging.warning(f"⚠️  WARNING: {len(all_nan_cols)} columns have ALL NaN values:")
+        logger.warning(f"⚠️  WARNING: {len(all_nan_cols)} columns have ALL NaN values:")
         for col in all_nan_cols.index[:10]:  # Show first 10
-            logging.info(f"     - {col}")
+            logger.info(f"     - {col}")
         if len(all_nan_cols) > 10:
-            logging.info(f"     ... and {len(all_nan_cols) - 10} more")
+            logger.info(f"     ... and {len(all_nan_cols) - 10} more")
     final_df.dropna(inplace=True)
     final_rows = len(final_df)
-    logging.info(f"Usunięto {initial_rows - final_rows} początkowych wierszy z powodu okresu 'burn-in' dla wskaźników.")
+    logger.info(f"Usunięto {initial_rows - final_rows} początkowych wierszy z powodu okresu 'burn-in' dla wskaźników.")
     # ========================================================================
     # UPROSZCZENIE: remove_correlated_features() przeniesione do model_pipeline.py
     # Tutaj zwracamy WSZYSTKIE cechy - feature selection dzieje się podczas treningu
     # ========================================================================
 
-    logging.info(f"\n✅ Przygotowywanie cech zakończone. Finalny kształt danych: {final_df.shape}")
+    logger.info(f"\n✅ Przygotowywanie cech zakończone. Finalny kształt danych: {final_df.shape}")
     # ENHANCEMENT #2: Save to persistent disk cache
     if use_cache and cache_key:
         _save_feature_cache(final_df, cache_key, ticker, timeframe, helper_timeframes, limit, resolved_feature_level)
@@ -3498,17 +3440,17 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             features_to_drop = [f for f in weak_features_to_drop if f in final_df.columns]
 
             if features_to_drop:
-                logging.info(f"\n📊 ENHANCEMENT #9: Dropping {len(features_to_drop)} weak features (feedback loop)")
-                logging.info(f"   Threshold: {feedback_threshold*100:.0f}% cumulative importance")
-                logging.info(f"   Before: {final_df.shape[1]} features")
+                logger.info(f"\n📊 ENHANCEMENT #9: Dropping {len(features_to_drop)} weak features (feedback loop)")
+                logger.info(f"   Threshold: {feedback_threshold*100:.0f}% cumulative importance")
+                logger.info(f"   Before: {final_df.shape[1]} features")
 
                 final_df = final_df.drop(columns=features_to_drop)
 
-                logging.info(f"   After: {final_df.shape[1]} features")
-                logging.info(f"   Memory saved: ~{len(features_to_drop) * len(final_df) * 8 / 1024 / 1024:.1f} MB")
+                logger.info(f"   After: {final_df.shape[1]} features")
+                logger.info(f"   Memory saved: ~{len(features_to_drop) * len(final_df) * 8 / 1024 / 1024:.1f} MB")
             else:
-                logging.info(f"💡 No weak features found in current DataFrame (feedback loop active but no matches)")
+                logger.info(f"💡 No weak features found in current DataFrame (feedback loop active but no matches)")
         else:
-            logging.info(f"💡 Feature importance feedback loop enabled, but no rankings found (train model first)")
+            logger.info(f"💡 Feature importance feedback loop enabled, but no rankings found (train model first)")
 
     return final_df

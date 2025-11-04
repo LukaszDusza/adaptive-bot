@@ -56,6 +56,7 @@ services:
       - CONTAINER_NAME=luk-doge-dca
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.doge
@@ -90,6 +91,7 @@ services:
       - CONTAINER_NAME=luk-sol-ict
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.sol
@@ -124,6 +126,7 @@ services:
       - CONTAINER_NAME=bot-eth
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.eth
@@ -158,6 +161,7 @@ services:
       - CONTAINER_NAME=bot-link
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.link
@@ -192,6 +196,7 @@ services:
       - CONTAINER_NAME=bot-hbar
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.hbar
@@ -226,6 +231,7 @@ services:
       - CONTAINER_NAME=bot-sui
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.sui
@@ -260,6 +266,7 @@ services:
       - CONTAINER_NAME=bot-near
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.near
@@ -294,6 +301,7 @@ services:
       - CONTAINER_NAME=bot-trx
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.trx
@@ -328,6 +336,7 @@ services:
       - CONTAINER_NAME=bot-kas
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.kas
@@ -362,6 +371,7 @@ services:
       - CONTAINER_NAME=bot-pepe
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.1000pepe
@@ -396,6 +406,7 @@ services:
       - CONTAINER_NAME=bot-xrp
     env_file:
       - .env_luk
+      - .env_common
     command: >
       python bot.py
       --version v1.2.xrp

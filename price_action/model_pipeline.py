@@ -694,8 +694,8 @@ def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close
         # Label params
         # ENHANCEMENT v2.2: Zwiększone dolne granice barrier_size (0.015 min)
         # Powód: Dla SOLUSDT 1.17% było za niskie - traciliśmy większe ruchy
-        'barrier_size': (0.015, 0.040),  # Zwiększone z (0.008, 0.035)
-        'time_limit': (12, 48)
+        'barrier_size': (0.020, 0.045),  # Zwiększone z (0.008, 0.035)
+        'time_limit': (24, 72)
     }
 
     # Adjust for dataset size
@@ -1066,6 +1066,29 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         # Log actual distribution for monitoring (no penalty):
         actual_dist = y.value_counts(normalize=True)
         trial.set_user_attr("label_distribution", actual_dist.to_dict())
+
+        # ============================================================================
+        # POPRAWKA #11 (v1.3): BALANCE CONSTRAINT - Enforce 35-50% ACTION Distribution
+        # ============================================================================
+        # PROBLEM v1.2: Optimizer wybierał barrier=1.5%, time=25 → 75% HOLD / 25% ACTION
+        # FIX v1.3: Odrzucaj trials gdzie ACTION% poza zakresem 35-50%
+        # Expected: Po binary conversion → ~60% HOLD / 40% ACTION (realistic dla trading)
+        # ============================================================================
+        action_pct = actual_dist.get(1, 0) + actual_dist.get(2, 0)  # BUY + SELL
+        trial.set_user_attr("action_pct", float(action_pct))
+
+        # Constraint: ACTION powinno być między 35% a 50% (cel: 40% po binary conversion)
+        MIN_ACTION_PCT = 0.35  # Minimum 35% ACTION samples
+        MAX_ACTION_PCT = 0.50  # Maximum 50% ACTION samples
+
+        if action_pct < MIN_ACTION_PCT or action_pct > MAX_ACTION_PCT:
+            # Penalize: odrzuć trial z niezbalansowanym rozkładem
+            balance_penalty = abs(0.42 - action_pct)  # Distance from target 42%
+            trial.set_user_attr("balance_penalty", float(balance_penalty))
+            trial.set_user_attr("rejected_reason", f"ACTION%={action_pct*100:.1f}% out of range [{MIN_ACTION_PCT*100:.0f}%, {MAX_ACTION_PCT*100:.0f}%]")
+            logging.debug(f"Trial {trial.number} REJECTED: ACTION%={action_pct*100:.1f}% (barrier={barrier_size*100:.2f}%, time={time_limit})")
+            return 0.0  # Odrzuć trial
+        # ============================================================================
 
         scores = []
         # OPTYMALIZACJA: Zredukowano z 6 do 3 splits (2x szybciej)

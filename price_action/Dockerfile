@@ -43,6 +43,7 @@ COPY main.py .
 COPY bot.py .
 COPY bybit_adapter.py .
 COPY data_preparer_pa.py .
+COPY logging_config.py .
 COPY trade_logger.py .
 COPY prediction_logger.py .
 COPY feature_cache.py .
