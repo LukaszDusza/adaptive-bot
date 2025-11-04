@@ -9,7 +9,7 @@
 import { useEffect, useState } from 'react';
 import {
   Clock, TrendingUp, TrendingDown, AlertCircle, RefreshCw, X,
-  Trash2, DollarSign, Target, AlertTriangle, Shield
+  DollarSign, Target, AlertTriangle, Shield
 } from 'lucide-react';
 import {
   getPendingOrders,
@@ -211,15 +211,6 @@ export function PendingOrdersPanel({
 
   const riskExposure = calculateRiskExposure();
 
-  // Group orders by ticker
-  const ordersByTicker = data?.orders.reduce((acc, order) => {
-    if (!acc[order.ticker]) {
-      acc[order.ticker] = [];
-    }
-    acc[order.ticker].push(order);
-    return acc;
-  }, {} as Record<string, PendingOrder[]>) || {};
-
   if (error && !data) {
     return (
       <div className="card">
@@ -254,15 +245,10 @@ export function PendingOrdersPanel({
     return (
       <div className="card">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-xl font-bold">Pending Orders</h2>
-          <button
-            onClick={fetchOrders}
-            className="btn btn-sm btn-secondary"
-            disabled={loading}
-          >
-            <RefreshCw size={14} className={`mr-1 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <h2 className="text-xl font-bold">Pending Orders</h2>
+            {loading && <RefreshCw size={14} className="text-blue-500 animate-spin" />}
+          </div>
         </div>
         <div className="p-4 bg-dark-bg border border-dark-border rounded text-dark-text-secondary text-center">
           <Clock className="mx-auto mb-2" size={32} opacity={0.5} />
@@ -277,11 +263,9 @@ export function PendingOrdersPanel({
     <div className="card">
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
-        <div>
+        <div className="flex items-center gap-2">
           <h2 className="text-xl font-bold">Pending Orders ({data.total_count})</h2>
-          <p className="text-xs text-dark-text-secondary mt-1">
-            Limit orders waiting for execution
-          </p>
+          {loading && <RefreshCw size={14} className="text-blue-500 animate-spin" />}
         </div>
         <div className="flex items-center gap-2">
           {lastUpdated && (
@@ -289,14 +273,6 @@ export function PendingOrdersPanel({
               Updated {lastUpdated.toLocaleTimeString()}
             </span>
           )}
-          <button
-            onClick={fetchOrders}
-            className="btn btn-sm btn-secondary"
-            disabled={loading}
-          >
-            <RefreshCw size={14} className={`mr-1 ${loading ? 'animate-spin' : ''}`} />
-            Refresh
-          </button>
         </div>
       </div>
 
@@ -338,218 +314,148 @@ export function PendingOrdersPanel({
         </div>
       )}
 
-      {/* Orders by Ticker */}
-      <div className="space-y-4">
-        {Object.entries(ordersByTicker).map(([ticker, orders]) => {
-          const currentPrice = currentPrices[ticker];
+      {/* Compact Order Tiles - 3 per row */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {data.orders.map((order) => {
+          const currentPrice = currentPrices[order.ticker];
+          const fillPercent = order.quantity > 0
+            ? (order.filled_quantity / order.quantity) * 100
+            : 0;
+
+          const timeSinceCreation = Date.now() - new Date(order.created_at).getTime();
+          const minutesAgo = Math.floor(timeSinceCreation / 1000 / 60);
+
+          const dcaInfo = detectDCALevel(order, data.orders);
+
+          let distanceInfo = null;
+          if (currentPrice) {
+            distanceInfo = calculateDistance(order.price, currentPrice, order.side);
+          }
 
           return (
-            <div key={ticker} className="border border-dark-border rounded-lg p-4 bg-dark-bg">
-              {/* Ticker Header */}
+            <div
+              key={order.order_id}
+              className="border border-dark-border rounded-lg p-4 bg-dark-bg hover:border-profit/50 transition-colors"
+            >
+              {/* Header: Ticker + Side */}
               <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-3">
-                  <h3 className="text-lg font-bold">{ticker}</h3>
-                  {currentPrice && (
-                    <span className="text-sm text-dark-text-secondary font-mono">
-                      Current: ${currentPrice.toFixed(5)}
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-lg">{order.ticker}</span>
+                  {dcaInfo && (
+                    <span className="badge badge-sm bg-purple-600 text-xs">
+                      L{dcaInfo.level}
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="badge badge-info">{orders.length} order{orders.length > 1 ? 's' : ''}</span>
-                  <button
-                    onClick={() => setCancelConfirm({ type: 'all', ticker })}
-                    className="btn btn-sm btn-danger flex items-center gap-1"
-                    title="Cancel all orders for this ticker"
-                  >
-                    <Trash2 size={12} />
-                    Cancel All
-                  </button>
+                <span className={`badge ${
+                  order.side === 'Long'
+                    ? 'badge-success'
+                    : 'badge-danger'
+                } flex items-center gap-1`}>
+                  {order.side === 'Long' ? (
+                    <TrendingUp size={12} />
+                  ) : (
+                    <TrendingDown size={12} />
+                  )}
+                  {order.side}
+                </span>
+              </div>
+
+              {/* Price + Distance */}
+              <div className="mb-3">
+                <div className="text-xs text-dark-text-secondary mb-1">Order Price</div>
+                <div className="font-mono font-bold text-xl">${order.price.toFixed(5)}</div>
+                {distanceInfo && (
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className={`font-mono text-sm font-bold ${distanceInfo.color}`}>
+                      {distanceInfo.distance > 0 ? '+' : ''}{distanceInfo.distance.toFixed(2)}%
+                    </span>
+                    {distanceInfo.status === 'very-close' && (
+                      <span className="text-xs text-green-400 flex items-center gap-1">
+                        <Target size={10} />
+                        Very close!
+                      </span>
+                    )}
+                    {distanceInfo.status === 'far' && (
+                      <span className="text-xs text-red-400 flex items-center gap-1">
+                        <AlertTriangle size={10} />
+                        Far away
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Quantity + Filled */}
+              <div className="grid grid-cols-2 gap-3 mb-3 text-sm">
+                <div>
+                  <div className="text-xs text-dark-text-secondary">Quantity</div>
+                  <div className="font-mono font-bold">{order.quantity.toFixed(2)}</div>
+                </div>
+                <div>
+                  <div className="text-xs text-dark-text-secondary">Filled</div>
+                  {order.filled_quantity > 0 ? (
+                    <div>
+                      <div className="font-mono font-bold">{order.filled_quantity.toFixed(2)}</div>
+                      <div className="text-xs text-blue-400">{fillPercent.toFixed(0)}%</div>
+                    </div>
+                  ) : (
+                    <div className="font-mono font-bold text-dark-text-secondary">0</div>
+                  )}
                 </div>
               </div>
 
-              {/* Orders Table */}
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-dark-border text-dark-text-secondary">
-                      <th className="text-left py-2">Side</th>
-                      <th className="text-left py-2">DCA</th>
-                      <th className="text-right py-2">Price</th>
-                      <th className="text-right py-2">Distance</th>
-                      <th className="text-right py-2">Quantity</th>
-                      <th className="text-right py-2">Filled</th>
-                      <th className="text-left py-2">Status</th>
-                      <th className="text-left py-2">Age</th>
-                      <th className="text-left py-2">SL/TP</th>
-                      <th className="text-center py-2">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {orders.map((order) => {
-                      const fillPercent = order.quantity > 0
-                        ? (order.filled_quantity / order.quantity) * 100
-                        : 0;
+              {/* SL/TP */}
+              {(order.stop_loss || order.take_profit) && (
+                <div className="mb-3 text-xs grid grid-cols-2 gap-2">
+                  {order.stop_loss && (
+                    <div>
+                      <div className="text-dark-text-secondary">Stop Loss</div>
+                      <div className="font-mono text-loss font-bold">${order.stop_loss.toFixed(2)}</div>
+                    </div>
+                  )}
+                  {order.take_profit && (
+                    <div>
+                      <div className="text-dark-text-secondary">Take Profit</div>
+                      <div className="font-mono text-profit font-bold">${order.take_profit.toFixed(2)}</div>
+                    </div>
+                  )}
+                </div>
+              )}
 
-                      const timeSinceCreation = Date.now() - new Date(order.created_at).getTime();
-                      const minutesAgo = Math.floor(timeSinceCreation / 1000 / 60);
-
-                      const dcaInfo = detectDCALevel(order, data.orders);
-
-                      let distanceInfo = null;
-                      if (currentPrice) {
-                        distanceInfo = calculateDistance(order.price, currentPrice, order.side);
-                      }
-
-                      return (
-                        <tr
-                          key={order.order_id}
-                          className="border-b border-dark-border/50 hover:bg-dark-card transition-colors"
-                        >
-                          {/* Side */}
-                          <td className="py-3">
-                            <span className={`badge badge-sm ${
-                              order.side === 'Long'
-                                ? 'badge-success'
-                                : 'badge-danger'
-                            } flex items-center gap-1 w-fit`}>
-                              {order.side === 'Long' ? (
-                                <TrendingUp size={12} />
-                              ) : (
-                                <TrendingDown size={12} />
-                              )}
-                              {order.side}
-                            </span>
-                          </td>
-
-                          {/* DCA Level */}
-                          <td className="py-3">
-                            {dcaInfo ? (
-                              <div className="flex flex-col">
-                                <span className="badge badge-sm bg-purple-600 text-xs">
-                                  L{dcaInfo.level}
-                                </span>
-                                <span className="text-xs text-dark-text-secondary mt-1">
-                                  {dcaInfo.type}
-                                </span>
-                              </div>
-                            ) : (
-                              <span className="text-dark-text-secondary text-xs">-</span>
-                            )}
-                          </td>
-
-                          {/* Price */}
-                          <td className="py-3 text-right font-mono font-medium">
-                            ${order.price.toFixed(5)}
-                          </td>
-
-                          {/* Distance */}
-                          <td className="py-3 text-right">
-                            {distanceInfo ? (
-                              <div className="flex flex-col items-end">
-                                <span className={`font-mono font-bold ${distanceInfo.color}`}>
-                                  {distanceInfo.distance > 0 ? '+' : ''}{distanceInfo.distance.toFixed(2)}%
-                                </span>
-                                {distanceInfo.status === 'very-close' && (
-                                  <span className="text-xs text-green-400 flex items-center gap-1 mt-1">
-                                    <Target size={10} />
-                                    Very close!
-                                  </span>
-                                )}
-                                {distanceInfo.status === 'far' && (
-                                  <span className="text-xs text-red-400 flex items-center gap-1 mt-1">
-                                    <AlertTriangle size={10} />
-                                    Far away
-                                  </span>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="text-dark-text-secondary text-xs">-</span>
-                            )}
-                          </td>
-
-                          {/* Quantity */}
-                          <td className="py-3 text-right font-mono">
-                            {order.quantity.toFixed(2)}
-                          </td>
-
-                          {/* Filled */}
-                          <td className="py-3 text-right">
-                            {order.filled_quantity > 0 ? (
-                              <div>
-                                <div className="font-mono text-xs">
-                                  {order.filled_quantity.toFixed(2)}
-                                </div>
-                                <div className="text-xs text-blue-400">
-                                  {fillPercent.toFixed(0)}%
-                                </div>
-                              </div>
-                            ) : (
-                              <span className="text-dark-text-secondary text-xs">0</span>
-                            )}
-                          </td>
-
-                          {/* Status */}
-                          <td className="py-3">
-                            <span className={`badge badge-sm ${
-                              order.status === 'New'
-                                ? 'badge-warning'
-                                : order.status === 'PartiallyFilled'
-                                ? 'badge-info'
-                                : 'badge-secondary'
-                            }`}>
-                              {order.status}
-                            </span>
-                          </td>
-
-                          {/* Age */}
-                          <td className="py-3 text-xs text-dark-text-secondary">
-                            {minutesAgo < 60
-                              ? `${minutesAgo}m ago`
-                              : `${Math.floor(minutesAgo / 60)}h ago`
-                            }
-                          </td>
-
-                          {/* SL/TP */}
-                          <td className="py-3 text-xs">
-                            {order.stop_loss || order.take_profit ? (
-                              <div className="space-y-1">
-                                {order.stop_loss && (
-                                  <div className="text-loss">
-                                    SL: ${order.stop_loss.toFixed(2)}
-                                  </div>
-                                )}
-                                {order.take_profit && (
-                                  <div className="text-profit">
-                                    TP: ${order.take_profit.toFixed(2)}
-                                  </div>
-                                )}
-                              </div>
-                            ) : (
-                              <span className="text-dark-text-secondary">-</span>
-                            )}
-                          </td>
-
-                          {/* Actions */}
-                          <td className="py-3 text-center">
-                            <button
-                              onClick={() => setCancelConfirm({
-                                type: 'single',
-                                ticker: order.ticker,
-                                orderId: order.order_id,
-                                orderPrice: order.price
-                              })}
-                              className="btn btn-sm btn-danger px-2 py-1"
-                              title="Cancel this order"
-                            >
-                              <X size={14} />
-                            </button>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+              {/* Footer: Status + Age + Cancel */}
+              <div className="flex items-center justify-between pt-3 border-t border-dark-border">
+                <div className="flex items-center gap-2">
+                  <span className={`badge badge-sm ${
+                    order.status === 'New'
+                      ? 'badge-warning'
+                      : order.status === 'PartiallyFilled'
+                      ? 'badge-info'
+                      : 'badge-secondary'
+                  }`}>
+                    {order.status}
+                  </span>
+                  <span className="text-xs text-dark-text-secondary flex items-center gap-1">
+                    <Clock size={10} />
+                    {minutesAgo < 60
+                      ? `${minutesAgo}m`
+                      : `${Math.floor(minutesAgo / 60)}h`
+                    }
+                  </span>
+                </div>
+                <button
+                  onClick={() => setCancelConfirm({
+                    type: 'single',
+                    ticker: order.ticker,
+                    orderId: order.order_id,
+                    orderPrice: order.price
+                  })}
+                  className="btn btn-sm btn-danger px-3 py-1 flex items-center gap-1"
+                  title="Cancel this order"
+                >
+                  <X size={14} />
+                  Cancel
+                </button>
               </div>
             </div>
           );

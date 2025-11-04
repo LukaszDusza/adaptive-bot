@@ -5,29 +5,31 @@ import React from 'react';
 import { TrendingUp, TrendingDown, Activity, BarChart3 } from 'lucide-react';
 
 interface QuickStatsProps {
-  totalTrades: number;
   activeTrades: number;
+  tradesPerDay: number;
   todayPnL?: number;
   weeklyPnL?: number;
   onActiveClick?: () => void;
 }
 
 export const QuickStats: React.FC<QuickStatsProps> = ({
-  totalTrades,
   activeTrades,
+  tradesPerDay,
   todayPnL = 0,
   weeklyPnL = 0,
   onActiveClick,
 }) => {
+
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      {/* Total Trades */}
+      {/* Trades per Day */}
       <div className="p-4 bg-dark-card border border-dark-border rounded-lg">
         <div className="flex items-center justify-between mb-1">
-          <span className="text-xs text-dark-text-secondary uppercase">Total Trades</span>
+          <span className="text-xs text-dark-text-secondary uppercase">Trades/Day</span>
           <BarChart3 size={14} className="text-blue-500" />
         </div>
-        <div className="text-2xl font-bold">{totalTrades}</div>
+        <div className="text-2xl font-bold">{tradesPerDay.toFixed(1)}</div>
+        <div className="text-xs text-dark-text-secondary mt-1">Last 7 days avg</div>
       </div>
 
       {/* Active Positions */}

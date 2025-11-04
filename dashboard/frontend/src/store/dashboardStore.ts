@@ -13,6 +13,7 @@ import type {
   ExecutionQuality,
   FundingCosts,
   SLTPEffectiveness,
+  SLTPTrendPoint,
 } from '../types';
 
 interface DashboardState {
@@ -30,6 +31,7 @@ interface DashboardState {
   executionQuality: ExecutionQuality | null;
   fundingCosts: FundingCosts | null;
   sltpEffectiveness: SLTPEffectiveness | null;
+  sltpTrend: SLTPTrendPoint[];
 
   // UI State
   loading: boolean;
@@ -48,6 +50,7 @@ interface DashboardState {
   setExecutionQuality: (data: ExecutionQuality) => void;
   setFundingCosts: (data: FundingCosts) => void;
   setSLTPEffectiveness: (data: SLTPEffectiveness) => void;
+  setSLTPTrend: (data: SLTPTrendPoint[]) => void;
   setLoading: (loading: boolean) => void;
   setError: (error: string | null) => void;
   setSelectedTicker: (ticker: string | null) => void;
@@ -66,6 +69,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   executionQuality: null,
   fundingCosts: null,
   sltpEffectiveness: null,
+  sltpTrend: [],
   loading: false,
   error: null,
   selectedTicker: null,
@@ -82,6 +86,7 @@ export const useDashboardStore = create<DashboardState>((set) => ({
   setExecutionQuality: (executionQuality) => set({ executionQuality }),
   setFundingCosts: (fundingCosts) => set({ fundingCosts }),
   setSLTPEffectiveness: (sltpEffectiveness) => set({ sltpEffectiveness }),
+  setSLTPTrend: (sltpTrend) => set({ sltpTrend }),
   setLoading: (loading) => set({ loading }),
   setError: (error) => set({ error }),
   setSelectedTicker: (selectedTicker) => set({ selectedTicker }),

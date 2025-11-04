@@ -9,18 +9,19 @@ import { QuickStats } from './components/metrics/QuickStats';
 import { ExecutionQualityCard } from './components/metrics/ExecutionQualityCard';
 import { FundingCostsCard } from './components/metrics/FundingCostsCard';
 import { SLTPEffectivenessCard } from './components/metrics/SLTPEffectivenessCard';
-import { DockerPanel } from './components/controls/DockerPanel';
 import { EquityCurveChart } from './components/charts/EquityCurveChart';
 import { DrawdownChart } from './components/charts/DrawdownChart';
 import { ExitReasonChart } from './components/charts/ExitReasonChart';
+import { SLTPTrendChart } from './components/charts/SLTPTrendChart';
 import { RecentTradesTable } from './components/tables/RecentTradesTable';
 import { EmergencyCloseModal } from './components/controls/EmergencyCloseModal';
-import { PauseResumeToggle } from './components/controls/PauseResumeToggle';
 import { PendingOrdersPanel } from './components/controls/PendingOrdersPanel';
 import { AlertBanner } from './components/alerts/AlertBanner';
+import { ToastContainer } from './components/ui/Toast';
 import { useDashboardStore } from './store/dashboardStore';
 import { useWebSocket } from './hooks/useWebSocket';
-import { AlertTriangle, Shield } from 'lucide-react';
+import { useToast } from './hooks/useToast';
+import { Shield, X, TrendingUp as ArrowUpCircle } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer, YAxis } from 'recharts';
 import {
   getOverallMetrics,
@@ -35,6 +36,9 @@ import {
   getExecutionQuality,
   getFundingCosts,
   getSLTPEffectiveness,
+  getSLTPEffectivenessTrend,
+  closePosition,
+  setStopLossToBreakeven,
   type MarketPrice,
 } from './api/client';
 
@@ -44,13 +48,14 @@ function App() {
     tickerMetrics,
     trades,
     activeTrades,
-    containers,
+    containers: _containers, // Prefixed with _ to indicate intentionally unused
     equityCurve,
     drawdownCurve,
     exitReasonStats,
     executionQuality,
     fundingCosts,
     sltpEffectiveness,
+    sltpTrend,
     loading,
     error,
     setMetrics,
@@ -64,6 +69,7 @@ function App() {
     setExecutionQuality,
     setFundingCosts,
     setSLTPEffectiveness,
+    setSLTPTrend,
     setLoading,
     setError,
   } = useDashboardStore();
@@ -80,6 +86,9 @@ function App() {
   // PnL history for mini chart (last 50 points)
   const [pnlHistory, setPnlHistory] = useState<Record<string, Array<{time: string, pnl: number}>>>({});
 
+  // Toast notifications
+  const toast = useToast();
+
   // Memoized metrics calculations (performance optimization)
   const { todayPnL, weeklyPnL } = useMetrics(trades);
 
@@ -89,6 +98,44 @@ function App() {
       activeTradesRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }, []);
+
+  // Position control handlers
+  const handleClosePosition = async (symbol: string) => {
+    if (!confirm(`Are you sure you want to close position for ${symbol}?`)) {
+      return;
+    }
+
+    try {
+      const result = await closePosition(symbol);
+      toast.success(result.data.message);
+      // Refresh active trades
+      const activeTradesRes = await getActiveTrades();
+      setActiveTrades(activeTradesRes.data);
+    } catch (error: any) {
+      const errorMsg = error.response?.data?.detail || error.message || 'Unknown error';
+      toast.error(`Failed to close position:\n${errorMsg}`);
+    }
+  };
+
+  const handleSetSLtoBreakeven = async (symbol: string, side: string, entryPrice: number) => {
+    if (!confirm(`Set stop loss to breakeven+fee for ${symbol}?`)) {
+      return;
+    }
+
+    try {
+      const result = await setStopLossToBreakeven(symbol, side, entryPrice);
+      toast.success(result.data.message);
+
+      // Wait 500ms for Bybit to update position data, then refresh
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      const activeTradesRes = await getActiveTrades();
+      setActiveTrades(activeTradesRes.data);
+    } catch (error: any) {
+      const errorMsg = error.response?.data?.detail || error.message || 'Unknown error';
+      toast.error(`Failed to set stop loss:\n${errorMsg}`);
+    }
+  };
 
   // Connect to WebSocket
   useWebSocket();
@@ -118,6 +165,7 @@ function App() {
         executionQualityRes,
         fundingCostsRes,
         sltpEffectivenessRes,
+        sltpTrendRes,
       ] = await Promise.all([
         getOverallMetrics(),
         getTickerMetrics(),
@@ -129,7 +177,8 @@ function App() {
         getExitReasonStats(),
         getExecutionQuality(),
         getFundingCosts(30),
-        getSLTPEffectiveness(),
+        getSLTPEffectiveness(7),
+        getSLTPEffectivenessTrend(30),
       ]);
 
       setMetrics(metricsRes.data);
@@ -143,6 +192,7 @@ function App() {
       setExecutionQuality(executionQualityRes.data);
       setFundingCosts(fundingCostsRes.data);
       setSLTPEffectiveness(sltpEffectivenessRes.data);
+      setSLTPTrend(sltpTrendRes.data);
     } catch (err: any) {
       console.error('Failed to fetch dashboard data:', err);
       setError(err.message || 'Failed to load dashboard data');
@@ -245,45 +295,25 @@ function App() {
   }
 
   return (
-    <DashboardLayout>
+    <DashboardLayout
+      activeTradesCount={activeTrades.length}
+      onEmergencyClose={() => setShowEmergencyModal(true)}
+      onPauseToggle={(paused) => {
+        console.log(`Trading ${paused ? 'paused' : 'resumed'}`);
+      }}
+    >
+      {/* Toast Notifications */}
+      <ToastContainer toasts={toast.toasts} onRemove={toast.removeToast} />
+
       <div className="space-y-8">
         {/* Risk Alerts Banner */}
         <AlertBanner />
 
-        {/* Header with Controls */}
-        <div className="flex items-center justify-between">
-          <div>
-            <h1 className="text-3xl font-bold mb-2">Dashboard Overview</h1>
-            <p className="text-dark-text-secondary">
-              Real-time monitoring of your trading bots
-            </p>
-          </div>
-
-          {/* Control Buttons */}
-          <div className="flex items-center gap-3">
-            {/* Pause/Resume Toggle */}
-            <PauseResumeToggle onStateChange={(paused) => {
-              console.log(`Trading ${paused ? 'paused' : 'resumed'}`);
-            }} />
-
-            {/* Emergency Close Button */}
-            {activeTrades.length > 0 && (
-              <button
-                onClick={() => setShowEmergencyModal(true)}
-                className="btn btn-danger flex items-center gap-2 animate-pulse-slow"
-              >
-                <AlertTriangle size={16} />
-                Emergency Close ({activeTrades.length})
-              </button>
-            )}
-          </div>
-        </div>
-
         {/* Quick Stats Bar (OPTIMIZED - memoized calculations) */}
         {metrics && (
           <QuickStats
-            totalTrades={metrics.total_trades}
             activeTrades={metrics.active_trades}
+            tradesPerDay={metrics.trades_per_day}
             todayPnL={todayPnL}
             weeklyPnL={weeklyPnL}
             onActiveClick={scrollToActiveTrades}
@@ -300,6 +330,9 @@ function App() {
           <SLTPEffectivenessCard data={sltpEffectiveness} loading={loading} />
         </div>
 
+        {/* SL/TP Effectiveness Trend */}
+        <SLTPTrendChart data={sltpTrend} />
+
         {/* Pending Orders Panel */}
         <PendingOrdersPanel autoRefresh={true} refreshInterval={10000} />
 
@@ -307,7 +340,7 @@ function App() {
         {activeTrades.length > 0 && (
           <div ref={activeTradesRef} className="card">
             <h2 className="text-xl font-bold mb-4">Active Positions ({activeTrades.length})</h2>
-            <div className="space-y-2">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               {activeTrades.map((trade) => {
                 // Parse partial_tp_taken - check for "partial_tp_taken=True" or events data
                 const partialTpMatch = trade.notes?.match(/partial_tp_taken=(True|False)/);
@@ -349,8 +382,14 @@ function App() {
                 let potentialSlPnL = null;
                 let potentialSlPnLPercent = null;
 
+                let positionValue = null;
+                let marginUsed = null;
+                const leverage = trade.leverage || 1;
+
                 if (entryPrice && quantity > 0) {
                   const entryValue = entryPrice * quantity;
+                  positionValue = entryValue; // Total position value (with leverage)
+                  marginUsed = entryValue / leverage; // Actual capital engaged
 
                   if (tpPrice) {
                     if (isLong) {
@@ -388,7 +427,7 @@ function App() {
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-sm">
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
                       <div>
                         <div className="text-dark-text-secondary">Entry Price</div>
                         <div className="font-mono font-medium">${trade.entry_price?.toFixed(5)}</div>
@@ -416,6 +455,26 @@ function App() {
                       <div>
                         <div className="text-dark-text-secondary">Quantity</div>
                         <div className="font-mono font-medium">{trade.quantity?.toFixed(1)}</div>
+                      </div>
+                      <div>
+                        <div className="text-dark-text-secondary">
+                          Margin Used
+                          {leverage > 1 && (
+                            <span className="text-xs ml-1">({leverage}x)</span>
+                          )}
+                        </div>
+                        {marginUsed !== null ? (
+                          <div>
+                            <div className="font-mono font-medium text-blue-400">${marginUsed.toFixed(2)}</div>
+                            {positionValue !== null && leverage > 1 && (
+                              <div className="text-xs text-dark-text-secondary mt-0.5">
+                                Position: ${positionValue.toFixed(2)}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-dark-text-secondary">-</div>
+                        )}
                       </div>
                       <div>
                         <div className="text-dark-text-secondary">TP Target</div>
@@ -503,6 +562,31 @@ function App() {
                       </div>
                     </div>
 
+                    {/* Position Control Buttons */}
+                    <div className="flex gap-2 mt-4">
+                      <button
+                        onClick={() => handleSetSLtoBreakeven(trade.ticker, trade.side, entryPrice || 0)}
+                        disabled={isSecured || !entryPrice}
+                        className={`px-3 py-1.5 rounded text-sm font-medium flex items-center gap-1 ${
+                          isSecured || !entryPrice
+                            ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                            : 'bg-blue-600 hover:bg-blue-700 text-white'
+                        }`}
+                        title={isSecured ? 'SL already at breakeven or in profit' : 'Set stop loss to breakeven'}
+                      >
+                        <ArrowUpCircle size={14} />
+                        SL → BE
+                      </button>
+                      <button
+                        onClick={() => handleClosePosition(trade.ticker)}
+                        className="px-3 py-1.5 rounded text-sm font-medium bg-red-600 hover:bg-red-700 text-white flex items-center gap-1"
+                        title="Close this position immediately"
+                      >
+                        <X size={14} />
+                        Close Position
+                      </button>
+                    </div>
+
                     {/* Status badges */}
                     <div className="flex gap-2 mt-3 flex-wrap">
                       {isSecured && (
@@ -561,20 +645,22 @@ function App() {
           </div>
         )}
 
-        {/* Equity Curve Chart */}
-        {equityCurve.length > 0 && <EquityCurveChart data={equityCurve} />}
+        {/* Charts Grid - 2 per row */}
+        {(equityCurve.length > 0 || drawdownCurve.length > 0) && (
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Equity Curve Chart */}
+            {equityCurve.length > 0 && <EquityCurveChart data={equityCurve} />}
 
-        {/* Drawdown Chart */}
-        {drawdownCurve.length > 0 && <DrawdownChart data={drawdownCurve} />}
+            {/* Drawdown Chart */}
+            {drawdownCurve.length > 0 && <DrawdownChart data={drawdownCurve} />}
+          </div>
+        )}
 
         {/* Exit Reason Breakdown */}
         {exitReasonStats.length > 0 && <ExitReasonChart data={exitReasonStats} />}
 
         {/* Recent Trades Table */}
         {trades.length > 0 && <RecentTradesTable trades={trades} />}
-
-        {/* Docker Containers */}
-        <DockerPanel containers={containers} onRefresh={fetchData} />
 
         {/* Footer Info */}
         <div className="text-center text-sm text-dark-text-secondary py-8">

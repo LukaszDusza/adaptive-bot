@@ -18,6 +18,14 @@ logger = logging.getLogger(__name__)
 bot_state_manager = BotStateManager()
 docker_manager = DockerManager()
 
+# Initialize Bybit service for position control
+try:
+    from app.services.bybit_service import BybitService
+    bybit_service = BybitService()
+except Exception as e:
+    bybit_service = None
+    logger.warning(f"BybitService not available: {e}")
+
 
 @router.get("/pause-state", response_model=Dict[str, bool])
 async def get_pause_state():
@@ -217,3 +225,71 @@ async def restart_bot_with_new_config(container_name: str):
         "container": container_name,
         "note": "New configuration should now be active"
     }
+
+
+@router.post("/close-position/{symbol}", response_model=dict)
+async def close_position(symbol: str):
+    """
+    Close a specific position via Bybit API.
+
+    Args:
+        symbol: Trading pair (e.g., SOLUSDT)
+
+    Returns:
+        Success message with position details
+
+    Raises:
+        503: Bybit service not available
+        500: Failed to close position
+    """
+    if not bybit_service:
+        raise HTTPException(
+            status_code=503,
+            detail="Bybit API not available - check API credentials"
+        )
+
+    try:
+        logger.info(f"📍 Close position request for {symbol}")
+        result = bybit_service.close_position_by_symbol(symbol)
+        return result
+    except Exception as e:
+        logger.error(f"Failed to close position for {symbol}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to close position: {str(e)}"
+        )
+
+
+@router.post("/set-sl-breakeven/{symbol}", response_model=dict)
+async def set_sl_breakeven(symbol: str, side: str, entry_price: float):
+    """
+    Set stop loss to breakeven (entry price) for a position.
+
+    Args:
+        symbol: Trading pair (e.g., SOLUSDT)
+        side: Position side ("Long" or "Short")
+        entry_price: Entry price to set as stop loss
+
+    Returns:
+        Success message with updated SL
+
+    Raises:
+        503: Bybit service not available
+        500: Failed to update SL
+    """
+    if not bybit_service:
+        raise HTTPException(
+            status_code=503,
+            detail="Bybit API not available - check API credentials"
+        )
+
+    try:
+        logger.info(f"📍 Set SL to BE request for {symbol} {side} @ {entry_price}")
+        result = bybit_service.set_stop_loss_to_breakeven(symbol, side, entry_price)
+        return result
+    except Exception as e:
+        logger.error(f"Failed to set SL for {symbol}: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update stop loss: {str(e)}"
+        )

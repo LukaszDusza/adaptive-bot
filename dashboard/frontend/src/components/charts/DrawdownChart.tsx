@@ -91,7 +91,10 @@ export const DrawdownChart: React.FC<DrawdownChartProps> = ({ data }) => {
       </div>
 
       <ResponsiveContainer width="100%" height={400}>
-        <AreaChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+        <AreaChart
+          data={chartData}
+          margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+        >
           <defs>
             <linearGradient id="drawdownGradient" x1="0" y1="0" x2="0" y2="1">
               <stop offset="5%" stopColor="#ef4444" stopOpacity={0.8} />
@@ -109,7 +112,11 @@ export const DrawdownChart: React.FC<DrawdownChartProps> = ({ data }) => {
             tick={{ fill: '#a0a0ab', fontSize: 12 }}
             tickFormatter={(value) => `$${Math.abs(value)}`}
           />
-          <Tooltip content={<CustomTooltip />} />
+          <Tooltip
+            content={<CustomTooltip />}
+            cursor={{ stroke: '#6b6b76', strokeWidth: 1, strokeDasharray: '5 5' }}
+            isAnimationActive={false}
+          />
           <ReferenceLine y={0} stroke="#6b6b76" strokeDasharray="3 3" />
           <Area
             type="monotone"
