@@ -33,6 +33,13 @@ const getExitReasonColor = (reason: string): string => {
 };
 
 export const ExitReasonChart: React.FC<ExitReasonChartProps> = ({ data }) => {
+  // Helper function to format PnL with dynamic precision
+  const formatPnL = (value: number): string => {
+    // For small PnL values (< $0.01), show 3 decimal places to avoid confusion
+    const decimals = Math.abs(value) < 0.01 && value !== 0 ? 3 : 2;
+    return value.toFixed(decimals);
+  };
+
   if (!data || data.length === 0) {
     return (
       <div className="card">
@@ -79,7 +86,7 @@ export const ExitReasonChart: React.FC<ExitReasonChartProps> = ({ data }) => {
           </p>
           <p className="text-sm">
             Total PnL: <span className={`font-bold ${data.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-              ${data.pnl.toFixed(2)}
+              ${formatPnL(data.pnl)}
             </span>
           </p>
         </div>
@@ -186,7 +193,7 @@ export const ExitReasonChart: React.FC<ExitReasonChartProps> = ({ data }) => {
                   {item.count} trades ({item.percentage.toFixed(1)}%)
                 </div>
                 <div className={`text-xs ${item.total_pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-                  ${item.total_pnl.toFixed(2)} total
+                  ${formatPnL(item.total_pnl)} total
                 </div>
               </div>
             </div>

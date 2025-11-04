@@ -93,6 +93,13 @@ function App() {
   // Connect to WebSocket
   useWebSocket();
 
+  // Helper function to format PnL with dynamic precision
+  const formatPnL = (value: number): string => {
+    // For small PnL values (< $0.01), show 3 decimal places to avoid confusion
+    const decimals = Math.abs(value) < 0.01 && value !== 0 ? 3 : 2;
+    return value.toFixed(decimals);
+  };
+
   // Fetch initial data
   const fetchData = async () => {
     setLoading(true);
@@ -358,7 +365,7 @@ function App() {
                         <div className="text-dark-text-secondary">Unrealized PnL</div>
                         {unrealizedPnL !== null ? (
                           <div className={`font-mono font-bold ${unrealizedPnL >= 0 ? 'text-profit' : 'text-loss'}`}>
-                            ${unrealizedPnL.toFixed(2)} ({pnlPercentage?.toFixed(2)}%)
+                            ${formatPnL(unrealizedPnL)} ({pnlPercentage?.toFixed(2)}%)
                           </div>
                         ) : (
                           <div className="text-dark-text-secondary">-</div>
