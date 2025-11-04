@@ -1409,18 +1409,18 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     else:
         logging.warning(f"⚠ Nie udało się osiągnąć recall >= {min_recall}. Najlepszy recall: {optimal_recall:.3f}")
     # ============================================================================
-    # POPRAWKA #1: Heurystyczna rekomendacja dla min_proba_diff
+    # POPRAWKA #1: Heurystyczna rekomendacja dla min_confidence_ratio
     # ============================================================================
     # Bot używa dual-model logic: BUY gdy (proba_long > threshold) AND
-    # (proba_long - proba_short > min_proba_diff). Nie możemy tu w pełni
-    # zoptymalizować min_proba_diff (wymaga obu modeli), ale dajemy heurystykę.
+    # (proba_long / proba_short > min_confidence_ratio). Nie możemy tu w pełni
+    # zoptymalizować min_confidence_ratio (wymaga obu modeli), ale dajemy heurystykę.
     #
-    # Heurystyka: min_proba_diff = 0.5 * optimal_threshold (50% progu)
-    # Przykład: threshold=0.60 → min_proba_diff=0.30
+    # Heurystyka: min_confidence_ratio = 1.0 + 0.5 * optimal_threshold
+    # Przykład: threshold=0.60 → ratio=1.30 (30% bardziej pewny)
     # Uzasadnienie: Jeśli long=0.70, short=0.40 → diff=0.30 (70% sure LONG vs 40% SHORT)
-    recommended_min_proba_diff = round(optimal_threshold * 0.5, 2)
-    logging.info(f"\n--- POPRAWKA #1: Rekomendacja min_proba_diff ---")
-    logging.info(f"  Recommended min_proba_diff: {recommended_min_proba_diff:.2f}")
+    recommended_min_confidence_ratio = round(1.0 + optimal_threshold * 0.5, 2)
+    logging.info(f"\n--- POPRAWKA #1: Rekomendacja min_confidence_ratio ---")
+    logging.info(f"  Recommended min_confidence_ratio: {recommended_min_confidence_ratio:.2f}")
     logging.info(f"  (Heurystyka: 50% of optimal_threshold)")
     logging.warning(f"  ⚠ Dla pełnej optymalizacji użyj optuna_optimizer.py z DUAL models")
     holdout_preds_optimized = (holdout_probas[:, 1] >= optimal_threshold).astype(int)
@@ -1455,7 +1455,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         "best_label_params": best_label_params,
         "best_model_params": best_model_params,
         "optimal_threshold": float(optimal_threshold),
-        "recommended_min_proba_diff": float(recommended_min_proba_diff),  # POPRAWKA #1
+        "recommended_min_confidence_ratio": float(recommended_min_confidence_ratio),  # POPRAWKA #1
         "n_features_selected": len(selected_features),
         "n_features_total": len(df_model_base.columns),
         "n_samples_train": len(X_full),
@@ -1470,7 +1470,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
             "FIX #5: 3-way split (train/calib/holdout) - proper threshold tuning"
         ],
         "enhancements_v2.1": [
-            "POPRAWKA #1: Heuristic min_proba_diff recommendation",
+            "POPRAWKA #1: Heuristic min_confidence_ratio recommendation",
             "POPRAWKA #2: CV-based feature selection (5 folds)",
             "POPRAWKA #4: Pruning after fold 1 (was fold 0)",
             "POPRAWKA #5: Early stopping for final model",

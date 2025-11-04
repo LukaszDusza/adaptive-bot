@@ -660,7 +660,7 @@ class BacktestEngine:
             enable_partial_tp: bool,
             enable_dynamic_tp: bool = False,
             enable_profit_protection: bool = False,
-            min_proba_diff: float = 0.0,
+            min_confidence_ratio: float = 1.5,
             ict_context_mode: bool = False,
             ict_min_strength: float = 0.3,
             ict_max_reduction: float = 0.20,
@@ -873,7 +873,7 @@ class BacktestEngine:
                 proba_short = model_short.predict_proba(X_short_scaled)[0][1]
                 
                 # Calculate probability difference (confidence gap)
-                proba_diff = abs(proba_long - proba_short)
+                confidence_ratio = max(proba_long, proba_short) / min(proba_long, proba_short) if min(proba_long, proba_short) > 0 else float('inf')
 
                 # ========== ICT CONTEXT MODE (OPCJA 3) - Backtest Version ==========
                 # Dynamic threshold adjustment based on Smart Money signals
@@ -929,7 +929,7 @@ class BacktestEngine:
 
                     # 3. Dynamic Threshold Adjustment
                     base_prob_threshold = prob_threshold
-                    base_diff_threshold = min_proba_diff
+                    base_ratio_threshold = min_confidence_ratio
 
                     if ict_strength >= ict_min_strength:
                         ict_adjustment = 1.0 - (ict_strength * ict_max_reduction)
@@ -937,15 +937,15 @@ class BacktestEngine:
                         ict_adjustment = 1.0
 
                     dynamic_prob_threshold = base_prob_threshold * regime_multiplier * ict_adjustment
-                    dynamic_diff_threshold = base_diff_threshold * regime_multiplier * ict_adjustment
+                    dynamic_ratio_threshold = base_ratio_threshold / (regime_multiplier * ict_adjustment)
 
                     # Safety bounds
                     dynamic_prob_threshold = np.clip(dynamic_prob_threshold, 0.45, 0.85)
-                    dynamic_diff_threshold = np.clip(dynamic_diff_threshold, 0.08, 0.35)
+                    dynamic_ratio_threshold = np.clip(dynamic_ratio_threshold, 1.10, 2.50)
                 else:
                     # Use static thresholds (original behavior)
                     dynamic_prob_threshold = prob_threshold
-                    dynamic_diff_threshold = min_proba_diff
+                    dynamic_ratio_threshold = min_confidence_ratio
                     ict_strength = 0.0
                     regime_multiplier = 1.0
 
@@ -955,12 +955,12 @@ class BacktestEngine:
 
                 if proba_long > dynamic_prob_threshold and proba_long > proba_short:
                     # Check if confidence gap is sufficient
-                    if proba_diff >= dynamic_diff_threshold:
+                    if confidence_ratio >= dynamic_ratio_threshold:
                         decision = "LONG"
                         chosen_proba = proba_long
                 elif proba_short > dynamic_prob_threshold and proba_short > proba_long:
                     # Check if confidence gap is sufficient
-                    if proba_diff >= dynamic_diff_threshold:
+                    if confidence_ratio >= dynamic_ratio_threshold:
                         decision = "SHORT"
                         chosen_proba = proba_short
 
@@ -978,10 +978,10 @@ class BacktestEngine:
                     'timestamp': current_candle.name,
                     'proba_long': proba_long,
                     'proba_short': proba_short,
-                    'proba_diff': proba_diff,
+                    'confidence_ratio': confidence_ratio,
                     'decision': decision,
                     'base_prob_threshold': prob_threshold,
-                    'base_diff_threshold': min_proba_diff,
+                    'base_ratio_threshold': min_confidence_ratio,
                 }
 
                 if ict_context_mode:
@@ -990,7 +990,7 @@ class BacktestEngine:
                         'ict_strength': ict_strength,
                         'regime_multiplier': regime_multiplier,
                         'dynamic_prob_threshold': dynamic_prob_threshold,
-                        'dynamic_diff_threshold': dynamic_diff_threshold,
+                        'dynamic_ratio_threshold': dynamic_ratio_threshold,
                         'threshold_reduction_pct': (prob_threshold - dynamic_prob_threshold) / prob_threshold * 100
                     })
                 else:
@@ -1386,7 +1386,7 @@ def main(args):
         enable_partial_tp=args.partial_tp,
         enable_dynamic_tp=args.dynamic_tp,
         enable_profit_protection=getattr(args, 'protect_profit', False),
-        min_proba_diff=args.min_proba_diff,
+        min_confidence_ratio=getattr(args, 'min_confidence_ratio', 1.5),
         ict_context_mode=getattr(args, 'ict_context', False),
         ict_min_strength=getattr(args, 'ict_min_strength', 0.3),
         ict_max_reduction=getattr(args, 'ict_max_reduction', 0.20),
@@ -1419,8 +1419,8 @@ def run_backtester_with_args(args):
         args.taker_fee = 0.00055
     if not hasattr(args, 'slippage_pct'):
         args.slippage_pct = 0.0003  # Includes funding rate equivalent
-    if not hasattr(args, 'min_proba_diff'):
-        args.min_proba_diff = 0.0
+    if not hasattr(args, 'min_confidence_ratio'):
+        args.min_confidence_ratio = 1.5
     if not hasattr(args, 'dynamic_tp'):
         args.dynamic_tp = False
     # Limit order defaults

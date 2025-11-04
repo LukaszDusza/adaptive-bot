@@ -48,7 +48,7 @@ class BotConfig:
     TP_PCT: float = 0.03
     TSL_PCT: float = 0.01
     PROBABILITY_THRESHOLD: float = 0.7
-    MIN_PROBA_DIFF: float = 0.2  # Minimum difference between BUY and SELL probabilities
+    MIN_CONFIDENCE_RATIO: float = 1.5  # Minimum confidence ratio: stronger_signal / weaker_signal (1.5 = 50% more confident)
     LOOP_SLEEP_SECONDS: int = 300  # 5 minutes - optimized for 15m timeframe (reduces cache hits from 93% to 67%)
     CANDLES_FOR_FEATURES: int = 500  # Reduced from 5000 for live bot (5000 is too heavy for Docker 2GB RAM limit)
     PARTIAL_TP_ENABLED: bool = True
@@ -930,11 +930,11 @@ class TradingBot:
             proba_buy = self.model_long.predict_proba(X_long_scaled)[0][1]
             proba_sell = self.model_short.predict_proba(X_short_scaled)[0][1]
             
-            # Calculate probability difference (confidence gap)
-            proba_diff = abs(proba_buy - proba_sell)
+            # Calculate confidence ratio (relative strength)
+            confidence_ratio = max(proba_buy, proba_sell) / min(proba_buy, proba_sell) if min(proba_buy, proba_sell) > 0 else float('inf')
             
             logger.info(f"📊 Model Probabilities: BUY={proba_buy:.3f}, SELL={proba_sell:.3f} (threshold={self.config.PROBABILITY_THRESHOLD:.3f})")
-            logger.info(f"📏 Probability Difference: {proba_diff:.3f} (min_required={self.config.MIN_PROBA_DIFF:.3f})")
+            logger.info(f"📏 Confidence Ratio: {confidence_ratio:.3f} (min_required={self.config.MIN_CONFIDENCE_RATIO:.3f})")
 
             # ========== ICT CONTEXT MODE (OPCJA 3) ==========
             # Dynamic threshold adjustment based on Smart Money signals
@@ -994,7 +994,7 @@ class TradingBot:
 
                 # 3. Dynamic Threshold Adjustment
                 base_prob_threshold = self.config.PROBABILITY_THRESHOLD
-                base_diff_threshold = self.config.MIN_PROBA_DIFF
+                base_ratio_threshold = self.config.MIN_CONFIDENCE_RATIO
 
                 # Apply ICT strength reduction (only if above minimum strength)
                 if ict_strength >= self.config.ICT_MIN_STRENGTH:
@@ -1004,41 +1004,41 @@ class TradingBot:
 
                 # Apply adjustments
                 dynamic_prob_threshold = base_prob_threshold * regime_multiplier * ict_adjustment
-                dynamic_diff_threshold = base_diff_threshold * regime_multiplier * ict_adjustment
+                dynamic_ratio_threshold = base_ratio_threshold / (regime_multiplier * ict_adjustment)  # Note: inverse - lower thresholds = easier to meet
 
                 # Safety bounds (never go too extreme)
                 dynamic_prob_threshold = np.clip(dynamic_prob_threshold, 0.45, 0.85)
-                dynamic_diff_threshold = np.clip(dynamic_diff_threshold, 0.08, 0.35)
+                dynamic_ratio_threshold = np.clip(dynamic_ratio_threshold, 1.10, 2.50)  # Range: 10% to 150% more confident
 
                 # Enhanced logging
                 logger.info(f"🎯 ICT Context: composite={ict_composite:.2f}, strength={ict_strength:.2f}")
                 logger.info(f"📈 Regime: RSI={rsi:.1f}, ATR={atr_norm:.2f}, Vol={volume_ratio:.2f}, mult={regime_multiplier:.2f}")
-                logger.info(f"🔧 Dynamic Thresholds: prob={dynamic_prob_threshold:.3f} (base={base_prob_threshold:.2f}), diff={dynamic_diff_threshold:.3f} (base={base_diff_threshold:.2f})")
+                logger.info(f"🔧 Dynamic Thresholds: prob={dynamic_prob_threshold:.3f} (base={base_prob_threshold:.2f}), ratio={dynamic_ratio_threshold:.3f} (base={base_ratio_threshold:.2f})")
             else:
                 # Use static thresholds (original behavior)
                 dynamic_prob_threshold = self.config.PROBABILITY_THRESHOLD
-                dynamic_diff_threshold = self.config.MIN_PROBA_DIFF
-                logger.info(f"📊 Static Thresholds: prob={dynamic_prob_threshold:.3f}, diff={dynamic_diff_threshold:.3f}")
+                dynamic_ratio_threshold = self.config.MIN_CONFIDENCE_RATIO
+                logger.info(f"📊 Static Thresholds: prob={dynamic_prob_threshold:.3f}, ratio={dynamic_ratio_threshold:.3f}")
 
             # Determine decision with dynamic thresholds
             decision = "HOLD"
             if proba_buy > dynamic_prob_threshold and proba_buy > proba_sell:
                 # Check if confidence gap is sufficient
-                if proba_diff >= dynamic_diff_threshold:
+                if confidence_ratio >= dynamic_ratio_threshold:
                     decision = "BUY"
-                    logger.info(f"✅ BUY signal accepted: proba={proba_buy:.3f} > threshold={dynamic_prob_threshold:.3f}, gap={proba_diff:.3f} >= {dynamic_diff_threshold:.3f}")
+                    logger.info(f"✅ BUY signal accepted: proba={proba_buy:.3f} > threshold={dynamic_prob_threshold:.3f}, ratio={confidence_ratio:.3f} >= {dynamic_ratio_threshold:.3f}")
                 else:
-                    logger.info(f"⚠️  BUY signal rejected: insufficient confidence gap ({proba_diff:.3f} < {dynamic_diff_threshold:.3f})")
+                    logger.info(f"⚠️  BUY signal rejected: insufficient confidence ratio ({confidence_ratio:.3f} < {dynamic_ratio_threshold:.3f})")
             elif proba_sell > dynamic_prob_threshold and proba_sell > proba_buy:
                 # Check if confidence gap is sufficient
-                if proba_diff >= dynamic_diff_threshold:
+                if confidence_ratio >= dynamic_ratio_threshold:
                     decision = "SELL"
-                    logger.info(f"✅ SELL signal accepted: proba={proba_sell:.3f} > threshold={dynamic_prob_threshold:.3f}, gap={proba_diff:.3f} >= {dynamic_diff_threshold:.3f}")
+                    logger.info(f"✅ SELL signal accepted: proba={proba_sell:.3f} > threshold={dynamic_prob_threshold:.3f}, ratio={confidence_ratio:.3f} >= {dynamic_ratio_threshold:.3f}")
                 else:
-                    logger.info(f"⚠️  SELL signal rejected: insufficient confidence gap ({proba_diff:.3f} < {dynamic_diff_threshold:.3f})")
+                    logger.info(f"⚠️  SELL signal rejected: insufficient confidence ratio ({confidence_ratio:.3f} < {dynamic_ratio_threshold:.3f})")
             else:
                 # HOLD - log the reason
-                logger.info(f"⏸️  HOLD: Neither condition met (BUY={proba_buy:.3f}, SELL={proba_sell:.3f}, threshold={dynamic_prob_threshold:.3f}, gap={proba_diff:.3f})")
+                logger.info(f"⏸️  HOLD: Neither condition met (BUY={proba_buy:.3f}, SELL={proba_sell:.3f}, threshold={dynamic_prob_threshold:.3f}, ratio={confidence_ratio:.3f})")
 
             logger.info(f"🎯 Final Decision: {decision}")
 
@@ -1069,7 +1069,7 @@ class TradingBot:
                     buy_prob=proba_buy,
                     sell_prob=proba_sell,
                     threshold=self.config.PROBABILITY_THRESHOLD,
-                    min_proba_diff=self.config.MIN_PROBA_DIFF,
+                    min_confidence_ratio=self.config.MIN_CONFIDENCE_RATIO,
                     decision=decision
                 )
             except Exception as e:
@@ -2844,7 +2844,7 @@ def launch_bot(args):
     config.TP_PCT = args.tp_pct
     config.TSL_PCT = args.tsl_pct
     config.PROBABILITY_THRESHOLD = args.prob_threshold
-    config.MIN_PROBA_DIFF = args.min_proba_diff
+    config.MIN_CONFIDENCE_RATIO = getattr(args, 'min_confidence_ratio', 1.5)
     # ICT Context Mode
     config.ICT_CONTEXT_MODE = getattr(args, 'ict_context', False)
     config.ICT_MIN_STRENGTH = getattr(args, 'ict_min_strength', 0.3)
@@ -2888,7 +2888,7 @@ def launch_bot(args):
         print(f"Trade Size:        ${config.TRADE_SIZE_USD:.2f} (fixed)")
     print(f"TP/TSL:            {config.TP_PCT*100:.2f}% / {config.TSL_PCT*100:.2f}%")
     print(f"Threshold:         {config.PROBABILITY_THRESHOLD:.3f}")
-    print(f"Min Proba Diff:    {config.MIN_PROBA_DIFF:.3f}")
+    print(f"Min Conf Ratio:    {config.MIN_CONFIDENCE_RATIO:.3f}")
 
     # ICT Context Mode info
     if config.ICT_CONTEXT_MODE:
@@ -2955,8 +2955,8 @@ if __name__ == "__main__":
     parser.add_argument('--tp-pct', type=float, required=True)
     parser.add_argument('--tsl-pct', type=float, required=True)
     parser.add_argument('--prob-threshold', type=float, required=True)
-    parser.add_argument('--min-proba-diff', type=float, default=0.0,
-                        help='Minimum probability difference between BUY and SELL (confidence gap)')
+    parser.add_argument('--min-confidence-ratio', type=float, default=1.5,
+                        help='Minimum confidence ratio: stronger_signal/weaker_signal (1.5 = 50%% more confident, 2.0 = 100%% more)')
     # ICT Context Mode arguments
     parser.add_argument('--ict-context', action='store_true',
                         help='Enable ICT context mode: dynamic thresholds based on Smart Money signals (OPCJA 3)')

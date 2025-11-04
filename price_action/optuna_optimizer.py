@@ -101,7 +101,7 @@ class BestTrialCallback:
                           f"prob={self.best_params['prob_threshold']:.2f} "
                           f"tp={self.best_params['tp_pct']:.3f} "
                           f"tsl={self.best_params['tsl_pct']:.3f} "
-                          f"min_diff={self.best_params['min_proba_diff']:.2f}{limit_params_str} | "
+                          f"min_ratio={self.best_params['min_confidence_ratio']:.2f}{limit_params_str} | "
                           f"WR={winrate:.1f}% DD={-self.best_values[1]:.2f}%")
 
 
@@ -228,7 +228,7 @@ class BacktesterOptimizer:
         prob_threshold = trial.suggest_float('prob_threshold', 0.5, 0.9, step=0.05)
         tp_pct = trial.suggest_float('tp_pct', 0.02, 0.06, step=0.005)  # Narrowed: 2-6% (was 2-15%)
         tsl_pct = trial.suggest_float('tsl_pct', 0.01, 0.03, step=0.005)  # Narrowed to match TP range
-        min_proba_diff = trial.suggest_float('min_proba_diff', 0.1, 0.7, step=0.05)  # Narrowed: 10-70% (was 0-70%)
+        min_confidence_ratio = trial.suggest_float('min_confidence_ratio', 1.1, 2.5, step=0.1)  # Narrowed: 10-150% more confident (was 0.1-0.7 diff)
 
         # Limit order parameters (only optimize if optimize_limit_params=True)
         if self.optimize_limit_params:
@@ -296,7 +296,7 @@ class BacktesterOptimizer:
                     enable_partial_tp=self.enable_partial_tp,
                     enable_dynamic_tp=self.enable_dynamic_tp,
                     enable_profit_protection=self.enable_profit_protection,
-                    min_proba_diff=min_proba_diff
+                    min_confidence_ratio=min_confidence_ratio
                 )
 
                 # Calculate metrics for this fold
@@ -379,7 +379,7 @@ class BacktesterOptimizer:
 
         logging.info(
             f"Trial {trial.number} (3-fold CV avg): "
-            f"prob={prob_threshold:.2f}, tp={tp_pct:.3f}, tsl={tsl_pct:.3f}, min_diff={min_proba_diff:.2f}{limit_params_str} | "
+            f"prob={prob_threshold:.2f}, tp={tp_pct:.3f}, tsl={tsl_pct:.3f}, min_ratio={min_confidence_ratio:.2f}{limit_params_str} | "
             f"Obj1(PnL)=${obj1_pnl:+.2f}, Obj2(DD)={obj2_drawdown:.2f}%, Obj3(Trades)={obj3_trade_score:.1f} | "
             f"Return={total_return:.2f}%, DD={max_dd:.2f}%, Sharpe={sharpe:.3f}, Trades={num_trades}"
         )
@@ -576,7 +576,7 @@ class BacktesterOptimizer:
             enable_partial_tp=self.enable_partial_tp,
             enable_dynamic_tp=self.enable_dynamic_tp,
             enable_profit_protection=self.enable_profit_protection,
-            min_proba_diff=best_params['min_proba_diff']
+            min_confidence_ratio=best_params['min_confidence_ratio']
         )
 
         final_metrics = calculate_metrics(
@@ -724,7 +724,7 @@ class BacktesterOptimizer:
             "version": self.version,
             "live_parameters": {
                 "prob_threshold": best_params['prob_threshold'],
-                "min_proba_diff": best_params['min_proba_diff'],
+                "min_confidence_ratio": best_params['min_confidence_ratio'],
                 "tp_pct": best_params['tp_pct'],
                 "tsl_pct": best_params['tsl_pct'],
                 "sl_pct": sl_pct,
@@ -789,7 +789,7 @@ class BacktesterOptimizer:
                 "helper_timeframes": self.helper_timeframes,
                 "deployment_parameters": {
                     "prob_threshold": best_params['prob_threshold'],
-                    "min_proba_diff": best_params['min_proba_diff'],
+                    "min_confidence_ratio": best_params['min_confidence_ratio'],
                     "tp_pct": best_params['tp_pct'],
                     "tsl_pct": best_params['tsl_pct'],
                     "sl_pct": sl_pct,
@@ -817,7 +817,7 @@ class BacktesterOptimizer:
                 },
                 "docker_compose_command_template": f"""
   --prob-threshold {best_params['prob_threshold']:.2f} \\
-  --min-proba-diff {best_params['min_proba_diff']:.2f} \\
+  --min-confidence-ratio {best_params['min_confidence_ratio']:.2f} \\
   --tp-pct {best_params['tp_pct']:.3f} \\
   --tsl-pct {best_params['tsl_pct']:.3f} \\
   --{'partial-tp' if self.enable_partial_tp else 'dynamic-tp' if self.enable_dynamic_tp else 'no-tp'}{' \\' if self.enable_limit_order else ''}
@@ -857,7 +857,7 @@ class BacktesterOptimizer:
         
         print(f"\n{'BEST PARAMETERS (Highest PnL from Pareto Front):':^70}")
         print(f"  PROB_THRESHOLD = {best_params['prob_threshold']:.2f}")
-        print(f"  MIN_PROBA_DIFF = {best_params['min_proba_diff']:.2f}")
+        print(f"  MIN_CONFIDENCE_RATIO = {best_params['min_confidence_ratio']:.2f}")
         print(f"  TP_PCT         = {best_params['tp_pct']:.3f}")
         print(f"  TSL_PCT        = {best_params['tsl_pct']:.3f}")
         print(f"  SL_PCT         = {best_params['tp_pct'] * 0.5:.3f} (auto: 50% of TP)")
@@ -923,7 +923,7 @@ class BacktesterOptimizer:
             
             f.write("BEST PARAMETERS (Highest PnL from Pareto Front):\n")
             f.write(f"PROB_THRESHOLD={best_params['prob_threshold']:.2f}\n")
-            f.write(f"MIN_PROBA_DIFF={best_params['min_proba_diff']:.2f}\n")
+            f.write(f"MIN_CONFIDENCE_RATIO={best_params['min_confidence_ratio']:.2f}\n")
             f.write(f"TP_PCT={best_params['tp_pct']:.3f}\n")
             f.write(f"TSL_PCT={best_params['tsl_pct']:.3f}\n")
             f.write(f"SL_PCT={best_params['tp_pct'] * 0.5:.3f}\n")

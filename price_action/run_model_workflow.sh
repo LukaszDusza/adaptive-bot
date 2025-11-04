@@ -25,7 +25,7 @@ FETCH_MAX_HISTORY="--fetch-max-history"  # Set to "--fetch-max-history" to fetch
 LABEL_TRIALS=100
 MODEL_TRIALS=100
 PROB_THRESHOLD=0.54
-MIN_PROBA_DIFF=0.3
+MIN_CONFIDENCE_RATIO=1.5
 TP_PCT=0.02
 TSL_PCT=0.014
 TRADE_SIZE=1000
@@ -134,7 +134,7 @@ echo "  LIMIT_TRAIN: $LIMIT_TRAIN (ignored if FETCH_MAX_HISTORY enabled)"
 echo "  LABEL_TRIALS: $LABEL_TRIALS"
 echo "  MODEL_TRIALS: $MODEL_TRIALS"
 echo "  PROB_THRESHOLD: $PROB_THRESHOLD"
-echo "  MIN_PROBA_DIFF: $MIN_PROBA_DIFF"
+echo "  MIN_CONFIDENCE_RATIO: $MIN_CONFIDENCE_RATIO"
 echo "  TP_PCT: $TP_PCT"
 echo "  TSL_PCT: $TSL_PCT"
 echo "  TP_MECHANISM: $TP_MECHANISM"
@@ -544,7 +544,7 @@ run_backtest() {
     echo "Backtest Parameters:"
     echo "  - Version: $VERSION"
     echo "  - Probability Threshold: $PROB_THRESHOLD"
-    echo "  - Min Proba Diff: $MIN_PROBA_DIFF"
+    echo "  - Min Conf Ratio: $MIN_CONFIDENCE_RATIO"
     echo "  - Take Profit: ${TP_PCT}%"
     echo "  - Trailing Stop Loss: ${TSL_PCT}%"
     echo "  - Trade Size: \$${TRADE_SIZE}"
@@ -558,7 +558,7 @@ run_backtest() {
         --helper-timeframes $HELPER_TIMEFRAMES \
         --limit $LIMIT_BACKTEST \
         --prob-threshold $PROB_THRESHOLD \
-        --min-proba-diff $MIN_PROBA_DIFF \
+        --min-confidence-ratio $MIN_CONFIDENCE_RATIO \
         --tp-pct $TP_PCT \
         --tsl-pct $TSL_PCT \
         --trade-size $TRADE_SIZE \

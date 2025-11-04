@@ -34,8 +34,8 @@ def main():
     parser.add_argument('--fetch-max-history', action='store_true',
                         help="Fetch MAXIMUM available history from Bybit API (ignores --limit parameter)")
     parser.add_argument('--prob-threshold', type=float, default=0.8)
-    parser.add_argument('--min-proba-diff', type=float, default=0.0,
-                        help="Minimum probability difference between BUY and SELL (confidence gap)")
+    parser.add_argument('--min-confidence-ratio', type=float, default=1.5,
+                        help="Minimum confidence ratio: stronger_signal/weaker_signal (1.5 = 50% more confident, 2.0 = 100% more)")
     parser.add_argument('--tp-pct', type=float, default=0.07)
     parser.add_argument('--tsl-pct', type=float, default=0.04)
     parser.add_argument('--trade-size', type=float, default=100.0)

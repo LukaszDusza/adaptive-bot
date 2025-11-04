@@ -74,7 +74,7 @@ class PredictionLogger:
                     'max_prob',           # max(buy_prob, sell_prob)
                     'threshold',          # Threshold używany
                     'proba_diff',         # abs(buy_prob - sell_prob)
-                    'min_proba_diff',     # Minimalny wymagany proba_diff
+                    'min_confidence_ratio',  # Minimalny wymagany confidence ratio
                     'decision',           # BUY / SELL / HOLD
                     'above_threshold',    # True/False - czy przekroczył threshold
                     'meets_criteria'      # True/False - threshold + proba_diff
@@ -98,7 +98,7 @@ class PredictionLogger:
                       buy_prob: float,
                       sell_prob: float,
                       threshold: float,
-                      min_proba_diff: float,
+                      min_confidence_ratio: float,
                       decision: str) -> None:
         """
         Loguje pojedynczą predykcję do CSV
@@ -108,7 +108,7 @@ class PredictionLogger:
             buy_prob: Prawdopodobieństwo BUY
             sell_prob: Prawdopodobieństwo SELL
             threshold: Threshold używany do decyzji
-            min_proba_diff: Minimalny wymagany proba_diff
+            min_confidence_ratio: Minimalny wymagany confidence ratio
             decision: Decyzja modelu (BUY/SELL/HOLD)
         """
 
@@ -120,8 +120,9 @@ class PredictionLogger:
         # Oblicz metryki
         max_prob = max(buy_prob, sell_prob)
         proba_diff = abs(buy_prob - sell_prob)
+        confidence_ratio = max_prob / min(buy_prob, sell_prob) if min(buy_prob, sell_prob) > 0 else float('inf')
         above_threshold = max_prob >= threshold
-        meets_criteria = above_threshold and proba_diff >= min_proba_diff
+        meets_criteria = above_threshold and confidence_ratio >= min_confidence_ratio
 
         # Zapisz do CSV
         with open(self.predictions_file, 'a', newline='') as f:
@@ -139,7 +140,7 @@ class PredictionLogger:
                 round(max_prob, 4),
                 round(threshold, 4),
                 round(proba_diff, 4),
-                round(min_proba_diff, 4),
+                round(min_confidence_ratio, 4),
                 decision,
                 above_threshold,
                 meets_criteria
@@ -241,7 +242,7 @@ if __name__ == '__main__':
         buy_prob=0.45,
         sell_prob=0.52,
         threshold=0.54,
-        min_proba_diff=0.3,
+        min_confidence_ratio=1.5,
         decision='HOLD'
     )
 
