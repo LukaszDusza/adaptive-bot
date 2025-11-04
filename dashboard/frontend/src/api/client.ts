@@ -14,6 +14,7 @@ import type {
   ExecutionQuality,
   FundingCosts,
   SLTPEffectiveness,
+  SLTPTrendPoint,
 } from '../types';
 
 // Determine base URL: empty string for production (proxied by nginx), full URL for dev
@@ -152,7 +153,19 @@ export const getExecutionQuality = () =>
 export const getFundingCosts = (days: number = 30) =>
   api.get<FundingCosts>('/api/metrics/funding-costs', { params: { days } });
 
-export const getSLTPEffectiveness = () =>
-  api.get<SLTPEffectiveness>('/api/metrics/sl-tp-effectiveness');
+export const getSLTPEffectiveness = (days: number = 7) =>
+  api.get<SLTPEffectiveness>('/api/metrics/sl-tp-effectiveness', { params: { days } });
+
+export const getSLTPEffectivenessTrend = (days: number = 30) =>
+  api.get<SLTPTrendPoint[]>('/api/metrics/sl-tp-effectiveness-trend', { params: { days } });
+
+// Bot Control - Position Management
+export const closePosition = (symbol: string) =>
+  api.post<{ success: boolean; message: string }>(`/api/bot-control/close-position/${symbol}`);
+
+export const setStopLossToBreakeven = (symbol: string, side: string, entryPrice: number) =>
+  api.post<{ success: boolean; message: string }>(`/api/bot-control/set-sl-breakeven/${symbol}`, null, {
+    params: { side, entry_price: entryPrice }
+  });
 
 export default api;

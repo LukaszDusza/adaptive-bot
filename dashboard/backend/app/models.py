@@ -80,6 +80,7 @@ class MetricsResponse(BaseModel):
     avg_loss: float
     avg_trade_duration_hours: float
     total_fees_paid: float
+    trades_per_day: float = 0.0
     last_updated: datetime
 
 
@@ -264,6 +265,17 @@ class SLTPEffectiveness(BaseModel):
     avg_tp_distance_pct: float
     avg_sl_distance_pct: float
     risk_reward_ratio: float
+
+
+class SLTPTrendPoint(BaseModel):
+    """Single point in SL/TP effectiveness trend"""
+    date: str  # ISO date string (YYYY-MM-DD)
+    tp_hit_rate: float
+    sl_hit_rate: float
+    risk_reward_ratio: float
+    avg_tp_distance_pct: float
+    avg_sl_distance_pct: float
+    trade_count: int
 
 
 # ============================================================================

@@ -110,7 +110,7 @@ class BybitAdapter:
     def _get_position_idx(self, side: str) -> int:
         """
         Calculate positionIdx based on hedge_mode and side.
-        
+
         One-Way Mode (hedge_mode=False): positionIdx = 0
         Hedge Mode (hedge_mode=True):
             - "Buy" or "Long" -> positionIdx = 1
@@ -118,11 +118,12 @@ class BybitAdapter:
         """
         if not self.hedge_mode:
             return 0
-        
-        # Hedge mode: determine based on side
-        if side in ("Buy", "Long"):
+
+        # Hedge mode: determine based on side (case-insensitive)
+        side_upper = side.upper()
+        if side_upper in ("BUY", "LONG"):
             return 1
-        elif side in ("Sell", "Short"):
+        elif side_upper in ("SELL", "SHORT"):
             return 2
         else:
             log.warning(f"Unknown side '{side}', defaulting to positionIdx=0")

@@ -86,7 +86,9 @@
       "Bash(git add:*)",
       "Bash(git commit:*)",
       "Bash(docker system prune:*)",
-      "Bash(xargs:*)"
+      "Bash(xargs:*)",
+      "Bash(npm run build:*)",
+      "Bash(sed:*)"
     ],
     "deny": [],
     "ask": []

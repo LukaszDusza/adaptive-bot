@@ -16,6 +16,7 @@ export interface MetricsResponse {
   avg_loss: number;
   avg_trade_duration_hours: number;
   total_fees_paid: number;
+  trades_per_day: number;
   last_updated: string;
 }
 
@@ -165,4 +166,14 @@ export interface SLTPEffectiveness {
   avg_tp_distance_pct: number;
   avg_sl_distance_pct: number;
   risk_reward_ratio: number;
+}
+
+export interface SLTPTrendPoint {
+  date: string; // ISO date string (YYYY-MM-DD)
+  tp_hit_rate: number;
+  sl_hit_rate: number;
+  risk_reward_ratio: number;
+  avg_tp_distance_pct: number;
+  avg_sl_distance_pct: number;
+  trade_count: number;
 }

@@ -1,82 +1,95 @@
 /**
- * Main dashboard layout with sidebar
+ * Main dashboard layout (simplified - no sidebar)
  */
-import React from 'react';
-import { Activity, BarChart3, Settings, Container } from 'lucide-react';
+import React, { useState } from 'react';
+import { Activity, Pause, Play, AlertTriangle } from 'lucide-react';
 import { TradingStatusIndicator } from './TradingStatusIndicator';
 
 interface DashboardLayoutProps {
   children: React.ReactNode;
+  activeTradesCount?: number;
+  onEmergencyClose?: () => void;
+  onPauseToggle?: (paused: boolean) => void;
 }
 
-export const DashboardLayout: React.FC<DashboardLayoutProps> = ({ children }) => {
+export const DashboardLayout: React.FC<DashboardLayoutProps> = ({
+  children,
+  activeTradesCount = 0,
+  onEmergencyClose,
+  onPauseToggle
+}) => {
+  const [tradingPaused, setTradingPaused] = useState(false);
+
+  const handlePauseToggle = () => {
+    const newPaused = !tradingPaused;
+    setTradingPaused(newPaused);
+    onPauseToggle?.(newPaused);
+  };
+
   return (
-    <div className="flex h-full">
-      {/* Sidebar */}
-      <aside className="w-64 bg-dark-card border-r border-dark-border flex flex-col">
-        {/* Logo */}
-        <div className="p-6 border-b border-dark-border">
-          <h1 className="text-2xl font-bold flex items-center gap-2">
-            <Activity className="text-profit" />
-            <span>Adaptive Bot</span>
-          </h1>
-          <p className="text-sm text-dark-text-secondary mt-1">Trading Dashboard</p>
-        </div>
-
-        {/* Navigation */}
-        <nav className="flex-1 p-4">
-          <ul className="space-y-2">
-            <NavItem icon={<BarChart3 size={20} />} label="Overview" active />
-            <NavItem icon={<Activity size={20} />} label="Active Trades" />
-            <NavItem icon={<Container size={20} />} label="Containers" />
-            <NavItem icon={<Settings size={20} />} label="Settings" />
-          </ul>
-        </nav>
-
-        {/* Footer */}
-        <div className="p-4 border-t border-dark-border space-y-3">
-          {/* API Status */}
-          <div className="flex items-center gap-2 text-sm text-dark-text-secondary">
-            <div className="w-2 h-2 rounded-full bg-profit animate-pulse-slow"></div>
-            <span>API Connected</span>
+    <div className="flex flex-col h-full bg-dark-bg">
+      {/* Header */}
+      <header className="bg-dark-card border-b border-dark-border">
+        <div className="px-8 py-4 flex items-center justify-between">
+          {/* Logo */}
+          <div className="flex items-center gap-3">
+            <Activity className="text-profit" size={28} />
+            <div>
+              <h1 className="text-2xl font-bold">Adaptive Bot</h1>
+              <p className="text-sm text-dark-text-secondary">Trading Dashboard</p>
+            </div>
           </div>
 
-          {/* Trading Status */}
-          <TradingStatusIndicator />
+          {/* Status indicators & Controls */}
+          <div className="flex items-center gap-4">
+            {/* API Status */}
+            <div className="flex items-center gap-2 text-sm text-dark-text-secondary">
+              <div className="w-2 h-2 rounded-full bg-profit animate-pulse-slow"></div>
+              <span>API Connected</span>
+            </div>
+
+            {/* Trading Status */}
+            <TradingStatusIndicator />
+
+            {/* Divider */}
+            <div className="w-px h-6 bg-dark-border"></div>
+
+            {/* Pause/Resume Button */}
+            <button
+              onClick={handlePauseToggle}
+              className={`p-2 rounded-lg transition-colors ${
+                tradingPaused
+                  ? 'bg-yellow-500/20 hover:bg-yellow-500/30 text-yellow-500'
+                  : 'bg-dark-bg-secondary hover:bg-dark-bg-tertiary text-dark-text-secondary'
+              }`}
+              title={tradingPaused ? 'Resume Trading' : 'Pause Trading'}
+            >
+              {tradingPaused ? <Play size={18} /> : <Pause size={18} />}
+            </button>
+
+            {/* Emergency Close Button */}
+            {activeTradesCount > 0 && (
+              <button
+                onClick={onEmergencyClose}
+                className="p-2 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-red-500 transition-colors relative"
+                title={`Emergency Close (${activeTradesCount} active)`}
+              >
+                <AlertTriangle size={18} className="animate-pulse-slow" />
+                <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
+                  {activeTradesCount}
+                </span>
+              </button>
+            )}
+          </div>
         </div>
-      </aside>
+      </header>
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto bg-dark-bg">
+      <main className="flex-1 overflow-auto">
         <div className="p-8">
           {children}
         </div>
       </main>
     </div>
-  );
-};
-
-interface NavItemProps {
-  icon: React.ReactNode;
-  label: string;
-  active?: boolean;
-}
-
-const NavItem: React.FC<NavItemProps> = ({ icon, label, active }) => {
-  return (
-    <li>
-      <button
-        className={`
-          w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-colors
-          ${active
-            ? 'bg-blue-600 text-white'
-            : 'text-dark-text-secondary hover:bg-dark-border hover:text-dark-text-primary'
-          }
-        `}
-      >
-        {icon}
-        <span className="font-medium">{label}</span>
-      </button>
-    </li>
   );
 };

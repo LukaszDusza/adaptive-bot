@@ -49,6 +49,10 @@ class BybitService:
         self.api_secret = api_secret or os.getenv("BYBIT_API_SECRET")
         self.base_url = base_url or os.getenv("BYBIT_BASE_URL", "https://api.bybit.com")
 
+        # Check if hedge mode is enabled (True if env var is "true", "1", "yes")
+        hedge_mode_env = os.getenv("BYBIT_HEDGE_MODE", "true").lower()
+        self.hedge_mode = hedge_mode_env in ("true", "1", "yes")
+
         if not self.api_key or not self.api_secret:
             logger.warning("Bybit API credentials not configured - pending orders feature will be limited")
             self.adapter = None
@@ -57,9 +61,10 @@ class BybitService:
                 self.adapter = BybitAdapter(
                     api_key=self.api_key,
                     api_secret=self.api_secret,
-                    base_url=self.base_url if self.base_url != "https://api.bybit.com" else None
+                    base_url=self.base_url if self.base_url != "https://api.bybit.com" else None,
+                    hedge_mode=self.hedge_mode
                 )
-                logger.info("✓ BybitAdapter initialized successfully")
+                logger.info(f"✓ BybitAdapter initialized successfully (hedge_mode={self.hedge_mode})")
             except Exception as e:
                 logger.error(f"Failed to initialize BybitAdapter: {e}")
                 self.adapter = None
@@ -432,6 +437,17 @@ class BybitService:
             # Calculate fees (if available in records)
             total_fees = sum([abs(float(r.get('execFee', 0))) for r in pnl_records])
 
+            # Calculate trades per day (last 7 days average)
+            from datetime import datetime, timedelta
+            now_ms = int(datetime.now().timestamp() * 1000)
+            seven_days_ago_ms = now_ms - (7 * 24 * 60 * 60 * 1000)
+
+            trades_last_7_days = [
+                r for r in pnl_records
+                if int(r.get('createdTime', 0)) >= seven_days_ago_ms
+            ]
+            trades_per_day = len(trades_last_7_days) / 7.0
+
             stats = {
                 'total_trades': total_trades,
                 'total_pnl': total_pnl,
@@ -445,6 +461,8 @@ class BybitService:
                 'max_loss': max_loss,
                 'total_fees': total_fees,
                 'avg_fee_per_trade': total_fees / total_trades if total_trades > 0 else 0.0,
+                'trades_per_day': trades_per_day,
+                'trades_last_7_days': len(trades_last_7_days),
             }
 
             logger.info(f"✓ Calculated stats from {total_trades} Bybit trades: PnL=${total_pnl:.2f}, WR={win_rate*100:.1f}%")
@@ -785,3 +803,78 @@ class BybitService:
                 'avg_sl_distance_pct': 0.0,
                 'risk_reward_ratio': 0.0
             }
+
+    def close_position_by_symbol(self, symbol: str) -> dict:
+        """
+        Close position for a specific symbol via Bybit API.
+
+        Args:
+            symbol: Trading pair (e.g., SOLUSDT)
+
+        Returns:
+            Dict with success status and message
+
+        Raises:
+            Exception if position close fails
+        """
+        if not self.adapter:
+            raise RuntimeError("BybitAdapter not initialized - cannot close position")
+
+        try:
+            logger.info(f"🚨 Closing position for {symbol}")
+            self.adapter.close_position(symbol)
+            logger.info(f"✓ Position closed successfully for {symbol}")
+            return {
+                'success': True,
+                'symbol': symbol,
+                'message': f'Position closed for {symbol}'
+            }
+        except Exception as e:
+            logger.error(f"Failed to close position for {symbol}: {e}")
+            raise
+
+    def set_stop_loss_to_breakeven(self, symbol: str, side: str, entry_price: float) -> dict:
+        """
+        Set stop loss to breakeven + fee buffer (entry price + trading fees).
+
+        Args:
+            symbol: Trading pair (e.g., SOLUSDT)
+            side: Position side ("Long" or "Short")
+            entry_price: Entry price to set as stop loss
+
+        Returns:
+            Dict with success status and message
+
+        Raises:
+            Exception if SL update fails
+        """
+        if not self.adapter:
+            raise RuntimeError("BybitAdapter not initialized - cannot update SL")
+
+        try:
+            # Calculate breakeven with fee buffer
+            # Bybit fees: ~0.055% taker (entry) + ~0.055% taker (exit) = ~0.11%
+            # Use 0.15% buffer to be safe (0.0015)
+            fee_buffer_pct = 0.0015
+
+            side_upper = side.upper()
+            if side_upper in ("BUY", "LONG"):
+                # LONG: need higher price to breakeven (entry + fees)
+                breakeven_price = entry_price * (1 + fee_buffer_pct)
+            else:
+                # SHORT: need lower price to breakeven (entry - fees)
+                breakeven_price = entry_price * (1 - fee_buffer_pct)
+
+            logger.info(f"Setting SL to BE+fee for {symbol} {side}: entry={entry_price}, BE+fee={breakeven_price:.6f}")
+            self.adapter.set_stop_loss(symbol, breakeven_price, side)
+            logger.info(f"✓ SL set to breakeven+fee for {symbol}")
+            return {
+                'success': True,
+                'symbol': symbol,
+                'side': side,
+                'stop_loss': breakeven_price,
+                'message': f'SL set to breakeven+fee (${breakeven_price:.6f}) for {symbol}'
+            }
+        except Exception as e:
+            logger.error(f"Failed to set SL for {symbol}: {e}")
+            raise

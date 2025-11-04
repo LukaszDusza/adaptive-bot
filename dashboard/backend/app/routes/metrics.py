@@ -12,7 +12,7 @@ import numpy as np
 from app.models import (
     MetricsResponse, TickerMetrics, EquityCurvePoint,
     ExitReasonStats, DrawdownPoint, TradeDurationBin, FeeAnalysis, StrategyComparison,
-    ExecutionQuality, FundingCosts, SLTPEffectiveness
+    ExecutionQuality, FundingCosts, SLTPEffectiveness, SLTPTrendPoint
 )
 from app.services.cache_manager import cached
 from app.services.alert_manager import get_alert_manager, Alert
@@ -71,23 +71,45 @@ async def get_overall_metrics():
     # Get current equity
     current_equity = bybit_service.get_wallet_balance()
 
-    # Calculate Sharpe ratio (simplified - using daily returns approximation)
-    sharpe_ratio = None  # TODO: Requires more historical data
+    # Calculate Sharpe ratio and max drawdown from equity curve
+    sharpe_ratio = None
+    max_dd = 0.0
+    max_dd_pct = 0.0
 
-    # Calculate max drawdown from equity curve
     try:
-        equity_curve_data = bybit_service.build_equity_curve_from_bybit(limit=100)
+        # Get equity curve (use more data for better Sharpe calculation)
+        equity_curve_data = bybit_service.build_equity_curve_from_bybit(limit=200)
+
         if equity_curve_data:
             equities = [point['equity'] for point in equity_curve_data]
+
+            # Calculate max drawdown
             running_max = np.maximum.accumulate(equities)
             drawdowns = running_max - equities
             max_dd = float(np.max(drawdowns))
             peak_value = running_max[np.argmax(drawdowns)]
             max_dd_pct = (max_dd / peak_value * 100) if peak_value > 0 else 0.0
-        else:
-            max_dd = 0.0
-            max_dd_pct = 0.0
-    except Exception:
+
+            # Calculate Sharpe ratio
+            if len(equities) >= 2:
+                equity_array = np.array(equities)
+                # Calculate returns (percentage changes between consecutive equity points)
+                returns = np.diff(equity_array) / equity_array[:-1]
+
+                if len(returns) > 1:
+                    mean_return = np.mean(returns)
+                    std_return = np.std(returns, ddof=1)
+
+                    # Only calculate if there's volatility
+                    if std_return > 0:
+                        # Annualize: assuming trades are roughly daily-like frequency
+                        # sqrt(365) is standard for daily returns
+                        sharpe_ratio = (mean_return / std_return) * np.sqrt(365)
+    except Exception as e:
+        # Log error but continue with None/0 values
+        import logging
+        logging.warning(f"Failed to calculate metrics from equity curve: {e}")
+        sharpe_ratio = None
         max_dd = 0.0
         max_dd_pct = 0.0
 
@@ -105,6 +127,7 @@ async def get_overall_metrics():
         avg_loss=stats.get('avg_loss', 0.0),
         avg_trade_duration_hours=0.0,  # Not available from Bybit closed PnL
         total_fees_paid=stats.get('total_fees', 0.0),
+        trades_per_day=stats.get('trades_per_day', 0.0),
         last_updated=datetime.now()
     )
 
@@ -491,12 +514,15 @@ async def get_funding_costs(days: int = 30):
 
 @router.get("/sl-tp-effectiveness", response_model=SLTPEffectiveness)
 @cached(ttl=30, key_prefix="sl_tp_effectiveness")
-async def get_sl_tp_effectiveness():
+async def get_sl_tp_effectiveness(days: int = 7):
     """
     Get SL/TP effectiveness analysis from BYBIT CLOSED P&L (CACHED - 30s TTL).
 
     IMPROVED: Now analyzes ACTUAL closed trades instead of order history.
-    Shows real win/loss patterns from Bybit closed P&L data.
+    Shows real win/loss patterns from Bybit closed P&L data for last N days.
+
+    Args:
+        days: Number of days to analyze (default: 7)
 
     Returns:
     - TP hit rate (profitable closes)
@@ -513,9 +539,28 @@ async def get_sl_tp_effectiveness():
     _check_bybit_available()
 
     # Get closed P&L history from Bybit
-    pnl_records = bybit_service.get_closed_pnl_history(limit=200)
+    pnl_records = bybit_service.get_closed_pnl_history(limit=500)
 
     if not pnl_records:
+        return SLTPEffectiveness(
+            total_orders=0,
+            tp_hit_count=0,
+            sl_hit_count=0,
+            tp_hit_rate=0.0,
+            sl_hit_rate=0.0,
+            avg_tp_distance_pct=0.0,
+            avg_sl_distance_pct=0.0,
+            risk_reward_ratio=0.0
+        )
+
+    # Filter trades by date (last N days)
+    from datetime import timedelta
+    cutoff_time = datetime.now() - timedelta(days=days)
+    cutoff_ms = int(cutoff_time.timestamp() * 1000)
+
+    recent_records = [r for r in pnl_records if int(r.get('updatedTime', 0)) >= cutoff_ms]
+
+    if not recent_records:
         return SLTPEffectiveness(
             total_orders=0,
             tp_hit_count=0,
@@ -535,7 +580,7 @@ async def get_sl_tp_effectiveness():
     tp_profits = []
     sl_losses = []
 
-    for record in pnl_records:
+    for record in recent_records:
         closed_pnl = float(record.get('closedPnl', 0))
         avg_entry = float(record.get('avgEntryPrice', 0))
         avg_exit = float(record.get('avgExitPrice', 0))
@@ -560,7 +605,7 @@ async def get_sl_tp_effectiveness():
             else:
                 breakeven_trades.append(record)
 
-    total_analyzed = len(pnl_records)
+    total_analyzed = len(recent_records)
     tp_count = len(tp_trades)
     sl_count = len(sl_trades)
 
@@ -585,3 +630,101 @@ async def get_sl_tp_effectiveness():
         avg_sl_distance_pct=avg_sl_dist,
         risk_reward_ratio=rr_ratio
     )
+
+
+@router.get("/sl-tp-effectiveness-trend", response_model=List[SLTPTrendPoint])
+@cached(ttl=60, key_prefix="sl_tp_trend")
+async def get_sl_tp_effectiveness_trend(days: int = 30):
+    """
+    Get SL/TP effectiveness trend over time (daily data).
+
+    Shows how TP/SL hit rates and risk/reward ratio change over time.
+    Useful for identifying if strategy performance is improving or degrading.
+
+    Args:
+        days: Number of days to include in trend (default: 30)
+
+    Returns:
+        List of daily SLTPTrendPoint sorted by date (oldest to newest)
+    """
+    _check_bybit_available()
+
+    # Get closed P&L history from Bybit
+    pnl_records = bybit_service.get_closed_pnl_history(limit=500)
+
+    if not pnl_records:
+        return []
+
+    # Filter by date range
+    from datetime import timedelta
+    cutoff_time = datetime.now() - timedelta(days=days)
+    cutoff_ms = int(cutoff_time.timestamp() * 1000)
+
+    recent_records = [r for r in pnl_records if int(r.get('updatedTime', 0)) >= cutoff_ms]
+
+    if not recent_records:
+        return []
+
+    # Group trades by date
+    from collections import defaultdict
+    trades_by_date = defaultdict(list)
+
+    for record in recent_records:
+        updated_ms = int(record.get('updatedTime', 0))
+        trade_date = datetime.fromtimestamp(updated_ms / 1000).date()
+        trades_by_date[trade_date].append(record)
+
+    # Calculate metrics for each day
+    trend_points = []
+
+    for trade_date in sorted(trades_by_date.keys()):
+        day_records = trades_by_date[trade_date]
+
+        tp_trades = []
+        sl_trades = []
+        tp_profits = []
+        sl_losses = []
+
+        for record in day_records:
+            closed_pnl = float(record.get('closedPnl', 0))
+            avg_entry = float(record.get('avgEntryPrice', 0))
+            avg_exit = float(record.get('avgExitPrice', 0))
+            side = record.get('side', 'Buy')
+
+            # Calculate price movement
+            if avg_entry > 0:
+                if side == 'Buy':
+                    price_change_pct = ((avg_exit - avg_entry) / avg_entry) * 100
+                else:
+                    price_change_pct = ((avg_entry - avg_exit) / avg_entry) * 100
+
+                if closed_pnl > 0.001:
+                    tp_trades.append(record)
+                    tp_profits.append(abs(price_change_pct))
+                elif closed_pnl < -0.001:
+                    sl_trades.append(record)
+                    sl_losses.append(abs(price_change_pct))
+
+        total_count = len(day_records)
+        tp_count = len(tp_trades)
+        sl_count = len(sl_trades)
+
+        tp_rate = (tp_count / total_count) if total_count > 0 else 0.0
+        sl_rate = (sl_count / total_count) if total_count > 0 else 0.0
+
+        avg_tp_dist = (sum(tp_profits) / len(tp_profits)) if tp_profits else 0.0
+        avg_sl_dist = (sum(sl_losses) / len(sl_losses)) if sl_losses else 0.0
+
+        rr_ratio = (avg_tp_dist / avg_sl_dist) if avg_sl_dist > 0 else 0.0
+
+        trend_points.append(SLTPTrendPoint(
+            date=trade_date.isoformat(),
+            tp_hit_rate=tp_rate,
+            sl_hit_rate=sl_rate,
+            risk_reward_ratio=rr_ratio,
+            avg_tp_distance_pct=avg_tp_dist,
+            avg_sl_distance_pct=avg_sl_dist,
+            trade_count=total_count
+        ))
+
+    return trend_points

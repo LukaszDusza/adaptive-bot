@@ -2,7 +2,7 @@
  * Funding Costs Card - Shows funding fees analysis
  */
 import React from 'react';
-import { DollarSign, TrendingDown, Calendar, PieChart } from 'lucide-react';
+import { DollarSign, TrendingDown, Calendar, PieChart, RefreshCw } from 'lucide-react';
 import type { FundingCosts } from '../../types';
 
 interface FundingCostsCardProps {
@@ -19,7 +19,37 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
     }).format(value);
   };
 
-  if (loading || !data) {
+  // Color coding functions (lower costs = green, higher = red)
+  const getTotalFundingColor = (totalFees: number) => {
+    if (totalFees < 5) return 'text-green-500'; // Excellent (low costs)
+    if (totalFees < 15) return 'text-green-400'; // Good
+    if (totalFees < 30) return 'text-yellow-500'; // Fair
+    return 'text-red-500'; // High costs
+  };
+
+  const getDailyAvgColor = (dailyAvg: number) => {
+    if (dailyAvg < 0.5) return 'text-green-500'; // Excellent
+    if (dailyAvg < 1.5) return 'text-green-400'; // Good
+    if (dailyAvg < 3.0) return 'text-yellow-500'; // Fair
+    return 'text-red-500'; // High
+  };
+
+  const getMonthlyProjectionColor = (monthlyProj: number) => {
+    if (monthlyProj < 15) return 'text-green-500'; // Excellent
+    if (monthlyProj < 45) return 'text-green-400'; // Good
+    if (monthlyProj < 90) return 'text-yellow-500'; // Fair
+    return 'text-red-500'; // High
+  };
+
+  const getSymbolCostColor = (cost: number) => {
+    if (cost < 2) return 'text-green-500'; // Low cost
+    if (cost < 5) return 'text-green-400'; // Moderate
+    if (cost < 10) return 'text-yellow-500'; // Fair
+    return 'text-red-500'; // High
+  };
+
+  // Only show loading skeleton on first load (no data yet)
+  if (!data) {
     return (
       <div className="stat-card">
         <div className="flex items-center justify-between mb-4">
@@ -27,7 +57,7 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
           <TrendingDown className="text-yellow-500" size={20} />
         </div>
         <div className="text-center text-dark-text-secondary py-8">
-          {loading ? 'Loading...' : 'No data available'}
+          Loading...
         </div>
       </div>
     );
@@ -41,15 +71,18 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
   return (
     <div className="stat-card">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold text-dark-text-primary">Funding Costs (30d) ~Est.</h3>
-        <TrendingDown className="text-yellow-500" size={20} />
+        <div className="flex items-center gap-2">
+          <h3 className="text-lg font-semibold text-dark-text-primary">Funding Costs (30d) ~Est.</h3>
+          {loading && <RefreshCw className={getTotalFundingColor(data.total_funding_fees)} size={14} />}
+        </div>
+        <TrendingDown className={getTotalFundingColor(data.total_funding_fees)} size={20} />
       </div>
 
       <div className="space-y-4">
         {/* Total Funding Fees */}
         <div>
           <div className="text-sm text-dark-text-secondary">Estimated Total Funding</div>
-          <div className="text-2xl font-bold text-loss">
+          <div className={`text-2xl font-bold ${getTotalFundingColor(data.total_funding_fees)}`}>
             -{formatCurrency(data.total_funding_fees)}
           </div>
           <div className="text-xs text-dark-text-secondary mt-1">
@@ -64,10 +97,10 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
         <div className="border-t border-dark-border pt-3">
           <div className="flex items-center justify-between">
             <span className="text-sm text-dark-text-secondary">Daily Average</span>
-            <Calendar className="text-blue-400" size={16} />
+            <Calendar className={getDailyAvgColor(data.daily_avg_funding)} size={16} />
           </div>
-          <div className="text-xl font-semibold text-dark-text-primary">
-            {formatCurrency(data.daily_avg_funding)}
+          <div className={`text-xl font-semibold ${getDailyAvgColor(data.daily_avg_funding)}`}>
+            -{formatCurrency(data.daily_avg_funding)}
           </div>
           <div className="text-xs text-dark-text-secondary mt-1">
             Avg per event: {formatCurrency(data.avg_funding_per_event)}
@@ -78,9 +111,9 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
         <div className="border-t border-dark-border pt-3">
           <div className="flex items-center justify-between">
             <span className="text-sm text-dark-text-secondary">Monthly Projection</span>
-            <DollarSign className="text-yellow-500" size={16} />
+            <DollarSign className={getMonthlyProjectionColor(data.monthly_projected_funding)} size={16} />
           </div>
-          <div className="text-xl font-semibold text-loss">
+          <div className={`text-xl font-semibold ${getMonthlyProjectionColor(data.monthly_projected_funding)}`}>
             -{formatCurrency(data.monthly_projected_funding)}
           </div>
         </div>
@@ -96,7 +129,9 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
               {topSymbols.map(([symbol, cost]) => (
                 <div key={symbol} className="flex items-center justify-between">
                   <span className="text-sm font-medium text-dark-text-primary">{symbol}</span>
-                  <span className="text-sm text-loss">-{formatCurrency(cost)}</span>
+                  <span className={`text-sm font-semibold ${getSymbolCostColor(cost)}`}>
+                    -{formatCurrency(cost)}
+                  </span>
                 </div>
               ))}
             </div>

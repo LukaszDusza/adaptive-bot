@@ -42,9 +42,16 @@ export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({ data }) => {
     );
   }
 
-  // Format data for Recharts
-  const chartData = data.map((point) => ({
-    timestamp: new Date(point.timestamp).toLocaleDateString('en-US', {
+  // Format data for Recharts - use index to ensure uniqueness
+  const chartData = data.map((point, index) => ({
+    index: index, // Unique key for Recharts
+    timestamp: new Date(point.timestamp).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }),
+    displayDate: new Date(point.timestamp).toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
     }),
@@ -60,15 +67,15 @@ export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({ data }) => {
   // Custom tooltip
   const CustomTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
-      const data = payload[0].payload;
+      const point = payload[0].payload;
       return (
         <div className="bg-dark-card border border-dark-border rounded p-3 shadow-lg">
-          <p className="text-sm text-dark-text-secondary mb-1">{data.timestamp}</p>
-          <p className={`font-bold ${data.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
-            PnL: ${formatPnL(data.pnl)}
+          <p className="text-sm text-dark-text-secondary mb-1">{point.timestamp}</p>
+          <p className={`font-bold ${point.pnl >= 0 ? 'text-profit' : 'text-loss'}`}>
+            PnL: ${formatPnL(point.pnl)}
           </p>
           <p className="text-sm text-dark-text-secondary">
-            Trades: {data.trades}
+            Trades: {point.trades}
           </p>
         </div>
       );
@@ -82,10 +89,10 @@ export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({ data }) => {
         <div>
           <h2 className="text-xl font-bold flex items-center gap-2">
             <TrendingUp className="text-profit" />
-            Equity Curve
+            Total Account P&L
           </h2>
           <p className="text-xs text-dark-text-secondary mt-1">
-            Starting from Nov 1, 2025 (zero level)
+            Total account change (includes unrealized P&L)
           </p>
         </div>
         <div className="flex gap-6 text-sm">
@@ -107,19 +114,28 @@ export const EquityCurveChart: React.FC<EquityCurveChartProps> = ({ data }) => {
       </div>
 
       <ResponsiveContainer width="100%" height={400}>
-        <LineChart data={chartData} margin={{ top: 5, right: 30, left: 20, bottom: 5 }}>
+        <LineChart
+          data={chartData}
+          margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+        >
           <CartesianGrid strokeDasharray="3 3" stroke="#1f1f28" />
           <XAxis
-            dataKey="timestamp"
+            dataKey="index"
             stroke="#6b6b76"
             tick={{ fill: '#a0a0ab', fontSize: 12 }}
+            tickFormatter={(index) => chartData[index]?.displayDate || ''}
+            interval="preserveStartEnd"
           />
           <YAxis
             stroke="#6b6b76"
             tick={{ fill: '#a0a0ab', fontSize: 12 }}
             tickFormatter={(value) => `$${value}`}
           />
-          <Tooltip content={<CustomTooltip />} />
+          <Tooltip
+            content={<CustomTooltip />}
+            cursor={{ stroke: '#6b6b76', strokeWidth: 1, strokeDasharray: '5 5' }}
+            isAnimationActive={false}
+          />
           <Legend
             wrapperStyle={{ paddingTop: '20px' }}
             iconType="line"

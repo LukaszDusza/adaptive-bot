@@ -20,6 +20,8 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
   const [sortField, setSortField] = useState<SortField>('start_time');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [showFilters, setShowFilters] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
 
   // Get unique exit reasons for filter
   const exitReasons = useMemo(() => {
@@ -89,6 +91,17 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
 
     return filtered;
   }, [trades, searchTerm, filterSide, filterExitReason, sortField, sortDirection]);
+
+  // Pagination
+  const totalPages = Math.ceil(filteredTrades.length / itemsPerPage);
+  const startIndex = (currentPage - 1) * itemsPerPage;
+  const endIndex = startIndex + itemsPerPage;
+  const paginatedTrades = filteredTrades.slice(startIndex, endIndex);
+
+  // Reset to page 1 when filters change
+  React.useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, filterSide, filterExitReason, sortField, sortDirection]);
 
   const handleSort = (field: SortField) => {
     if (sortField === field) {
@@ -258,14 +271,14 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
             </tr>
           </thead>
           <tbody>
-            {filteredTrades.length === 0 ? (
+            {paginatedTrades.length === 0 ? (
               <tr>
                 <td colSpan={9} className="text-center text-dark-text-secondary py-8">
                   No trades found
                 </td>
               </tr>
             ) : (
-              filteredTrades.map((trade) => (
+              paginatedTrades.map((trade) => (
                 <tr key={trade.trade_id}>
                   {/* Ticker */}
                   <td className="font-medium">{trade.ticker}</td>
@@ -334,6 +347,82 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
           </tbody>
         </table>
       </div>
+
+      {/* Pagination Controls */}
+      {totalPages > 1 && (
+        <div className="mt-4 flex items-center justify-between">
+          <div className="text-sm text-dark-text-secondary">
+            Showing {startIndex + 1}-{Math.min(endIndex, filteredTrades.length)} of {filteredTrades.length} trades
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Previous Button */}
+            <button
+              onClick={() => setCurrentPage(currentPage - 1)}
+              disabled={currentPage === 1}
+              className={`px-3 py-1 rounded border ${
+                currentPage === 1
+                  ? 'bg-dark-bg border-dark-border text-dark-text-secondary cursor-not-allowed'
+                  : 'bg-dark-card border-dark-border text-dark-text-primary hover:bg-dark-bg hover:border-blue-500'
+              }`}
+            >
+              Previous
+            </button>
+
+            {/* Page Numbers */}
+            <div className="flex items-center gap-1">
+              {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => {
+                // Show first page, last page, current page, and pages around current
+                const showPage =
+                  page === 1 ||
+                  page === totalPages ||
+                  (page >= currentPage - 1 && page <= currentPage + 1);
+
+                const showEllipsis =
+                  (page === 2 && currentPage > 3) ||
+                  (page === totalPages - 1 && currentPage < totalPages - 2);
+
+                if (!showPage && !showEllipsis) return null;
+
+                if (showEllipsis) {
+                  return (
+                    <span key={page} className="px-2 text-dark-text-secondary">
+                      ...
+                    </span>
+                  );
+                }
+
+                return (
+                  <button
+                    key={page}
+                    onClick={() => setCurrentPage(page)}
+                    className={`px-3 py-1 rounded border ${
+                      currentPage === page
+                        ? 'bg-blue-500 border-blue-500 text-white font-bold'
+                        : 'bg-dark-card border-dark-border text-dark-text-primary hover:bg-dark-bg hover:border-blue-500'
+                    }`}
+                  >
+                    {page}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Next Button */}
+            <button
+              onClick={() => setCurrentPage(currentPage + 1)}
+              disabled={currentPage === totalPages}
+              className={`px-3 py-1 rounded border ${
+                currentPage === totalPages
+                  ? 'bg-dark-bg border-dark-border text-dark-text-secondary cursor-not-allowed'
+                  : 'bg-dark-card border-dark-border text-dark-text-primary hover:bg-dark-bg hover:border-blue-500'
+              }`}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Summary Stats */}
       {filteredTrades.length > 0 && (

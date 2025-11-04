@@ -18,16 +18,12 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({ metrics }) => {
     }).format(value);
   };
 
-  const formatPercent = (value: number) => {
-    return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
-  };
-
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-      {/* Total PnL */}
+      {/* Closed Trades PnL */}
       <div className="stat-card">
         <div className="flex items-center justify-between">
-          <span className="stat-label">Total PnL</span>
+          <span className="stat-label">Closed Trades P&L</span>
           {metrics.total_pnl >= 0 ? (
             <TrendingUp className="text-profit" size={20} />
           ) : (
@@ -38,7 +34,7 @@ export const MetricsCards: React.FC<MetricsCardsProps> = ({ metrics }) => {
           {formatCurrency(metrics.total_pnl)}
         </div>
         <div className="text-sm text-dark-text-secondary">
-          {formatPercent(metrics.total_pnl_percent)} average
+          From closed positions only
         </div>
       </div>
 
