@@ -2677,19 +2677,51 @@ class TradingBot:
                 old_entry = self.state['entry_price']
                 logger.info(f"DCA fill: updating entry {old_entry:.4f} → {actual_entry:.4f}")
 
-                # ========== DCA MODE: DO NOT update SL/TP on subsequent fills ==========
-                # SL/TP were already set on first fill based on:
-                # - SL: Level 3 (furthest/worst case) - remains constant
-                # - TP: Expected avg entry (assuming all 3 levels) - remains constant
-                # This protects position from the start with worst-case SL
+                # ========== DCA MODE: Update SL to breakeven after each fill ==========
+                # CRITICAL FIX: After subsequent DCA fills, update SL to breakeven protection
+                # This prevents losses from exceeding gains when only partial fills occur
 
-                # Keep existing SL/TP from state (no changes)
-                sl = self.state.get('last_sl', 0)
-                tp = self.state.get('initial_tp', 0)
+                decision = self.state['side'].upper()  # "LONG" or "SHORT"
+
+                # Calculate breakeven SL (entry + fees buffer: 0.06% = maker fee + safety margin)
+                # This protects against small movements while allowing position to breathe
+                if decision == "LONG":
+                    sl = actual_entry * (1 - 0.0006)  # Breakeven - 0.06%
+                    # TP based on new average entry
+                    tp = actual_entry * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+                    position_side = "Buy"
+                else:  # SHORT
+                    sl = actual_entry * (1 + 0.0006)  # Breakeven + 0.06%
+                    # TP based on new average entry
+                    tp = actual_entry * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+                    position_side = "Sell"
 
                 tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
-                logger.info(f"📋 DCA subsequent fill: Keeping original SL/TP (SL: {sl:.4f}, TP: {tp_display})")
-                logger.info(f"   (SL remains based on Level 3, not updated to new avg entry)")
+                logger.warning(f"🔄 DCA subsequent fill: Updating SL to BREAKEVEN protection")
+                logger.warning(f"   Old SL: {self.state.get('last_sl', 0):.4f} → New SL: {sl:.4f} (BE + fees)")
+                logger.warning(f"   Old TP: {self.state.get('initial_tp', 0):.4f} → New TP: {tp_display}")
+
+                # Update SL/TP on Bybit
+                try:
+                    self.adapter.set_stop_loss(self.config.TICKER, sl, position_side)
+                    logger.info(f"✓ Stop Loss updated: {sl:.4f}")
+
+                    if tp > 0:
+                        self.adapter.set_take_profit(self.config.TICKER, tp, position_side)
+                        logger.info(f"✓ Take Profit updated: {tp:.4f}")
+
+                    # Verify update with single retry
+                    time.sleep(1.5)
+                    verify_position = self.adapter.get_position(self.config.TICKER)
+                    if verify_position:
+                        verify_sl = verify_position.get('stopLoss', 0)
+                        verify_tp = verify_position.get('takeProfit', 0)
+                        if verify_sl > 0:
+                            logger.info(f"✅ SL/TP update verified: SL={verify_sl:.4f}, TP={verify_tp:.4f}")
+                        else:
+                            logger.warning(f"⚠️  SL verification warning: SL={verify_sl}")
+                except Exception as e:
+                    logger.error(f"Failed to update SL/TP after DCA fill: {e}")
 
                 # Log DCA add event
                 self.trade_logger.log_event("DCA_ENTRY_ADD", {
@@ -2699,17 +2731,32 @@ class TradingBot:
                     "added_quantity": float(sum(order['qty'] for order in filled_orders)),
                     "dca_levels_filled": [order['level'] for order in filled_orders],
                     "dca_levels_pending": len(self.active_limit_orders),
+                    "old_sl": float(self.state.get('last_sl', 0)),
+                    "new_sl": float(sl),
+                    "old_tp": float(self.state.get('initial_tp', 0)),
+                    "new_tp": float(tp) if tp > 0 else None,
                     "candle": self.last_candle_data
                 })
 
-                # Update state
+                # Update state with new SL/TP
                 self.state['entry_price'] = actual_entry
-                # Keep original SL/TP in state (don't update)
-                # self.state['initial_tp'] and self.state['last_sl'] remain unchanged
+                self.state['last_sl'] = sl  # Update SL to breakeven
+                if tp > 0:
+                    self.state['initial_tp'] = tp  # Update TP based on new avg entry
                 self.state['dca_fills'] = self.state.get('dca_fills', 1) + len(filled_orders)
+
+                # Update highest/lowest for TSL tracking based on new breakeven
+                if decision == "LONG":
+                    self.state['highest_price'] = max(actual_entry, self.state.get('highest_price', actual_entry))
+                    self.state['lowest_price'] = self.state.get('lowest_price', 999999)
+                else:
+                    self.state['highest_price'] = self.state.get('highest_price', 999999)
+                    self.state['lowest_price'] = min(actual_entry, self.state.get('lowest_price', actual_entry))
+
                 self._save_state()
 
-                logger.warning(f"✓ DCA Position updated | New avg entry: {actual_entry:.4f} | Total fills: {self.state['dca_fills']} | Pending: {remaining_orders_count}")
+                logger.warning(f"✓ DCA Position updated | New avg entry: {actual_entry:.4f} | SL: {sl:.4f} (BE) | TP: {tp_display}")
+                logger.warning(f"   Total fills: {self.state['dca_fills']} | Pending: {remaining_orders_count}")
 
         except Exception as e:
             logger.error(f"Failed to finalize limit order entry: {e}", exc_info=True)
