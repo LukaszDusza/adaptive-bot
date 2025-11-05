@@ -427,3 +427,180 @@ services:
       --dca-level1-pct 0.006
       --dca-atr-multiplier 1.5
       --dca-max-swing-distance 1.5
+
+  # ============================================
+  # BRETTUSDT - v1.2.brett (NEW!)
+  # ML optimal: prob-threshold 0.4159
+  # BACKTEST: ROI 2.17%, WR 90.9%, Trades 22, Sharpe 22.69
+  # BEST QUALITY: 0.0986% ROI/Trade (Rank #1)
+  # ============================================
+  bot-brett:
+    <<: [ *bot-base, *bot-common ]
+    container_name: bot-brett
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=bot-brett
+    env_file:
+      - .env_luk
+      - .env_common
+    command: >
+      python bot.py
+      --version v1.2.brett
+      --ticker BRETTUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 2h 4h 12h 1d
+      --prob-threshold 0.42
+      --min-confidence-ratio 1.3
+      --tsl-pct 0.008
+      --tp-pct 0.025
+      --trade-size-pct 0.05
+      --leverage 20
+      --dynamic-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 16
+      --dca-mode
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.6
+
+  # ============================================
+  # ICPUSDT - v1.2.icp (NEW!)
+  # ML optimal: prob-threshold 0.4756
+  # BACKTEST: ROI 0.93%, WR 100.0%, Trades 11, Sharpe 21.25
+  # ============================================
+  bot-icp:
+    <<: [ *bot-base, *bot-common ]
+    container_name: bot-icp
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=bot-icp
+    env_file:
+      - .env_luk
+      - .env_common
+    command: >
+      python bot.py
+      --version v1.2.icp
+      --ticker ICPUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 2h 4h 12h 1d
+      --prob-threshold 0.48
+      --min-confidence-ratio 1.3
+      --tsl-pct 0.008
+      --tp-pct 0.025
+      --trade-size-pct 0.05
+      --leverage 20
+      --dynamic-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 16
+      --dca-mode
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.7
+
+  # ============================================
+  # ONDOUSDT - v1.2.ondo (NEW!)
+  # ML optimal: prob-threshold 0.3978
+  # BACKTEST: ROI 1.40%, WR 62.5%, Trades 32, Sharpe 9.43
+  # ============================================
+  bot-ondo:
+    <<: [ *bot-base, *bot-common ]
+    container_name: bot-ondo
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=bot-ondo
+    env_file:
+      - .env_luk
+      - .env_common
+    command: >
+      python bot.py
+      --version v1.2.ondo
+      --ticker ONDOUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 2h 4h 12h 1d
+      --prob-threshold 0.40
+      --min-confidence-ratio 1.3
+      --tsl-pct 0.008
+      --tp-pct 0.025
+      --trade-size-pct 0.05
+      --leverage 20
+      --dynamic-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 16
+      --dca-mode
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.8
+
+  # ============================================
+  # PONKEUSDT - v1.2.ponke (NEW!)
+  # ML optimal: prob-threshold 0.4256
+  # BACKTEST: ROI 2.06%, WR 73.7%, Trades 38, Sharpe 10.53
+  # ============================================
+  bot-ponke:
+    <<: [ *bot-base, *bot-common ]
+    container_name: bot-ponke
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=bot-ponke
+    env_file:
+      - .env_luk
+      - .env_common
+    command: >
+      python bot.py
+      --version v1.2.ponke
+      --ticker PONKEUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 2h 4h 12h 1d
+      --prob-threshold 0.43
+      --min-confidence-ratio 1.3
+      --tsl-pct 0.008
+      --tp-pct 0.025
+      --trade-size-pct 0.05
+      --leverage 20
+      --dynamic-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 16
+      --dca-mode
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.6
+
+  # ============================================
+  # WIFUSDT - v1.2.wif (NEW!)
+  # ML optimal: prob-threshold 0.4445
+  # BACKTEST: ROI 2.39%, WR 63.9%, Trades 36, Sharpe 12.75
+  # HIGHEST TOTAL ROI!
+  # ============================================
+  bot-wif:
+    <<: [ *bot-base, *bot-common ]
+    container_name: bot-wif
+    environment:
+      - PYTHONUNBUFFERED=1
+      - CONTAINER_NAME=bot-wif
+    env_file:
+      - .env_luk
+      - .env_common
+    command: >
+      python bot.py
+      --version v1.2.wif
+      --ticker WIFUSDT
+      --timeframe 15m
+      --helper-timeframes 1h 2h 4h 12h 1d
+      --prob-threshold 0.44
+      --min-confidence-ratio 1.3
+      --tsl-pct 0.008
+      --tp-pct 0.025
+      --trade-size-pct 0.05
+      --leverage 20
+      --dynamic-tp
+      --hedge-mode
+      --limit-order
+      --limit-order-candles 16
+      --dca-mode
+      --dca-level1-pct 0.006
+      --dca-atr-multiplier 1.5
+      --dca-max-swing-distance 1.5
