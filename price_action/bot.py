@@ -2534,29 +2534,48 @@ class TradingBot:
                 # ========== FIRST FILL: Initialize position ==========
                 logger.info(f"Finalizing {position_type} entry @ {actual_entry:.4f}")
 
-                # ========== Check if SL/TP already embedded in order (DCA mode) ==========
-                sl_tp_already_set = False
-                if self.config.DCA_ENABLED and self.state and self.state.get('sl_tp_embedded', False):
-                    # DCA MODE: SL/TP were embedded in Level 1 order - already active on Bybit
-                    sl = self.state['planned_sl']
-                    tp = self.state['planned_tp']
-                    sl_tp_already_set = True
-                    logger.warning(f"✅ DCA MODE: SL/TP already ACTIVE from Level 1 order")
-                    tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
-                    logger.warning(f"   SL: {sl:.4f} (Level 3 based) | TP: {tp_display} (avg entry based)")
-                elif self.config.DCA_ENABLED and self.state and 'planned_sl' in self.state:
-                    # DCA MODE (legacy): Use pre-calculated SL/TP (based on furthest level)
-                    sl = self.state['planned_sl']
-                    tp = self.state['planned_tp']
-                    logger.info(f"📋 DCA MODE: Using planned SL/TP (SL from Level 3, TP from expected avg entry)")
+                # ========== NEW LOGIC: TP calculated ONCE from first filled order price ==========
+                # TP NEVER changes after this point (based on best entry = first fill)
+                first_fill_price = filled_orders[0]['price']
+
+                if decision == "BUY":
+                    tp = first_fill_price * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
                 else:
-                    # SINGLE LIMIT ORDER: Calculate SL/TP from actual entry
+                    tp = first_fill_price * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
+
+                # ========== NEW LOGIC: SL based on furthest ACTIVE limit order OR BE ==========
+                # If we still have pending orders → protect furthest level
+                # If all filled/cancelled → go to breakeven
+                sl_tp_already_set = False
+
+                if self.config.DCA_ENABLED:
+                    if self.active_limit_orders:
+                        # Case: Still have pending orders - SL protects furthest level
+                        # Use pre-calculated planned_sl (based on Level 3)
+                        sl = self.state.get('planned_sl')
+                        sl_tp_already_set = self.state.get('sl_tp_embedded', False)
+
+                        logger.warning(f"✅ DCA MODE: FIRST FILL with {len(self.active_limit_orders)} pending orders")
+                        logger.warning(f"   SL: {sl:.4f} (protecting furthest level)")
+                        tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
+                        logger.warning(f"   TP: {tp_display} (FIXED - based on first fill @ {first_fill_price:.4f})")
+                    else:
+                        # Case: All orders filled/cancelled on first check - go to BE
+                        if decision == "BUY":
+                            sl = actual_entry * (1 - 0.0006)  # BE - fees
+                        else:
+                            sl = actual_entry * (1 + 0.0006)  # BE + fees
+
+                        logger.warning(f"✅ DCA MODE: All orders filled/cancelled - SL → BREAKEVEN")
+                        logger.warning(f"   SL: {sl:.4f} (BE + fees)")
+                        tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
+                        logger.warning(f"   TP: {tp_display} (FIXED - based on first fill @ {first_fill_price:.4f})")
+                else:
+                    # SINGLE LIMIT ORDER: Calculate SL from actual entry
                     if decision == "BUY":
                         sl = actual_entry * (1 - self.config.TSL_PCT)
-                        tp = actual_entry * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
                     else:
                         sl = actual_entry * (1 + self.config.TSL_PCT)
-                        tp = actual_entry * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
 
                 # Set highest/lowest for TSL tracking
                 if decision == "BUY":
@@ -2652,7 +2671,9 @@ class TradingBot:
                 self.state = {
                     'side': position_type.capitalize(),
                     'entry_price': actual_entry,
-                    'initial_tp': tp,
+                    'first_fill_price': first_fill_price,  # Store first fill for reference
+                    'fixed_tp': tp,  # TP NEVER changes (based on first fill)
+                    'initial_tp': tp,  # Legacy compatibility
                     'initial_sl': sl,  # Store initial SL for trade metrics
                     'original_qty': total_qty,
                     'initial_size': trade_size_usd,  # Actual trade size (USD) used for this position
@@ -2666,62 +2687,119 @@ class TradingBot:
                 self._save_state()
 
                 tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
+
+                # ========== CALCULATE AND LOG RRR (Risk/Reward Ratio) ==========
+                if decision == "BUY":
+                    risk_distance = abs(actual_entry - sl)
+                    reward_distance = abs(tp - actual_entry) if tp > 0 else 0
+                else:
+                    risk_distance = abs(sl - actual_entry)
+                    reward_distance = abs(actual_entry - tp) if tp > 0 else 0
+
+                rrr = reward_distance / risk_distance if risk_distance > 0 else 0
+                risk_pct = (risk_distance / actual_entry) * 100
+                reward_pct = (reward_distance / actual_entry) * 100 if tp > 0 else 0
+
                 if self.config.DCA_ENABLED:
                     logger.warning(f"✓ DCA Position initialized | Entry: {actual_entry:.4f} | SL: {sl:.4f} | TP: {tp_display}")
                     logger.warning(f"   Filled levels: {[order['level'] for order in filled_orders]} | Pending: {len(self.active_limit_orders)}")
+                    logger.warning(f"   📊 RRR: 1:{rrr:.2f} | Risk: {risk_pct:.2f}% | Reward: {reward_pct:.2f}%")
                 else:
                     logger.warning(f"✓ Position finalized | SL: {sl:.4f} | TP: {tp_display}")
+                    logger.warning(f"   📊 RRR: 1:{rrr:.2f} | Risk: {risk_pct:.2f}% | Reward: {reward_pct:.2f}%")
 
             else:
                 # ========== SUBSEQUENT DCA FILL: Update position ==========
                 old_entry = self.state['entry_price']
                 logger.info(f"DCA fill: updating entry {old_entry:.4f} → {actual_entry:.4f}")
 
-                # ========== DCA MODE: Update SL to breakeven after each fill ==========
-                # CRITICAL FIX: After subsequent DCA fills, update SL to breakeven protection
-                # This prevents losses from exceeding gains when only partial fills occur
-
+                # ========== NEW LOGIC: SL based on active limit orders OR safe BE ==========
                 decision = self.state['side'].upper()  # "LONG" or "SHORT"
+                position_side = "Buy" if decision == "LONG" else "Sell"
 
-                # Calculate breakeven SL (entry + fees buffer: 0.06% = maker fee + safety margin)
-                # This protects against small movements while allowing position to breathe
+                # TP NEVER changes (fixed at first fill price)
+                tp = self.state.get('fixed_tp', self.state.get('initial_tp'))
+
+                # Get current price for safety check
+                current_price = self.adapter.latest_price(self.config.TICKER)
+                old_sl = self.state.get('last_sl', 0)
+
+                # Calculate target BE SL
                 if decision == "LONG":
-                    sl = actual_entry * (1 - 0.0006)  # Breakeven - 0.06%
-                    # TP based on new average entry
-                    tp = actual_entry * (1 + self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
-                    position_side = "Buy"
-                else:  # SHORT
-                    sl = actual_entry * (1 + 0.0006)  # Breakeven + 0.06%
-                    # TP based on new average entry
-                    tp = actual_entry * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
-                    position_side = "Sell"
+                    target_be_sl = actual_entry * (1 - 0.0006)  # BE - fees
+                else:
+                    target_be_sl = actual_entry * (1 + 0.0006)  # BE + fees
+
+                # Determine SL based on pending orders and safety check
+                if self.active_limit_orders:
+                    # Case: Still have pending orders - keep SL at furthest level
+                    sl = old_sl  # Don't change SL while waiting for more fills
+                    logger.warning(f"🔄 DCA subsequent fill: {len(self.active_limit_orders)} orders still pending")
+                    logger.warning(f"   SL: {sl:.4f} (UNCHANGED - protecting furthest level)")
+                    logger.warning(f"   TP: {tp:.4f} (FIXED - never changes)")
+                else:
+                    # Case: All orders filled/cancelled - try to move SL to BE
+                    # CRITICAL SAFETY CHECK: Don't set SL that would trigger immediately!
+
+                    if decision == "LONG":
+                        # For LONG: new SL must be BELOW current price
+                        if target_be_sl < current_price:
+                            sl = target_be_sl
+                            logger.warning(f"🔄 DCA fill: All orders done - SL → BREAKEVEN (safe)")
+                            logger.warning(f"   Old SL: {old_sl:.4f} → New SL: {sl:.4f} (BE - fees)")
+                            logger.warning(f"   Current price: {current_price:.4f} ✅ (above SL)")
+                        else:
+                            # Dangerous! Keep old SL
+                            sl = old_sl
+                            logger.warning(f"⚠️  DCA fill: Cannot move SL to BE - would trigger instantly!")
+                            logger.warning(f"   Target BE SL: {target_be_sl:.4f}")
+                            logger.warning(f"   Current price: {current_price:.4f} ⚠️  (BELOW target SL!)")
+                            logger.warning(f"   Keeping old SL: {sl:.4f} (will retry when price recovers)")
+
+                            # Store pending BE target for next cycle check
+                            self.state['pending_be_sl'] = target_be_sl
+
+                    else:  # SHORT
+                        # For SHORT: new SL must be ABOVE current price
+                        if target_be_sl > current_price:
+                            sl = target_be_sl
+                            logger.warning(f"🔄 DCA fill: All orders done - SL → BREAKEVEN (safe)")
+                            logger.warning(f"   Old SL: {old_sl:.4f} → New SL: {sl:.4f} (BE + fees)")
+                            logger.warning(f"   Current price: {current_price:.4f} ✅ (below SL)")
+                        else:
+                            sl = old_sl
+                            logger.warning(f"⚠️  DCA fill: Cannot move SL to BE - would trigger instantly!")
+                            logger.warning(f"   Target BE SL: {target_be_sl:.4f}")
+                            logger.warning(f"   Current price: {current_price:.4f} ⚠️  (ABOVE target SL!)")
+                            logger.warning(f"   Keeping old SL: {sl:.4f} (will retry when price recovers)")
+
+                            self.state['pending_be_sl'] = target_be_sl
+
+                    logger.warning(f"   TP: {tp:.4f} (FIXED - never changes)")
 
                 tp_display = f"{tp:.4f}" if tp > 0 else "OFF"
-                logger.warning(f"🔄 DCA subsequent fill: Updating SL to BREAKEVEN protection")
-                logger.warning(f"   Old SL: {self.state.get('last_sl', 0):.4f} → New SL: {sl:.4f} (BE + fees)")
-                logger.warning(f"   Old TP: {self.state.get('initial_tp', 0):.4f} → New TP: {tp_display}")
 
-                # Update SL/TP on Bybit
+                # Update SL on Bybit (TP never changes - was set at first fill)
                 try:
-                    self.adapter.set_stop_loss(self.config.TICKER, sl, position_side)
-                    logger.info(f"✓ Stop Loss updated: {sl:.4f}")
+                    # Only update SL if it actually changed
+                    if sl != old_sl:
+                        self.adapter.set_stop_loss(self.config.TICKER, sl, position_side)
+                        logger.info(f"✓ Stop Loss updated: {sl:.4f}")
 
-                    if tp > 0:
-                        self.adapter.set_take_profit(self.config.TICKER, tp, position_side)
-                        logger.info(f"✓ Take Profit updated: {tp:.4f}")
+                        # Verify update with single retry
+                        time.sleep(1.5)
+                        verify_position = self.adapter.get_position(self.config.TICKER)
+                        if verify_position:
+                            verify_sl = verify_position.get('stopLoss', 0)
+                            if verify_sl > 0:
+                                logger.info(f"✅ SL update verified: {verify_sl:.4f}")
+                            else:
+                                logger.warning(f"⚠️  SL verification warning: {verify_sl}")
+                    else:
+                        logger.info(f"✓ SL unchanged: {sl:.4f} (no update needed)")
 
-                    # Verify update with single retry
-                    time.sleep(1.5)
-                    verify_position = self.adapter.get_position(self.config.TICKER)
-                    if verify_position:
-                        verify_sl = verify_position.get('stopLoss', 0)
-                        verify_tp = verify_position.get('takeProfit', 0)
-                        if verify_sl > 0:
-                            logger.info(f"✅ SL/TP update verified: SL={verify_sl:.4f}, TP={verify_tp:.4f}")
-                        else:
-                            logger.warning(f"⚠️  SL verification warning: SL={verify_sl}")
                 except Exception as e:
-                    logger.error(f"Failed to update SL/TP after DCA fill: {e}")
+                    logger.error(f"Failed to update SL after DCA fill: {e}")
 
                 # Log DCA add event
                 self.trade_logger.log_event("DCA_ENTRY_ADD", {
@@ -2738,11 +2816,10 @@ class TradingBot:
                     "candle": self.last_candle_data
                 })
 
-                # Update state with new SL/TP
+                # Update state (only entry and SL - TP never changes!)
                 self.state['entry_price'] = actual_entry
-                self.state['last_sl'] = sl  # Update SL to breakeven
-                if tp > 0:
-                    self.state['initial_tp'] = tp  # Update TP based on new avg entry
+                self.state['last_sl'] = sl  # Update SL
+                # TP remains fixed at first fill price - don't update!
                 self.state['dca_fills'] = self.state.get('dca_fills', 1) + len(filled_orders)
 
                 # Update highest/lowest for TSL tracking based on new breakeven
@@ -2755,8 +2832,25 @@ class TradingBot:
 
                 self._save_state()
 
-                logger.warning(f"✓ DCA Position updated | New avg entry: {actual_entry:.4f} | SL: {sl:.4f} (BE) | TP: {tp_display}")
+                # ========== CALCULATE AND LOG RRR (Risk/Reward Ratio) ==========
+                if decision == "LONG":
+                    risk_distance = abs(actual_entry - sl)
+                    reward_distance = abs(tp - actual_entry) if tp > 0 else 0
+                else:
+                    risk_distance = abs(sl - actual_entry)
+                    reward_distance = abs(actual_entry - tp) if tp > 0 else 0
+
+                rrr = reward_distance / risk_distance if risk_distance > 0 else 0
+                risk_pct = (risk_distance / actual_entry) * 100
+                reward_pct = (reward_distance / actual_entry) * 100 if tp > 0 else 0
+
+                logger.warning(f"✓ DCA Position updated | New avg entry: {actual_entry:.4f} | SL: {sl:.4f} | TP: {tp_display}")
                 logger.warning(f"   Total fills: {self.state['dca_fills']} | Pending: {remaining_orders_count}")
+                logger.warning(f"   📊 RRR: 1:{rrr:.2f} | Risk: {risk_pct:.2f}% | Reward: {reward_pct:.2f}%")
+
+                # RRR Warning if imbalanced (risk > reward)
+                if rrr < 1.0 and tp > 0:
+                    logger.warning(f"   ⚠️  WARNING: Risk > Reward! RRR = 1:{rrr:.2f} (should be >= 1:1)")
 
         except Exception as e:
             logger.error(f"Failed to finalize limit order entry: {e}", exc_info=True)
