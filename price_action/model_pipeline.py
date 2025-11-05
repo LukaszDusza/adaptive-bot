@@ -694,8 +694,8 @@ def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close
         # Label params
         # ENHANCEMENT v2.2: Zwiększone dolne granice barrier_size (0.015 min)
         # Powód: Dla SOLUSDT 1.17% było za niskie - traciliśmy większe ruchy
-        'barrier_size': (0.020, 0.045),  # Zwiększone z (0.008, 0.035)
-        'time_limit': (24, 72)
+        'barrier_size': (0.015, 0.040),  # Zwiększone z (0.008, 0.035)
+        'time_limit': (12, 48)
     }
 
     # Adjust for dataset size
@@ -1067,29 +1067,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         actual_dist = y.value_counts(normalize=True)
         trial.set_user_attr("label_distribution", actual_dist.to_dict())
 
-        # ============================================================================
-        # POPRAWKA #11 (v1.3): BALANCE CONSTRAINT - Enforce 35-50% ACTION Distribution
-        # ============================================================================
-        # PROBLEM v1.2: Optimizer wybierał barrier=1.5%, time=25 → 75% HOLD / 25% ACTION
-        # FIX v1.3: Odrzucaj trials gdzie ACTION% poza zakresem 35-50%
-        # Expected: Po binary conversion → ~60% HOLD / 40% ACTION (realistic dla trading)
-        # ============================================================================
-        action_pct = actual_dist.get(1, 0) + actual_dist.get(2, 0)  # BUY + SELL
-        trial.set_user_attr("action_pct", float(action_pct))
-
-        # Constraint: ACTION powinno być między 35% a 50% (cel: 40% po binary conversion)
-        MIN_ACTION_PCT = 0.35  # Minimum 35% ACTION samples
-        MAX_ACTION_PCT = 0.50  # Maximum 50% ACTION samples
-
-        if action_pct < MIN_ACTION_PCT or action_pct > MAX_ACTION_PCT:
-            # Penalize: odrzuć trial z niezbalansowanym rozkładem
-            balance_penalty = abs(0.42 - action_pct)  # Distance from target 42%
-            trial.set_user_attr("balance_penalty", float(balance_penalty))
-            trial.set_user_attr("rejected_reason", f"ACTION%={action_pct*100:.1f}% out of range [{MIN_ACTION_PCT*100:.0f}%, {MAX_ACTION_PCT*100:.0f}%]")
-            logging.debug(f"Trial {trial.number} REJECTED: ACTION%={action_pct*100:.1f}% (barrier={barrier_size*100:.2f}%, time={time_limit})")
-            return 0.0  # Odrzuć trial
-        # ============================================================================
-
         scores = []
         # OPTYMALIZACJA: Zredukowano z 6 do 3 splits (2x szybciej)
         for fold_idx, (train_index, val_index) in enumerate(walk_forward_split(X, n_splits=3, test_size=0.15)):
@@ -1409,18 +1386,18 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     else:
         logging.warning(f"⚠ Nie udało się osiągnąć recall >= {min_recall}. Najlepszy recall: {optimal_recall:.3f}")
     # ============================================================================
-    # POPRAWKA #1: Heurystyczna rekomendacja dla min_proba_diff
+    # POPRAWKA #1: Heurystyczna rekomendacja dla min_confidence_ratio
     # ============================================================================
     # Bot używa dual-model logic: BUY gdy (proba_long > threshold) AND
-    # (proba_long - proba_short > min_proba_diff). Nie możemy tu w pełni
-    # zoptymalizować min_proba_diff (wymaga obu modeli), ale dajemy heurystykę.
+    # (proba_long / proba_short > min_confidence_ratio). Nie możemy tu w pełni
+    # zoptymalizować min_confidence_ratio (wymaga obu modeli), ale dajemy heurystykę.
     #
-    # Heurystyka: min_proba_diff = 0.5 * optimal_threshold (50% progu)
-    # Przykład: threshold=0.60 → min_proba_diff=0.30
+    # Heurystyka: min_confidence_ratio = 1.0 + 0.5 * optimal_threshold
+    # Przykład: threshold=0.60 → ratio=1.30 (30% bardziej pewny)
     # Uzasadnienie: Jeśli long=0.70, short=0.40 → diff=0.30 (70% sure LONG vs 40% SHORT)
-    recommended_min_proba_diff = round(optimal_threshold * 0.5, 2)
-    logging.info(f"\n--- POPRAWKA #1: Rekomendacja min_proba_diff ---")
-    logging.info(f"  Recommended min_proba_diff: {recommended_min_proba_diff:.2f}")
+    recommended_min_confidence_ratio = round(1.0 + optimal_threshold * 0.5, 2)
+    logging.info(f"\n--- POPRAWKA #1: Rekomendacja min_confidence_ratio ---")
+    logging.info(f"  Recommended min_confidence_ratio: {recommended_min_confidence_ratio:.2f}")
     logging.info(f"  (Heurystyka: 50% of optimal_threshold)")
     logging.warning(f"  ⚠ Dla pełnej optymalizacji użyj optuna_optimizer.py z DUAL models")
     holdout_preds_optimized = (holdout_probas[:, 1] >= optimal_threshold).astype(int)
@@ -1455,7 +1432,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         "best_label_params": best_label_params,
         "best_model_params": best_model_params,
         "optimal_threshold": float(optimal_threshold),
-        "recommended_min_proba_diff": float(recommended_min_proba_diff),  # POPRAWKA #1
+        "recommended_min_confidence_ratio": float(recommended_min_confidence_ratio),  # POPRAWKA #1
         "n_features_selected": len(selected_features),
         "n_features_total": len(df_model_base.columns),
         "n_samples_train": len(X_full),
@@ -1470,7 +1447,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
             "FIX #5: 3-way split (train/calib/holdout) - proper threshold tuning"
         ],
         "enhancements_v2.1": [
-            "POPRAWKA #1: Heuristic min_proba_diff recommendation",
+            "POPRAWKA #1: Heuristic min_confidence_ratio recommendation",
             "POPRAWKA #2: CV-based feature selection (5 folds)",
             "POPRAWKA #4: Pruning after fold 1 (was fold 0)",
             "POPRAWKA #5: Early stopping for final model",

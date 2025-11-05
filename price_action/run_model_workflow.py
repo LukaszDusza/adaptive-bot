@@ -56,7 +56,7 @@ CONFIG = {
     'LABEL_TRIALS': 100,
     'MODEL_TRIALS': 100,
     'PROB_THRESHOLD': 0.54,
-    'MIN_PROBA_DIFF': 0.3,
+    'MIN_CONFIDENCE_RATIO': 1.5,
     'TP_PCT': 0.02,
     'TSL_PCT': 0.014,
     'TRADE_SIZE': 1000,
@@ -518,7 +518,7 @@ def run_backtest():
     print("Backtest Parameters:")
     print(f"  - Version: {CONFIG['VERSION']}")
     print(f"  - Probability Threshold: {CONFIG['PROB_THRESHOLD']}")
-    print(f"  - Min Proba Diff: {CONFIG['MIN_PROBA_DIFF']}")
+    print(f"  - Min Conf Ratio: {CONFIG['MIN_CONFIDENCE_RATIO']}")
     print(f"  - Take Profit: {CONFIG['TP_PCT']}%")
     print(f"  - Trailing Stop Loss: {CONFIG['TSL_PCT']}%")
     print(f"  - Trade Size: ${CONFIG['TRADE_SIZE']}")
@@ -534,7 +534,7 @@ def run_backtest():
         '--helper-timeframes', *CONFIG['HELPER_TIMEFRAMES'],
         '--limit', str(CONFIG['LIMIT_BACKTEST']),
         '--prob-threshold', str(CONFIG['PROB_THRESHOLD']),
-        '--min-proba-diff', str(CONFIG['MIN_PROBA_DIFF']),
+        '--min-confidence-ratio', str(CONFIG['MIN_CONFIDENCE_RATIO']),
         '--tp-pct', str(CONFIG['TP_PCT']),
         '--tsl-pct', str(CONFIG['TSL_PCT']),
         '--trade-size', str(CONFIG['TRADE_SIZE']),
@@ -584,7 +584,7 @@ def show_config():
     print(f"  LABEL_TRIALS: {CONFIG['LABEL_TRIALS']}")
     print(f"  MODEL_TRIALS: {CONFIG['MODEL_TRIALS']}")
     print(f"  PROB_THRESHOLD: {CONFIG['PROB_THRESHOLD']}")
-    print(f"  MIN_PROBA_DIFF: {CONFIG['MIN_PROBA_DIFF']}")
+    print(f"  MIN_CONFIDENCE_RATIO: {CONFIG['MIN_CONFIDENCE_RATIO']}")
     print(f"  TP_PCT: {CONFIG['TP_PCT']}")
     print(f"  TSL_PCT: {CONFIG['TSL_PCT']}")
     print(f"  TP_MECHANISM: {CONFIG['TP_MECHANISM']}")
