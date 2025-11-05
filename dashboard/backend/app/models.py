@@ -371,3 +371,21 @@ class PendingOrdersResponse(BaseModel):
     total_count: int
     by_ticker: Dict[str, int]  # Count per ticker
     last_updated: datetime
+
+
+class ModelRanking(BaseModel):
+    """Model performance ranking (rolling 1 month window)"""
+    model_id: str  # e.g., "SOLUSDT_LONG" or "DOGEUSDT_SHORT"
+    ticker: str
+    side: TradeSide
+    total_trades: int
+    total_pnl: float
+    win_rate: float
+    avg_win: float
+    avg_loss: float
+    profit_factor: Optional[float] = None
+    risk_reward_ratio: Optional[float] = None  # RRR = avg_win / avg_loss (None if 100% win rate)
+    sharpe_ratio: Optional[float] = None
+    max_drawdown: float
+    trades_per_day: float
+    last_trade_time: Optional[datetime] = None

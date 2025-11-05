@@ -15,6 +15,7 @@ import type {
   FundingCosts,
   SLTPEffectiveness,
   SLTPTrendPoint,
+  ModelRanking,
 } from '../types';
 
 // Determine base URL: empty string for production (proxied by nginx), full URL for dev
@@ -158,6 +159,10 @@ export const getSLTPEffectiveness = (days: number = 7) =>
 
 export const getSLTPEffectivenessTrend = (days: number = 30) =>
   api.get<SLTPTrendPoint[]>('/api/metrics/sl-tp-effectiveness-trend', { params: { days } });
+
+// Model Ranking
+export const getModelRanking = (days: number = 30, sortBy: 'pnl' | 'trades' | 'rrr' | 'win_rate' = 'pnl') =>
+  api.get<ModelRanking[]>('/api/metrics/model-ranking', { params: { days, sort_by: sortBy } });
 
 // Bot Control - Position Management
 export const closePosition = (symbol: string) =>

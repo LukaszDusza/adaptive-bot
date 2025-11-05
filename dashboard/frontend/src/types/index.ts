@@ -177,3 +177,20 @@ export interface SLTPTrendPoint {
   avg_sl_distance_pct: number;
   trade_count: number;
 }
+
+export interface ModelRanking {
+  model_id: string; // e.g., "SOLUSDT_LONG"
+  ticker: string;
+  side: 'LONG' | 'SHORT';
+  total_trades: number;
+  total_pnl: number;
+  win_rate: number;
+  avg_win: number;
+  avg_loss: number;
+  profit_factor: number | null;
+  risk_reward_ratio: number | null;
+  sharpe_ratio: number | null;
+  max_drawdown: number;
+  trades_per_day: number;
+  last_trade_time: string | null;
+}

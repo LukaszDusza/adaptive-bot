@@ -34,6 +34,11 @@ export const SLTPTrendChart: React.FC<SLTPTrendChartProps> = ({ data }) => {
     );
   }
 
+  // Calculate date range from data
+  const firstDate = new Date(data[0].date);
+  const lastDate = new Date(data[data.length - 1].date);
+  const dateRange = `${firstDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${lastDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
+
   // Format data for Recharts
   const chartData = data.map((point) => ({
     date: new Date(point.date).toLocaleDateString('en-US', {
@@ -78,7 +83,7 @@ export const SLTPTrendChart: React.FC<SLTPTrendChartProps> = ({ data }) => {
     <div className="card">
       <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
         <TrendingUp className="text-purple-500" />
-        SL/TP Effectiveness Trend (Last 30 Days)
+        SL/TP Effectiveness Trend ({dateRange} • 30-day rolling)
       </h2>
 
       <div className="h-80">

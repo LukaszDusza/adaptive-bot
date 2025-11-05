@@ -9,6 +9,7 @@ import { QuickStats } from './components/metrics/QuickStats';
 import { ExecutionQualityCard } from './components/metrics/ExecutionQualityCard';
 import { FundingCostsCard } from './components/metrics/FundingCostsCard';
 import { SLTPEffectivenessCard } from './components/metrics/SLTPEffectivenessCard';
+import { ModelRankingCard } from './components/metrics/ModelRankingCard';
 import { EquityCurveChart } from './components/charts/EquityCurveChart';
 import { DrawdownChart } from './components/charts/DrawdownChart';
 import { ExitReasonChart } from './components/charts/ExitReasonChart';
@@ -18,10 +19,11 @@ import { EmergencyCloseModal } from './components/controls/EmergencyCloseModal';
 import { PendingOrdersPanel } from './components/controls/PendingOrdersPanel';
 import { AlertBanner } from './components/alerts/AlertBanner';
 import { ToastContainer } from './components/ui/Toast';
+import { CollapsibleSection } from './components/ui/CollapsibleSection';
 import { useDashboardStore } from './store/dashboardStore';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useToast } from './hooks/useToast';
-import { Shield, X, TrendingUp as ArrowUpCircle } from 'lucide-react';
+import { Shield, X, TrendingUp as ArrowUpCircle, Trophy, Package, Activity, Clock } from 'lucide-react';
 import { LineChart, Line, ResponsiveContainer, YAxis } from 'recharts';
 import {
   getOverallMetrics,
@@ -37,6 +39,7 @@ import {
   getFundingCosts,
   getSLTPEffectiveness,
   getSLTPEffectivenessTrend,
+  getModelRanking,
   closePosition,
   setStopLossToBreakeven,
   type MarketPrice,
@@ -56,6 +59,7 @@ function App() {
     fundingCosts,
     sltpEffectiveness,
     sltpTrend,
+    modelRanking,
     loading,
     error,
     setMetrics,
@@ -70,6 +74,7 @@ function App() {
     setFundingCosts,
     setSLTPEffectiveness,
     setSLTPTrend,
+    setModelRanking,
     setLoading,
     setError,
   } = useDashboardStore();
@@ -166,6 +171,7 @@ function App() {
         fundingCostsRes,
         sltpEffectivenessRes,
         sltpTrendRes,
+        modelRankingRes,
       ] = await Promise.all([
         getOverallMetrics(),
         getTickerMetrics(),
@@ -179,6 +185,7 @@ function App() {
         getFundingCosts(30),
         getSLTPEffectiveness(7),
         getSLTPEffectivenessTrend(30),
+        getModelRanking(30, 'pnl'),
       ]);
 
       setMetrics(metricsRes.data);
@@ -193,6 +200,7 @@ function App() {
       setFundingCosts(fundingCostsRes.data);
       setSLTPEffectiveness(sltpEffectivenessRes.data);
       setSLTPTrend(sltpTrendRes.data);
+      setModelRanking(modelRankingRes.data);
     } catch (err: any) {
       console.error('Failed to fetch dashboard data:', err);
       setError(err.message || 'Failed to load dashboard data');
@@ -333,13 +341,34 @@ function App() {
         {/* SL/TP Effectiveness Trend */}
         <SLTPTrendChart data={sltpTrend} />
 
+        {/* Model Ranking */}
+        <CollapsibleSection
+          title="Model Ranking"
+          badge={modelRanking.length > 0 ? `${modelRanking.length} models` : undefined}
+          icon={<Trophy className="text-yellow-500" size={20} />}
+          defaultCollapsed={true}
+        >
+          <ModelRankingCard data={modelRanking} loading={loading} />
+        </CollapsibleSection>
+
         {/* Pending Orders Panel */}
-        <PendingOrdersPanel autoRefresh={true} refreshInterval={10000} />
+        <CollapsibleSection
+          title="Pending Orders"
+          icon={<Clock className="text-blue-500" size={20} />}
+          defaultCollapsed={true}
+        >
+          <PendingOrdersPanel autoRefresh={true} refreshInterval={10000} />
+        </CollapsibleSection>
 
         {/* Active Trades Summary */}
         {activeTrades.length > 0 && (
-          <div ref={activeTradesRef} className="card">
-            <h2 className="text-xl font-bold mb-4">Active Positions ({activeTrades.length})</h2>
+          <CollapsibleSection
+            title="Active Positions"
+            badge={`${activeTrades.length} position${activeTrades.length > 1 ? 's' : ''}`}
+            icon={<Activity className="text-green-500" size={20} />}
+            defaultCollapsed={true}
+          >
+            <div ref={activeTradesRef} className="card">
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
               {activeTrades.map((trade) => {
                 // Parse partial_tp_taken - check for "partial_tp_taken=True" or events data
@@ -613,6 +642,7 @@ function App() {
               })}
             </div>
           </div>
+          </CollapsibleSection>
         )}
 
         {/* Per-Ticker Metrics */}
@@ -660,7 +690,16 @@ function App() {
         {exitReasonStats.length > 0 && <ExitReasonChart data={exitReasonStats} />}
 
         {/* Recent Trades Table */}
-        {trades.length > 0 && <RecentTradesTable trades={trades} />}
+        {trades.length > 0 && (
+          <CollapsibleSection
+            title="Recent Trades"
+            badge={`${trades.length} trades`}
+            icon={<Package className="text-blue-500" size={20} />}
+            defaultCollapsed={true}
+          >
+            <RecentTradesTable trades={trades} />
+          </CollapsibleSection>
+        )}
 
         {/* Footer Info */}
         <div className="text-center text-sm text-dark-text-secondary py-8">

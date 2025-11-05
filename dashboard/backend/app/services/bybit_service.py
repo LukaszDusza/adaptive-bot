@@ -310,7 +310,7 @@ class BybitService:
             cumulative_pnl = 0.0
             for record in reversed(pnl_records):
                 closed_pnl = float(record.get('closedPnl', 0))
-                cumulative_pnl -= closed_pnl  # Subtract because we're going backwards
+                cumulative_pnl += closed_pnl  # Add PnL going backwards
 
                 # Equity at this point in time = current equity - cumulative PnL since then
                 historical_equity = current_equity - cumulative_pnl

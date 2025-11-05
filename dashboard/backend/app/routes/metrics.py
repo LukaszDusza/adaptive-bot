@@ -12,7 +12,7 @@ import numpy as np
 from app.models import (
     MetricsResponse, TickerMetrics, EquityCurvePoint,
     ExitReasonStats, DrawdownPoint, TradeDurationBin, FeeAnalysis, StrategyComparison,
-    ExecutionQuality, FundingCosts, SLTPEffectiveness, SLTPTrendPoint
+    ExecutionQuality, FundingCosts, SLTPEffectiveness, SLTPTrendPoint, ModelRanking, TradeSide
 )
 from app.services.cache_manager import cached
 from app.services.alert_manager import get_alert_manager, Alert
@@ -641,8 +641,11 @@ async def get_sl_tp_effectiveness_trend(days: int = 30):
     Shows how TP/SL hit rates and risk/reward ratio change over time.
     Useful for identifying if strategy performance is improving or degrading.
 
+    START DATE: November 1, 2025 (fixed)
+    ROLLING WINDOW: 30 days after start date
+
     Args:
-        days: Number of days to include in trend (default: 30)
+        days: Rolling window size (default: 30 days)
 
     Returns:
         List of daily SLTPTrendPoint sorted by date (oldest to newest)
@@ -655,23 +658,38 @@ async def get_sl_tp_effectiveness_trend(days: int = 30):
     if not pnl_records:
         return []
 
-    # Filter by date range
+    # Start date: November 1, 2025 (fixed)
     from datetime import timedelta
-    cutoff_time = datetime.now() - timedelta(days=days)
-    cutoff_ms = int(cutoff_time.timestamp() * 1000)
+    start_date = datetime(2025, 11, 1, 0, 0, 0)
+    start_ms = int(start_date.timestamp() * 1000)
 
-    recent_records = [r for r in pnl_records if int(r.get('updatedTime', 0)) >= cutoff_ms]
+    # Calculate cutoff based on rolling window
+    # If < 30 days since start → show all from start
+    # If >= 30 days since start → show last 30 days (rolling window)
+    days_since_start = (datetime.now() - start_date).days
+
+    if days_since_start < days:
+        # Still accumulating - show all since start date
+        cutoff_ms = start_ms
+    else:
+        # True rolling window - show last N days
+        cutoff_time = datetime.now() - timedelta(days=days)
+        cutoff_ms = int(cutoff_time.timestamp() * 1000)
+
+    # Filter by createdTime (when position was opened) for consistency
+    recent_records = [r for r in pnl_records if int(r.get('createdTime', 0)) >= cutoff_ms]
 
     if not recent_records:
         return []
 
-    # Group trades by date
+    # Group trades by date (use createdTime for consistency with equity curve)
     from collections import defaultdict
     trades_by_date = defaultdict(list)
 
     for record in recent_records:
-        updated_ms = int(record.get('updatedTime', 0))
-        trade_date = datetime.fromtimestamp(updated_ms / 1000).date()
+        # Use createdTime (when position was opened) instead of updatedTime (when closed)
+        created_ms = int(record.get('createdTime', 0))
+        trade_date = datetime.fromtimestamp(created_ms / 1000).date()
         trades_by_date[trade_date].append(record)
 
     # Calculate metrics for each day
@@ -728,3 +746,172 @@ async def get_sl_tp_effectiveness_trend(days: int = 30):
         ))
 
     return trend_points
+
+
+@router.get("/model-ranking", response_model=List[ModelRanking])
+@cached(ttl=60, key_prefix="model_ranking")
+async def get_model_ranking(
+    days: int = 30,
+    sort_by: str = "pnl"  # pnl, trades, rrr, win_rate
+):
+    """
+    Get model performance ranking (rolling N days window) - CACHED 60s.
+
+    Models are identified by ticker + side (e.g., SOLUSDT_LONG, DOGEUSDT_SHORT).
+    Data comes from Bybit closed P&L history.
+
+    START DATE: November 1, 2025 (fixed)
+    ROLLING WINDOW: 30 days after start date
+
+    Args:
+        days: Rolling window size (default: 30 days)
+        sort_by: Sort criterion - "pnl", "trades", "rrr", "win_rate" (default: "pnl")
+
+    Returns:
+        List of ModelRanking objects sorted by chosen criterion (descending)
+
+    Useful for:
+    - Identifying best performing models
+    - Comparing different ticker/side combinations
+    - Monitoring model performance over time
+    """
+    _check_bybit_available()
+
+    # Get closed P&L history (fetch more to ensure coverage)
+    pnl_records = bybit_service.get_closed_pnl_history(limit=300)
+
+    if not pnl_records:
+        return []
+
+    # Start date: November 1, 2025 (fixed)
+    from datetime import timedelta
+    start_date = datetime(2025, 11, 1, 0, 0, 0)
+    start_ms = int(start_date.timestamp() * 1000)
+
+    # Calculate cutoff based on rolling window
+    # If < 30 days since start → show all from start
+    # If >= 30 days since start → show last 30 days (rolling window)
+    days_since_start = (datetime.now() - start_date).days
+
+    if days_since_start < days:
+        # Still accumulating - show all since start date
+        cutoff_ms = start_ms
+    else:
+        # True rolling window - show last N days
+        cutoff_time = datetime.now() - timedelta(days=days)
+        cutoff_ms = int(cutoff_time.timestamp() * 1000)
+
+    # Filter by createdTime (when position was opened) for consistency
+    recent_records = [
+        r for r in pnl_records
+        if int(r.get('createdTime', 0)) >= cutoff_ms
+    ]
+
+    if not recent_records:
+        return []
+
+    # Group by model (ticker + side)
+    from collections import defaultdict
+
+    model_trades = defaultdict(list)
+
+    for record in recent_records:
+        symbol = record.get('symbol', '')
+        # In Bybit closed PnL, 'side' refers to CLOSING transaction
+        # Buy = closed by buying = original position was SHORT
+        # Sell = closed by selling = original position was LONG
+        side_raw = record.get('side', 'Buy')
+        side = 'SHORT' if side_raw == 'Buy' else 'LONG'
+
+        model_id = f"{symbol}_{side}"
+        model_trades[model_id].append(record)
+
+    # Calculate statistics for each model
+    rankings = []
+
+    for model_id, trades in model_trades.items():
+        # Parse model_id
+        parts = model_id.rsplit('_', 1)
+        if len(parts) != 2:
+            continue
+
+        ticker, side_str = parts
+
+        # Calculate metrics
+        total_trades = len(trades)
+        pnls = [float(r.get('closedPnl', 0)) for r in trades]
+        total_pnl = sum(pnls)
+
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p < 0]
+
+        win_count = len(wins)
+        loss_count = len(losses)
+        win_rate = (win_count / total_trades) if total_trades > 0 else 0.0
+
+        avg_win = (sum(wins) / len(wins)) if wins else 0.0
+        avg_loss = (sum(losses) / len(losses)) if losses else 0.0
+
+        # Profit factor
+        total_wins = sum(wins)
+        total_losses = abs(sum(losses))
+        profit_factor = (total_wins / total_losses) if total_losses > 0 else None
+
+        # Risk-Reward Ratio (None if no losses - 100% win rate)
+        rrr = (avg_win / abs(avg_loss)) if avg_loss != 0 else None
+
+        # Sharpe ratio (simplified - using trade PnLs as returns)
+        if len(pnls) > 1:
+            mean_pnl = np.mean(pnls)
+            std_pnl = np.std(pnls, ddof=1)
+            sharpe = (mean_pnl / std_pnl) * np.sqrt(total_trades) if std_pnl > 0 else None
+        else:
+            sharpe = None
+
+        # Max drawdown (from cumulative PnL)
+        cumulative_pnl = np.cumsum(pnls)
+        running_max = np.maximum.accumulate(cumulative_pnl)
+        drawdowns = running_max - cumulative_pnl
+        max_dd = float(np.max(drawdowns)) if len(drawdowns) > 0 else 0.0
+
+        # Trades per day (calculate based on actual date range)
+        actual_days = days_since_start if days_since_start < days else days
+        trades_per_day = total_trades / actual_days if actual_days > 0 else 0.0
+
+        # Last trade time
+        last_trade_ms = max(int(r.get('updatedTime', 0)) for r in trades)
+        last_trade_time = datetime.fromtimestamp(last_trade_ms / 1000) if last_trade_ms > 0 else None
+
+        ranking = ModelRanking(
+            model_id=model_id,
+            ticker=ticker,
+            side=TradeSide(side_str),
+            total_trades=total_trades,
+            total_pnl=total_pnl,
+            win_rate=win_rate,
+            avg_win=avg_win,
+            avg_loss=avg_loss,
+            profit_factor=profit_factor,
+            risk_reward_ratio=rrr,
+            sharpe_ratio=sharpe,
+            max_drawdown=max_dd,
+            trades_per_day=trades_per_day,
+            last_trade_time=last_trade_time
+        )
+
+        rankings.append(ranking)
+
+    # Sort by chosen criterion
+    if sort_by == "pnl":
+        rankings.sort(key=lambda x: x.total_pnl, reverse=True)
+    elif sort_by == "trades":
+        rankings.sort(key=lambda x: x.total_trades, reverse=True)
+    elif sort_by == "rrr":
+        rankings.sort(key=lambda x: x.risk_reward_ratio, reverse=True)
+    elif sort_by == "win_rate":
+        rankings.sort(key=lambda x: x.win_rate, reverse=True)
+    else:
+        # Default to PnL
+        rankings.sort(key=lambda x: x.total_pnl, reverse=True)
+
+    return rankings
