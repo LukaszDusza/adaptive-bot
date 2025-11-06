@@ -2,10 +2,8 @@
  * Recent Trades Table with filtering and sorting
  */
 import React, { useState, useMemo } from 'react';
-import { Search, ArrowUpDown, TrendingUp, Filter, X, BarChart2 } from 'lucide-react';
+import { Search, ArrowUpDown, TrendingUp, Filter, X } from 'lucide-react';
 import type { Trade } from '../../types';
-import { TradeNoteEditor } from '../controls/TradeNoteEditor';
-import { TradeDetailModal } from '../modals/TradeDetailModal';
 
 interface RecentTradesTableProps {
   trades: Trade[];
@@ -22,7 +20,6 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [showFilters, setShowFilters] = useState(false);
   const [currentPage, setCurrentPage] = useState(1);
-  const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null);
   const itemsPerPage = 10;
 
   // Get unique exit reasons for filter
@@ -249,14 +246,12 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
               </th>
               <th>P&L %</th>
               <th>Exit Reason</th>
-              <th>Notes</th>
-              <th>Chart</th>
             </tr>
           </thead>
           <tbody>
             {paginatedTrades.length === 0 ? (
               <tr>
-                <td colSpan={9} className="text-center text-dark-text-secondary py-8">
+                <td colSpan={7} className="text-center text-dark-text-secondary py-8">
                   No trades found
                 </td>
               </tr>
@@ -316,43 +311,6 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
                     }`}>
                       {trade.summary!.exit_reason}
                     </span>
-                  </td>
-
-                  {/* Notes */}
-                  <td>
-                    <TradeNoteEditor
-                      tradeId={trade.trade_id}
-                      initialNote={trade.notes}
-                      onSave={(note) => {
-                        console.log(`Note saved for ${trade.trade_id}:`, note);
-                      }}
-                    />
-                  </td>
-
-                  {/* Chart Button */}
-                  <td>
-                    {!trade.is_active && trade.start_time ? (
-                      // Logged trade with Parquet data - chart available
-                      <button
-                        onClick={() => setSelectedTrade(trade)}
-                        className="p-2 rounded hover:bg-dark-bg-secondary text-purple-500 hover:text-purple-400 transition-colors"
-                        title="View candlestick chart"
-                      >
-                        <BarChart2 size={18} />
-                      </button>
-                    ) : (
-                      // Active trade or Bybit trade (no logged data) - chart not available
-                      <span
-                        className="p-2 block text-dark-text-secondary cursor-not-allowed"
-                        title={
-                          trade.is_active
-                            ? "Chart available only for completed trades"
-                            : "Chart not available (trade not logged by bot)"
-                        }
-                      >
-                        <BarChart2 size={18} className="opacity-30" />
-                      </span>
-                    )}
                   </td>
                 </tr>
               ))
@@ -465,14 +423,6 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
             </div>
           </div>
         </div>
-      )}
-
-      {/* Trade Detail Modal with Candlestick Chart */}
-      {selectedTrade && (
-        <TradeDetailModal
-          trade={selectedTrade}
-          onClose={() => setSelectedTrade(null)}
-        />
       )}
     </div>
   );
