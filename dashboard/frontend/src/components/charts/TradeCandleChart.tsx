@@ -30,7 +30,8 @@ export const TradeCandleChart: React.FC<TradeCandleChartProps> = ({ tradeId }) =
         const response = await fetch(`http://localhost:8000/trades/${tradeId}/candles`);
 
         if (!response.ok) {
-          throw new Error(`Failed to fetch candles: ${response.statusText}`);
+          const errorData = await response.json().catch(() => ({ detail: response.statusText }));
+          throw new Error(errorData.detail || response.statusText);
         }
 
         const candleData: TradeCandlesResponse = await response.json();

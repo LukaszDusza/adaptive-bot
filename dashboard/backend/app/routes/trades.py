@@ -543,18 +543,28 @@ async def get_trade_candles(trade_id: str):
     if not trade:
         raise HTTPException(status_code=404, detail=f"Trade not found: {trade_id}")
 
+    # Check if trade is still active (no candle data logged yet)
+    if trade.is_active:
+        raise HTTPException(
+            status_code=400,
+            detail="Candlestick charts are only available for completed trades. This position is still active."
+        )
+
     # Parse trade_id to extract ticker and timeframe
     # Format: YYYYMMDD_HHMMSS_TICKER_SIDE
     try:
         parts = trade_id.split('_')
         if len(parts) < 4:
-            raise ValueError("Invalid trade_id format")
+            raise ValueError("Invalid trade_id format - expected YYYYMMDD_HHMMSS_TICKER_SIDE")
 
         ticker = parts[2]
         side = parts[3]
     except Exception as e:
         logger.error(f"Failed to parse trade_id {trade_id}: {e}")
-        raise HTTPException(status_code=400, detail=f"Invalid trade_id format: {trade_id}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Candlestick charts are only available for completed trades with logged data."
+        )
 
     # Determine candles directory (relative to backend root)
     # Assuming bot logs are at: /adaptive-bot/price_action/logs/candles/

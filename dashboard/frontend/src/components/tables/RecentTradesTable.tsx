@@ -347,13 +347,22 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
 
                   {/* Chart Button */}
                   <td>
-                    <button
-                      onClick={() => setSelectedTrade(trade)}
-                      className="p-2 rounded hover:bg-dark-bg-secondary text-purple-500 hover:text-purple-400 transition-colors"
-                      title="View candlestick chart"
-                    >
-                      <BarChart2 size={18} />
-                    </button>
+                    {!trade.is_active ? (
+                      <button
+                        onClick={() => setSelectedTrade(trade)}
+                        className="p-2 rounded hover:bg-dark-bg-secondary text-purple-500 hover:text-purple-400 transition-colors"
+                        title="View candlestick chart"
+                      >
+                        <BarChart2 size={18} />
+                      </button>
+                    ) : (
+                      <span
+                        className="p-2 block text-dark-text-secondary cursor-not-allowed"
+                        title="Chart available only for completed trades"
+                      >
+                        <BarChart2 size={18} className="opacity-30" />
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))
