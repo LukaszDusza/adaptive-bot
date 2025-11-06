@@ -423,16 +423,21 @@ async def get_closed_trades_from_bybit(limit: Optional[int] = Query(50, descript
             side = 'Short' if side_raw == 'Buy' else 'Long'  # REVERSED!
 
             # Calculate duration
-            duration_seconds = 0
-            if created_time and updated_time:
-                duration_seconds = (int(updated_time) - int(created_time)) // 1000
+            # NOTE: Bybit closed P&L API doesn't provide actual position duration
+            # createdTime and updatedTime are both when the P&L record was created (differ by ~4ms)
+            # We cannot determine real trade duration from this API endpoint
+            # Mark as None to indicate unknown duration
+            duration_seconds = None  # Unknown - Bybit doesn't provide position duration in closed P&L
+
+            # Also use None for start_time since createdTime is not the real entry time
+            actual_start_time = None  # Unknown - Bybit closed P&L doesn't track position entry time
 
             trade = Trade(
-                trade_id=f"{record.get('symbol')}_{created_time}",
+                trade_id=f"{record.get('symbol')}_{created_time}",  # Format: TICKER_timestamp
                 ticker=record.get('symbol', ''),
                 side=TradeSide(side),
-                start_time=start_time,
-                end_time=end_time,
+                start_time=actual_start_time,  # None - unknown entry time
+                end_time=end_time,  # Exit time is available
                 entry_price=avg_entry_price,
                 exit_price=avg_exit_price,
                 quantity=closed_size,
@@ -445,7 +450,7 @@ async def get_closed_trades_from_bybit(limit: Optional[int] = Query(50, descript
                     'pnl': closed_pnl,
                     'pnl_percent': pnl_percent,
                     'exit_reason': exit_reason,
-                    'duration_seconds': duration_seconds,
+                    'duration_seconds': duration_seconds if duration_seconds else 0,  # 0 for display (unknown)
                     'max_favorable_excursion': None,
                     'max_adverse_excursion': None,
                     'fees_paid': float(record.get('cumEntryValue', 0)) * 0.00055  # Estimate
@@ -453,7 +458,7 @@ async def get_closed_trades_from_bybit(limit: Optional[int] = Query(50, descript
                 events=[],
                 indicators=None,
                 is_active=False,
-                notes=f"LIVE from Bybit | Closed: {end_time}"
+                notes=f"LIVE from Bybit | Closed: {end_time}\nDuration: Unknown (Bybit API limitation)"
             )
             trades.append(trade)
 

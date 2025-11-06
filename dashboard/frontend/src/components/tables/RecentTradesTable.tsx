@@ -114,7 +114,10 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
     }
   };
 
-  const formatDuration = (seconds: number) => {
+  const formatDuration = (seconds: number | undefined | null) => {
+    // Handle unknown duration (Bybit trades or null/undefined)
+    if (!seconds || seconds === 0) return 'Unknown';
+
     const hours = Math.floor(seconds / 3600);
     const minutes = Math.floor((seconds % 3600) / 60);
     if (hours > 0) return `${hours}h ${minutes}m`;
@@ -295,12 +298,21 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
 
                   {/* Time */}
                   <td className="text-sm">
-                    {new Date(trade.start_time).toLocaleString('en-US', {
-                      month: 'short',
-                      day: 'numeric',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })}
+                    {trade.start_time
+                      ? new Date(trade.start_time).toLocaleString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })
+                      : trade.end_time
+                      ? `~${new Date(trade.end_time).toLocaleString('en-US', {
+                          month: 'short',
+                          day: 'numeric',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}`
+                      : 'Unknown'}
                   </td>
 
                   {/* Entry → Exit */}
@@ -347,7 +359,8 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
 
                   {/* Chart Button */}
                   <td>
-                    {!trade.is_active ? (
+                    {!trade.is_active && trade.start_time ? (
+                      // Logged trade with Parquet data - chart available
                       <button
                         onClick={() => setSelectedTrade(trade)}
                         className="p-2 rounded hover:bg-dark-bg-secondary text-purple-500 hover:text-purple-400 transition-colors"
@@ -356,9 +369,14 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
                         <BarChart2 size={18} />
                       </button>
                     ) : (
+                      // Active trade or Bybit trade (no logged data) - chart not available
                       <span
                         className="p-2 block text-dark-text-secondary cursor-not-allowed"
-                        title="Chart available only for completed trades"
+                        title={
+                          trade.is_active
+                            ? "Chart available only for completed trades"
+                            : "Chart not available (trade not logged by bot)"
+                        }
                       >
                         <BarChart2 size={18} className="opacity-30" />
                       </span>
