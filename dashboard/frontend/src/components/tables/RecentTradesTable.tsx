@@ -78,10 +78,6 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
           aVal = a.summary?.pnl || 0;
           bVal = b.summary?.pnl || 0;
           break;
-        case 'duration':
-          aVal = a.summary?.duration_seconds || 0;
-          bVal = b.summary?.duration_seconds || 0;
-          break;
         default:
           return 0;
       }
@@ -112,16 +108,6 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
       setSortField(field);
       setSortDirection('desc');
     }
-  };
-
-  const formatDuration = (seconds: number | undefined | null) => {
-    // Handle unknown duration (Bybit trades or null/undefined)
-    if (!seconds || seconds === 0) return 'Unknown';
-
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    return `${minutes}m`;
   };
 
   const formatCurrency = (value: number) => {
@@ -262,15 +248,6 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
                 </div>
               </th>
               <th>P&L %</th>
-              <th
-                onClick={() => handleSort('duration')}
-                className="cursor-pointer hover:text-dark-text-primary"
-              >
-                <div className="flex items-center gap-1">
-                  Duration
-                  <ArrowUpDown size={14} />
-                </div>
-              </th>
               <th>Exit Reason</th>
               <th>Notes</th>
               <th>Chart</th>
@@ -279,7 +256,7 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
           <tbody>
             {paginatedTrades.length === 0 ? (
               <tr>
-                <td colSpan={10} className="text-center text-dark-text-secondary py-8">
+                <td colSpan={9} className="text-center text-dark-text-secondary py-8">
                   No trades found
                 </td>
               </tr>
@@ -328,11 +305,6 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
                   {/* P&L % */}
                   <td className={`font-mono ${trade.summary!.pnl_percent >= 0 ? 'text-profit' : 'text-loss'}`}>
                     {trade.summary!.pnl_percent >= 0 ? '+' : ''}{trade.summary!.pnl_percent.toFixed(2)}%
-                  </td>
-
-                  {/* Duration */}
-                  <td className="text-sm">
-                    {formatDuration(trade.summary!.duration_seconds)}
                   </td>
 
                   {/* Exit Reason */}
@@ -489,12 +461,6 @@ export const RecentTradesTable: React.FC<RecentTradesTableProps> = ({ trades }) 
               <span className="text-dark-text-secondary">Win Rate:</span>
               <span className="ml-2 font-bold">
                 {((filteredTrades.filter(t => (t.summary?.pnl || 0) > 0).length / filteredTrades.length) * 100).toFixed(1)}%
-              </span>
-            </div>
-            <div>
-              <span className="text-dark-text-secondary">Avg Duration:</span>
-              <span className="ml-2 font-bold">
-                {formatDuration(filteredTrades.reduce((sum, t) => sum + (t.summary?.duration_seconds || 0), 0) / filteredTrades.length)}
               </span>
             </div>
           </div>
