@@ -6,8 +6,10 @@ from typing import List, Optional
 import httpx
 import logging
 from datetime import datetime
+from pathlib import Path
+import pandas as pd
 
-from app.models import Trade, ActivePosition, TradeNoteUpdate, PendingOrder, PendingOrdersResponse, TradeSide
+from app.models import Trade, ActivePosition, TradeNoteUpdate, PendingOrder, PendingOrdersResponse, TradeSide, TradeCandlesResponse, CandleData
 from app.services.trade_parser import TradeParser
 from app.services.bybit_service import BybitService
 from app.config import settings
@@ -520,3 +522,138 @@ async def get_recent_trades(count: int = 10):
     """
     trades = trade_parser.get_all_trades(limit=count)
     return trades
+
+
+@router.get("/{trade_id}/candles", response_model=TradeCandlesResponse)
+async def get_trade_candles(trade_id: str):
+    """
+    Get candlestick data for a specific trade with entry/SL/TP levels.
+
+    Reads OHLCV data from logged Parquet files during the trade period.
+    Returns candles with horizontal lines for Entry, SL, and TP visualization.
+
+    Args:
+        trade_id: Trade identifier (e.g., "20251103_140530_SOLUSDT_Long")
+
+    Returns:
+        TradeCandlesResponse with candles and trade levels
+    """
+    # Get trade details
+    trade = trade_parser.get_trade_by_id(trade_id)
+    if not trade:
+        raise HTTPException(status_code=404, detail=f"Trade not found: {trade_id}")
+
+    # Parse trade_id to extract ticker and timeframe
+    # Format: YYYYMMDD_HHMMSS_TICKER_SIDE
+    try:
+        parts = trade_id.split('_')
+        if len(parts) < 4:
+            raise ValueError("Invalid trade_id format")
+
+        ticker = parts[2]
+        side = parts[3]
+    except Exception as e:
+        logger.error(f"Failed to parse trade_id {trade_id}: {e}")
+        raise HTTPException(status_code=400, detail=f"Invalid trade_id format: {trade_id}")
+
+    # Determine candles directory (relative to backend root)
+    # Assuming bot logs are at: /adaptive-bot/price_action/logs/candles/
+    candles_dir = Path(__file__).parent.parent.parent.parent / "price_action" / "logs" / "candles"
+
+    if not candles_dir.exists():
+        logger.error(f"Candles directory not found: {candles_dir}")
+        raise HTTPException(status_code=404, detail="Candle data directory not found")
+
+    # Get trade time range
+    start_time = datetime.fromisoformat(trade.start_time.replace('Z', '+00:00'))
+    end_time = datetime.fromisoformat(trade.end_time.replace('Z', '+00:00')) if trade.end_time else datetime.now()
+
+    # Find relevant Parquet files (may span multiple days)
+    from datetime import timedelta
+    candle_files = []
+    current_date = start_time.date()
+    end_date = end_time.date()
+
+    while current_date <= end_date:
+        # Pattern: TICKER_TIMEFRAME_YYYY-MM-DD.parquet
+        # Try common timeframes (bot uses 15m, 1h most often)
+        for tf in ['15m', '1h', '5m', '30m', '4h']:
+            pattern = f"{ticker}_{tf}_{current_date.strftime('%Y-%m-%d')}.parquet"
+            file_path = candles_dir / pattern
+            if file_path.exists():
+                candle_files.append(file_path)
+                break  # Found timeframe for this date
+
+        current_date = current_date + timedelta(days=1)
+
+    if not candle_files:
+        logger.warning(f"No candle files found for {ticker} between {start_time} and {end_time}")
+        raise HTTPException(status_code=404, detail=f"No candle data found for trade {trade_id}")
+
+    # Read and combine Parquet files
+    dfs = []
+    for file_path in candle_files:
+        try:
+            df = pd.read_parquet(file_path)
+            dfs.append(df)
+        except Exception as e:
+            logger.error(f"Failed to read {file_path}: {e}")
+            continue
+
+    if not dfs:
+        raise HTTPException(status_code=500, detail="Failed to read candle data")
+
+    # Combine all dataframes
+    df_all = pd.concat(dfs, ignore_index=True)
+
+    # Convert timestamp to datetime if it's string
+    if df_all['timestamp'].dtype == 'object':
+        df_all['timestamp'] = pd.to_datetime(df_all['timestamp'])
+
+    # Filter to trade period (with some buffer before/after for context)
+    buffer_minutes = 60  # 1 hour before/after
+    start_buffer = start_time - pd.Timedelta(minutes=buffer_minutes)
+    end_buffer = end_time + pd.Timedelta(minutes=buffer_minutes)
+
+    df_filtered = df_all[
+        (df_all['timestamp'] >= start_buffer) &
+        (df_all['timestamp'] <= end_buffer)
+    ].sort_values('timestamp').reset_index(drop=True)
+
+    if df_filtered.empty:
+        raise HTTPException(status_code=404, detail=f"No candles found in trade period for {trade_id}")
+
+    # Convert to CandleData models
+    candles = []
+    for _, row in df_filtered.iterrows():
+        candle = CandleData(
+            timestamp=row['timestamp'].isoformat(),
+            open=float(row['open']),
+            high=float(row['high']),
+            low=float(row['low']),
+            close=float(row['close']),
+            volume=float(row['volume']),
+            turnover=float(row.get('turnover', 0)),
+            in_position=bool(row.get('in_position', False)),
+            position_side=row.get('position_side'),
+            entry_price=float(row['entry_price']) if pd.notna(row.get('entry_price')) else None,
+            current_sl=float(row['current_sl']) if pd.notna(row.get('current_sl')) else None,
+            current_tp=float(row['current_tp']) if pd.notna(row.get('current_tp')) else None,
+            current_pnl_pct=float(row['current_pnl_pct']) if pd.notna(row.get('current_pnl_pct')) else None
+        )
+        candles.append(candle)
+
+    logger.info(f"Loaded {len(candles)} candles for trade {trade_id}")
+
+    return TradeCandlesResponse(
+        trade_id=trade_id,
+        ticker=ticker,
+        side=side,
+        candles=candles,
+        entry_price=trade.entry_price or 0.0,
+        initial_sl=trade.initial_sl,
+        initial_tp=trade.initial_tp,
+        exit_price=trade.exit_price,
+        start_time=trade.start_time,
+        end_time=trade.end_time
+    )

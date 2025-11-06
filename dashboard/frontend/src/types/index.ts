@@ -194,3 +194,35 @@ export interface ModelRanking {
   trades_per_day: number;
   last_trade_time: string | null;
 }
+
+export interface CandleData {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  turnover?: number;
+  // Position data (if in trade)
+  in_position: boolean;
+  position_side?: string;
+  entry_price?: number;
+  current_sl?: number;
+  current_tp?: number;
+  current_pnl_pct?: number;
+}
+
+export interface TradeCandlesResponse {
+  trade_id: string;
+  ticker: string;
+  side: string;
+  candles: CandleData[];
+  // Trade levels
+  entry_price: number;
+  initial_sl: number | null;
+  initial_tp: number | null;
+  exit_price: number | null;
+  // Time range
+  start_time: string;
+  end_time: string | null;
+}

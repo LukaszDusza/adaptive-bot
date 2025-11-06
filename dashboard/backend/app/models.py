@@ -390,3 +390,37 @@ class ModelRanking(BaseModel):
     max_drawdown: float
     trades_per_day: float
     last_trade_time: Optional[datetime] = None
+
+
+class CandleData(BaseModel):
+    """Single candlestick data with OHLCV"""
+    timestamp: str  # ISO format
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    turnover: Optional[float] = None
+    # Position data (if in trade)
+    in_position: bool = False
+    position_side: Optional[str] = None
+    entry_price: Optional[float] = None
+    current_sl: Optional[float] = None
+    current_tp: Optional[float] = None
+    current_pnl_pct: Optional[float] = None
+
+
+class TradeCandlesResponse(BaseModel):
+    """Candlestick data for a trade with entry/SL/TP levels"""
+    trade_id: str
+    ticker: str
+    side: str
+    candles: List[CandleData]
+    # Trade levels
+    entry_price: float
+    initial_sl: Optional[float] = None
+    initial_tp: Optional[float] = None
+    exit_price: Optional[float] = None
+    # Time range
+    start_time: str
+    end_time: Optional[str] = None
