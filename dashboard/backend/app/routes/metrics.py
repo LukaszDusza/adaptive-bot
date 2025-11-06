@@ -8,6 +8,9 @@ from fastapi import APIRouter, HTTPException
 from typing import List
 from datetime import datetime
 import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.models import (
     MetricsResponse, TickerMetrics, EquityCurvePoint,
@@ -29,9 +32,8 @@ try:
 
 except Exception as e:
     bybit_service = None
-    import logging
-    logging.error(f"⚠️  BYBIT SERVICE NOT AVAILABLE: {e}")
-    logging.error("   Dashboard will have limited functionality without Bybit API")
+    logger.error(f"⚠️  BYBIT SERVICE NOT AVAILABLE: {e}")
+    logger.error("   Dashboard will have limited functionality without Bybit API")
 
 
 def _check_bybit_available():
@@ -107,8 +109,7 @@ async def get_overall_metrics():
                         sharpe_ratio = (mean_return / std_return) * np.sqrt(365)
     except Exception as e:
         # Log error but continue with None/0 values
-        import logging
-        logging.warning(f"Failed to calculate metrics from equity curve: {e}")
+        logger.warning(f"Failed to calculate metrics from equity curve: {e}")
         sharpe_ratio = None
         max_dd = 0.0
         max_dd_pct = 0.0
@@ -199,17 +200,35 @@ async def get_equity_curve():
     from datetime import datetime
     nov_1_2025 = datetime(2025, 11, 1, 0, 0, 0)
 
-    filtered_data = [
+    # Separate data into before and after Nov 1
+    before_nov1 = [
+        point for point in bybit_equity_data
+        if datetime.fromisoformat(point['timestamp']) < nov_1_2025
+    ]
+
+    after_nov1 = [
         point for point in bybit_equity_data
         if datetime.fromisoformat(point['timestamp']) >= nov_1_2025
     ]
 
-    if not filtered_data:
-        # If no data after Nov 1, return empty (or use first available point)
+    if not after_nov1:
+        # If no data after Nov 1, return empty
         return []
 
-    # Use equity on Nov 1, 2025 as the starting point (zero level)
-    starting_equity = filtered_data[0]['equity']
+    # Calculate starting equity on Nov 1, 2025 (FIXED BASELINE)
+    # This ensures equity curve always starts at zero on Nov 1, regardless of how many trades we have
+    if before_nov1:
+        # Use last equity before Nov 1 as the baseline (most accurate)
+        starting_equity = before_nov1[-1]['equity']
+        logger.info(f"Using equity from {before_nov1[-1]['timestamp']} as Nov 1 baseline: ${starting_equity:.2f}")
+    else:
+        # No data before Nov 1 - use first point after Nov 1 as baseline
+        # This is our best estimate for equity on Nov 1
+        starting_equity = after_nov1[0]['equity']
+        logger.info(f"No data before Nov 1 - using first available point ({after_nov1[0]['timestamp']}) as baseline: ${starting_equity:.2f}")
+
+    # Use after_nov1 data for the chart
+    filtered_data = after_nov1
 
     # Convert to EquityCurvePoint format
     running_max_pnl = 0.0
