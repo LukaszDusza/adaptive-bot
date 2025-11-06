@@ -3,7 +3,7 @@
  */
 import React from 'react';
 import { X, TrendingUp, TrendingDown, Clock, DollarSign, Target, Shield } from 'lucide-react';
-import { Trade } from '../../types';
+import type { Trade } from '../../types';
 import { TradeCandleChart } from '../charts/TradeCandleChart';
 
 interface TradeDetailModalProps {

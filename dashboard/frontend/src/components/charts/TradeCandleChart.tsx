@@ -3,8 +3,9 @@
  * Uses TradingView Lightweight Charts for professional trading visualization
  */
 import React, { useEffect, useRef, useState } from 'react';
-import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickData, Time } from 'lightweight-charts';
-import { TradeCandlesResponse } from '../../types';
+import { createChart, ColorType } from 'lightweight-charts';
+import type { Time } from 'lightweight-charts';
+import type { TradeCandlesResponse } from '../../types';
 import { Loader2 } from 'lucide-react';
 
 interface TradeCandleChartProps {
@@ -13,8 +14,8 @@ interface TradeCandleChartProps {
 
 export const TradeCandleChart: React.FC<TradeCandleChartProps> = ({ tradeId }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
-  const chartRef = useRef<IChartApi | null>(null);
-  const candlestickSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const chartRef = useRef<any>(null); // Let TypeScript infer from createChart
+  const candlestickSeriesRef = useRef<any>(null);
 
   const [data, setData] = useState<TradeCandlesResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -88,7 +89,7 @@ export const TradeCandleChart: React.FC<TradeCandleChartProps> = ({ tradeId }) =
           labelBackgroundColor: '#6366f1',
         },
       },
-    });
+    }) as any;
 
     chartRef.current = chart;
 
@@ -105,8 +106,8 @@ export const TradeCandleChart: React.FC<TradeCandleChartProps> = ({ tradeId }) =
     candlestickSeriesRef.current = candlestickSeries;
 
     // Convert candle data to lightweight-charts format
-    const chartData: CandlestickData[] = data.candles.map((candle) => ({
-      time: Math.floor(new Date(candle.timestamp).getTime() / 1000) as Time,
+    const chartData = data.candles.map((candle) => ({
+      time: Math.floor(new Date(candle.timestamp).getTime() / 1000),
       open: candle.open,
       high: candle.high,
       low: candle.low,
