@@ -1557,6 +1557,11 @@ class TradingBot:
             logger.error(f"Invalid qty={qty} for Dynamic TP Level {next_level}, skipping")
             return
 
+        min_qty = self.adapter.get_min_order_qty(self.config.TICKER)
+        if next_level < 4 and qty < size and qty < min_qty * 2:
+            logger.warning(f"⚠️ Skipping Dynamic TP Level {next_level}: qty={qty:.4f} too small for partial close (< {min_qty * 2:.4f}). Will wait for higher levels.")
+            return
+
         reduce_side = "Sell" if side == 'Long' else "Buy"
 
         try:
