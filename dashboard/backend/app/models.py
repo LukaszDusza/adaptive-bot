@@ -135,7 +135,7 @@ class Trade(BaseModel):
     trade_id: str
     ticker: str
     side: TradeSide
-    start_time: datetime
+    start_time: Optional[datetime] = None  # Optional - Bybit closed P&L doesn't track entry time
     end_time: Optional[datetime] = None
     entry_price: Optional[float] = None
     exit_price: Optional[float] = None
