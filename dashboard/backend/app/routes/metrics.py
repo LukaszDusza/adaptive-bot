@@ -690,28 +690,34 @@ async def get_sl_tp_effectiveness_trend(days: int = 30):
     if not recent_records:
         return []
 
-    # Group trades by date (use createdTime for consistency with equity curve)
+    # Sort records by date for cumulative calculation
+    sorted_records = sorted(recent_records, key=lambda r: int(r.get('createdTime', 0)))
+
+    # Group trades by date to determine points in time
     from collections import defaultdict
     trades_by_date = defaultdict(list)
 
-    for record in recent_records:
-        # Use createdTime (when position was opened) instead of updatedTime (when closed)
+    for record in sorted_records:
         created_ms = int(record.get('createdTime', 0))
         trade_date = datetime.fromtimestamp(created_ms / 1000).date()
         trades_by_date[trade_date].append(record)
 
-    # Calculate metrics for each day
+    # Calculate CUMULATIVE metrics (like equity curve)
+    # Each point shows stats for ALL trades from Nov 4 up to that date
     trend_points = []
+    cumulative_records = []
 
     for trade_date in sorted(trades_by_date.keys()):
-        day_records = trades_by_date[trade_date]
+        # Add today's trades to cumulative list
+        cumulative_records.extend(trades_by_date[trade_date])
 
+        # Calculate metrics for ALL trades up to this date
         tp_trades = []
         sl_trades = []
         tp_profits = []
         sl_losses = []
 
-        for record in day_records:
+        for record in cumulative_records:
             closed_pnl = float(record.get('closedPnl', 0))
             avg_entry = float(record.get('avgEntryPrice', 0))
             avg_exit = float(record.get('avgExitPrice', 0))
@@ -731,7 +737,7 @@ async def get_sl_tp_effectiveness_trend(days: int = 30):
                     sl_trades.append(record)
                     sl_losses.append(abs(price_change_pct))
 
-        total_count = len(day_records)
+        total_count = len(cumulative_records)
         tp_count = len(tp_trades)
         sl_count = len(sl_trades)
 
@@ -750,7 +756,7 @@ async def get_sl_tp_effectiveness_trend(days: int = 30):
             risk_reward_ratio=rr_ratio,
             avg_tp_distance_pct=avg_tp_dist,
             avg_sl_distance_pct=avg_sl_dist,
-            trade_count=total_count
+            trade_count=total_count  # Shows cumulative trade count
         ))
 
     return trend_points

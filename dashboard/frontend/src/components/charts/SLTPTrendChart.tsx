@@ -58,7 +58,7 @@ export const SLTPTrendChart: React.FC<SLTPTrendChartProps> = ({ data }) => {
       const data = payload[0].payload;
       return (
         <div className="bg-dark-card border border-dark-border rounded p-3 shadow-lg">
-          <p className="text-sm text-dark-text-secondary mb-2">{data.fullDate}</p>
+          <p className="text-sm text-dark-text-secondary mb-2">Up to: {data.fullDate}</p>
           <div className="space-y-1">
             <p className="text-sm">
               <span className="text-profit">TP Rate:</span> {data.tp_rate.toFixed(1)}%
@@ -70,7 +70,7 @@ export const SLTPTrendChart: React.FC<SLTPTrendChartProps> = ({ data }) => {
               <span className="text-yellow-500">R/R Ratio:</span> {data.rr_ratio.toFixed(2)}
             </p>
             <p className="text-sm text-dark-text-secondary">
-              Trades: {data.trades}
+              Total Trades: {data.trades}
             </p>
           </div>
         </div>
@@ -158,7 +158,8 @@ export const SLTPTrendChart: React.FC<SLTPTrendChartProps> = ({ data }) => {
       </div>
 
       <div className="mt-4 text-xs text-dark-text-secondary">
-        <p>Shows daily TP/SL hit rates and Risk/Reward ratio trends.</p>
+        <p>Shows cumulative TP/SL hit rates and Risk/Reward ratio trends over time.</p>
+        <p>Each point represents statistics for ALL trades from Nov 4 up to that date.</p>
         <p>Green line: Profitable trades | Red line: Loss trades | Yellow line: Avg Win/Loss ratio</p>
       </div>
     </div>
