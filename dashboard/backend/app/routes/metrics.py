@@ -660,11 +660,11 @@ async def get_sl_tp_effectiveness_trend(days: int = 30):
     Shows how TP/SL hit rates and risk/reward ratio change over time.
     Useful for identifying if strategy performance is improving or degrading.
 
-    START DATE: November 1, 2025 (fixed)
-    ROLLING WINDOW: 30 days after start date
+    START DATE: November 4, 2025 (FIXED - first trading day)
+    Shows ALL data from Nov 4 onwards (no rolling window - accumulates history)
 
     Args:
-        days: Rolling window size (default: 30 days)
+        days: Not used anymore (kept for API compatibility)
 
     Returns:
         List of daily SLTPTrendPoint sorted by date (oldest to newest)
@@ -677,26 +677,15 @@ async def get_sl_tp_effectiveness_trend(days: int = 30):
     if not pnl_records:
         return []
 
-    # Start date: November 1, 2025 (fixed)
+    # Start date: November 4, 2025 (FIXED - first trading day)
+    # This ensures trend always starts from the same date, similar to equity curve fix
     from datetime import timedelta
-    start_date = datetime(2025, 11, 1, 0, 0, 0)
+    start_date = datetime(2025, 11, 4, 0, 0, 0)
     start_ms = int(start_date.timestamp() * 1000)
 
-    # Calculate cutoff based on rolling window
-    # If < 30 days since start → show all from start
-    # If >= 30 days since start → show last 30 days (rolling window)
-    days_since_start = (datetime.now() - start_date).days
-
-    if days_since_start < days:
-        # Still accumulating - show all since start date
-        cutoff_ms = start_ms
-    else:
-        # True rolling window - show last N days
-        cutoff_time = datetime.now() - timedelta(days=days)
-        cutoff_ms = int(cutoff_time.timestamp() * 1000)
-
-    # Filter by createdTime (when position was opened) for consistency
-    recent_records = [r for r in pnl_records if int(r.get('createdTime', 0)) >= cutoff_ms]
+    # Filter by createdTime (when position was opened) starting from Nov 4
+    # This gives stable baseline - chart will always start from Nov 4
+    recent_records = [r for r in pnl_records if int(r.get('createdTime', 0)) >= start_ms]
 
     if not recent_records:
         return []
@@ -774,9 +763,9 @@ async def get_model_ranking(
     sort_by: str = "pnl"  # pnl, trades, rrr, win_rate
 ):
     """
-    Get model performance ranking (rolling N days window) - CACHED 60s.
+    Get ticker performance ranking (aggregated LONG + SHORT) - CACHED 60s.
 
-    Models are identified by ticker + side (e.g., SOLUSDT_LONG, DOGEUSDT_SHORT).
+    Tickers are aggregated across both sides (e.g., SOLUSDT combines LONG + SHORT trades).
     Data comes from Bybit closed P&L history.
 
     START DATE: November 1, 2025 (fixed)
@@ -788,11 +777,12 @@ async def get_model_ranking(
 
     Returns:
         List of ModelRanking objects sorted by chosen criterion (descending)
+        Note: side field will be "COMBINED" for all entries
 
     Useful for:
-    - Identifying best performing models
-    - Comparing different ticker/side combinations
-    - Monitoring model performance over time
+    - Identifying best performing tickers overall
+    - Comparing different assets (SOLUSDT vs DOGEUSDT etc.)
+    - Monitoring ticker performance over time
     """
     _check_bybit_available()
 
@@ -829,32 +819,21 @@ async def get_model_ranking(
     if not recent_records:
         return []
 
-    # Group by model (ticker + side)
+    # Group by ticker (aggregate LONG + SHORT)
     from collections import defaultdict
 
-    model_trades = defaultdict(list)
+    ticker_trades = defaultdict(list)
 
     for record in recent_records:
         symbol = record.get('symbol', '')
-        # In Bybit closed PnL, 'side' refers to CLOSING transaction
-        # Buy = closed by buying = original position was SHORT
-        # Sell = closed by selling = original position was LONG
-        side_raw = record.get('side', 'Buy')
-        side = 'SHORT' if side_raw == 'Buy' else 'LONG'
+        ticker_trades[symbol].append(record)
 
-        model_id = f"{symbol}_{side}"
-        model_trades[model_id].append(record)
-
-    # Calculate statistics for each model
+    # Calculate statistics for each ticker
     rankings = []
 
-    for model_id, trades in model_trades.items():
-        # Parse model_id
-        parts = model_id.rsplit('_', 1)
-        if len(parts) != 2:
+    for ticker, trades in ticker_trades.items():
+        if not ticker:
             continue
-
-        ticker, side_str = parts
 
         # Calculate metrics
         total_trades = len(trades)
@@ -902,9 +881,9 @@ async def get_model_ranking(
         last_trade_time = datetime.fromtimestamp(last_trade_ms / 1000) if last_trade_ms > 0 else None
 
         ranking = ModelRanking(
-            model_id=model_id,
+            model_id=ticker,  # Just ticker now (aggregated)
             ticker=ticker,
-            side=TradeSide(side_str),
+            side=TradeSide.COMBINED,  # Aggregated LONG + SHORT
             total_trades=total_trades,
             total_pnl=total_pnl,
             win_rate=win_rate,

@@ -179,9 +179,9 @@ export interface SLTPTrendPoint {
 }
 
 export interface ModelRanking {
-  model_id: string; // e.g., "SOLUSDT_LONG"
+  model_id: string; // e.g., "SOLUSDT" (aggregated)
   ticker: string;
-  side: 'LONG' | 'SHORT';
+  side: 'LONG' | 'SHORT' | 'COMBINED'; // COMBINED = aggregated LONG + SHORT
   total_trades: number;
   total_pnl: number;
   win_rate: number;

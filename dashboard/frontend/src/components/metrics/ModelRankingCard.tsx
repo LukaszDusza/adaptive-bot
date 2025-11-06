@@ -127,7 +127,7 @@ export const ModelRankingCard: React.FC<ModelRankingCardProps> = ({ data, loadin
     <div className="card">
 
       <div className="text-sm text-dark-text-secondary mb-4">
-        Comparing {data.length} models by ticker + side (e.g., SOLUSDT_LONG, DOGEUSDT_SHORT)
+        Comparing {data.length} tickers (aggregated LONG + SHORT for each)
         {dateRangeText && (
           <span className="ml-2">• Data: {dateRangeText}</span>
         )}
@@ -198,7 +198,9 @@ export const ModelRankingCard: React.FC<ModelRankingCardProps> = ({ data, loadin
                     </span>
                     <span
                       className={`badge text-xs ${
-                        model.side === 'LONG' ? 'badge-success' : 'badge-danger'
+                        model.side === 'LONG' ? 'badge-success' :
+                        model.side === 'SHORT' ? 'badge-danger' :
+                        'badge-warning'  // COMBINED
                       }`}
                     >
                       {model.side}

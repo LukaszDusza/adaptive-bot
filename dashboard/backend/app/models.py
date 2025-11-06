@@ -14,6 +14,7 @@ from enum import Enum
 class TradeSide(str, Enum):
     LONG = "LONG"
     SHORT = "SHORT"
+    COMBINED = "COMBINED"  # For aggregated ticker stats (LONG + SHORT)
 
     # Also accept capitalized version from bot logs
     @classmethod
@@ -374,10 +375,10 @@ class PendingOrdersResponse(BaseModel):
 
 
 class ModelRanking(BaseModel):
-    """Model performance ranking (rolling 1 month window)"""
-    model_id: str  # e.g., "SOLUSDT_LONG" or "DOGEUSDT_SHORT"
+    """Ticker performance ranking (aggregated LONG + SHORT, rolling 1 month window)"""
+    model_id: str  # Just ticker e.g., "SOLUSDT" (aggregates all sides)
     ticker: str
-    side: TradeSide
+    side: TradeSide  # Will be "COMBINED" for aggregated stats
     total_trades: int
     total_pnl: float
     win_rate: float

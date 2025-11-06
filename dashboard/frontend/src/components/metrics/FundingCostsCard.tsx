@@ -2,7 +2,7 @@
  * Funding Costs Card - Shows funding fees analysis
  */
 import React from 'react';
-import { DollarSign, TrendingDown, Calendar, PieChart, RefreshCw } from 'lucide-react';
+import { DollarSign, TrendingDown, Calendar, RefreshCw } from 'lucide-react';
 import type { FundingCosts } from '../../types';
 
 interface FundingCostsCardProps {
@@ -41,13 +41,6 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
     return 'text-red-500'; // High
   };
 
-  const getSymbolCostColor = (cost: number) => {
-    if (cost < 2) return 'text-green-500'; // Low cost
-    if (cost < 5) return 'text-green-400'; // Moderate
-    if (cost < 10) return 'text-yellow-500'; // Fair
-    return 'text-red-500'; // High
-  };
-
   // Only show loading skeleton on first load (no data yet)
   if (!data) {
     return (
@@ -62,11 +55,6 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
       </div>
     );
   }
-
-  // Get top 3 symbols by funding cost
-  const topSymbols = Object.entries(data.funding_by_symbol)
-    .sort(([, a], [, b]) => b - a)
-    .slice(0, 3);
 
   return (
     <div className="stat-card">
@@ -117,26 +105,6 @@ export const FundingCostsCard: React.FC<FundingCostsCardProps> = ({ data, loadin
             -{formatCurrency(data.monthly_projected_funding)}
           </div>
         </div>
-
-        {/* Top Symbols */}
-        {topSymbols.length > 0 && (
-          <div className="border-t border-dark-border pt-3">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-dark-text-secondary">Top Symbols</span>
-              <PieChart className="text-purple-400" size={16} />
-            </div>
-            <div className="space-y-2">
-              {topSymbols.map(([symbol, cost]) => (
-                <div key={symbol} className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-dark-text-primary">{symbol}</span>
-                  <span className={`text-sm font-semibold ${getSymbolCostColor(cost)}`}>
-                    -{formatCurrency(cost)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );

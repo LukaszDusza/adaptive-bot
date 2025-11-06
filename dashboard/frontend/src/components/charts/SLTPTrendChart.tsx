@@ -83,7 +83,7 @@ export const SLTPTrendChart: React.FC<SLTPTrendChartProps> = ({ data }) => {
     <div className="card">
       <h2 className="text-xl font-bold mb-4 flex items-center gap-2">
         <TrendingUp className="text-purple-500" />
-        SL/TP Effectiveness Trend ({dateRange} • 30-day rolling)
+        SL/TP Effectiveness Trend ({dateRange})
       </h2>
 
       <div className="h-80">
