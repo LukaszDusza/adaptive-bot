@@ -40,17 +40,38 @@ export const SLTPTrendChart: React.FC<SLTPTrendChartProps> = ({ data }) => {
   const dateRange = `${firstDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} - ${lastDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`;
 
   // Format data for Recharts
-  const chartData = data.map((point) => ({
-    date: new Date(point.date).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-    }),
-    fullDate: point.date,
-    tp_rate: point.tp_hit_rate * 100, // Convert to percentage
-    sl_rate: point.sl_hit_rate * 100,
-    rr_ratio: point.risk_reward_ratio,
-    trades: point.trade_count,
-  }));
+  const chartData = data.map((point, index) => {
+    const date = new Date(point.date);
+
+    // For many points (>20), show simplified labels
+    // Otherwise show full date
+    let label;
+    if (data.length > 20) {
+      // Show label every ~10th point to avoid crowding
+      if (index % Math.ceil(data.length / 10) === 0 || index === data.length - 1) {
+        label = date.toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+        });
+      } else {
+        label = '';  // Empty label for intermediate points
+      }
+    } else {
+      label = date.toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+      });
+    }
+
+    return {
+      date: label,
+      fullDate: point.date,
+      tp_rate: point.tp_hit_rate * 100, // Convert to percentage
+      sl_rate: point.sl_hit_rate * 100,
+      rr_ratio: point.risk_reward_ratio,
+      trades: point.trade_count,
+    };
+  });
 
   // Custom tooltip
   const CustomTooltip = ({ active, payload }: any) => {
@@ -158,9 +179,9 @@ export const SLTPTrendChart: React.FC<SLTPTrendChartProps> = ({ data }) => {
       </div>
 
       <div className="mt-4 text-xs text-dark-text-secondary">
-        <p>Shows cumulative TP/SL hit rates and Risk/Reward ratio trends over time.</p>
-        <p>Each point represents statistics for ALL trades from Nov 4 up to that date.</p>
-        <p>Green line: Profitable trades | Red line: Loss trades | Yellow line: Avg Win/Loss ratio</p>
+        <p>Shows cumulative TP/SL hit rates and Risk/Reward ratio trends (trade-by-trade evolution).</p>
+        <p>Each point represents statistics for ALL trades from start up to that trade.</p>
+        <p>Green line: Profitable trades (%) | Red line: Loss trades (%) | Yellow line: Avg Win/Loss ratio</p>
       </div>
     </div>
   );

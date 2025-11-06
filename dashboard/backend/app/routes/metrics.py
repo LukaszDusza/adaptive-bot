@@ -655,24 +655,32 @@ async def get_sl_tp_effectiveness(days: int = 7):
 @cached(ttl=60, key_prefix="sl_tp_trend")
 async def get_sl_tp_effectiveness_trend(days: int = 30):
     """
-    Get SL/TP effectiveness trend over time (daily data).
+    Get SL/TP effectiveness trend over time (per-trade cumulative data).
 
     Shows how TP/SL hit rates and risk/reward ratio change over time.
-    Useful for identifying if strategy performance is improving or degrading.
+    Each point represents cumulative statistics for ALL trades up to that point.
+    Similar to equity curve - shows trend evolution trade-by-trade.
 
     START DATE: November 4, 2025 (FIXED - first trading day)
+    GRANULARITY: Per-trade (sampled every 1-5 trades depending on total count)
     Shows ALL data from Nov 4 onwards (no rolling window - accumulates history)
 
     Args:
         days: Not used anymore (kept for API compatibility)
 
     Returns:
-        List of daily SLTPTrendPoint sorted by date (oldest to newest)
+        List of SLTPTrendPoint sorted by date (oldest to newest)
+        Points are sampled to avoid excessive data (50-200 points typical)
     """
     _check_bybit_available()
 
-    # Get closed P&L history from Bybit
-    pnl_records = bybit_service.get_closed_pnl_history(limit=500)
+    # Get closed P&L history from Bybit starting from Nov 1, 2025
+    # Use start_time to fetch ALL trades since trading started
+    nov_1_2025 = datetime(2025, 11, 1, 0, 0, 0)
+    start_ms = int(nov_1_2025.timestamp() * 1000)
+
+    # Fetch with increased limit (Bybit max is 100 per request, but we can fetch multiple times)
+    pnl_records = bybit_service.get_closed_pnl_history_paginated(start_time_ms=start_ms, max_records=1000)
 
     if not pnl_records:
         return []
@@ -693,71 +701,74 @@ async def get_sl_tp_effectiveness_trend(days: int = 30):
     # Sort records by date for cumulative calculation
     sorted_records = sorted(recent_records, key=lambda r: int(r.get('createdTime', 0)))
 
-    # Group trades by date to determine points in time
-    from collections import defaultdict
-    trades_by_date = defaultdict(list)
-
-    for record in sorted_records:
-        created_ms = int(record.get('createdTime', 0))
-        trade_date = datetime.fromtimestamp(created_ms / 1000).date()
-        trades_by_date[trade_date].append(record)
-
-    # Calculate CUMULATIVE metrics (like equity curve)
-    # Each point shows stats for ALL trades from Nov 4 up to that date
+    # Calculate CUMULATIVE metrics per-trade (like equity curve)
+    # Each point shows stats for ALL trades from Nov 4 up to that trade
+    # This gives many points (one per trade) instead of just one per day
     trend_points = []
-    cumulative_records = []
+    tp_trades = []
+    sl_trades = []
+    tp_profits = []
+    sl_losses = []
 
-    for trade_date in sorted(trades_by_date.keys()):
-        # Add today's trades to cumulative list
-        cumulative_records.extend(trades_by_date[trade_date])
+    # Sample rate: add point every N trades to avoid too many points
+    # For < 50 trades: every trade
+    # For 50-200 trades: every 2 trades
+    # For > 200 trades: every 5 trades
+    total_trades = len(sorted_records)
+    if total_trades < 50:
+        sample_rate = 1
+    elif total_trades < 200:
+        sample_rate = 2
+    else:
+        sample_rate = 5
 
-        # Calculate metrics for ALL trades up to this date
-        tp_trades = []
-        sl_trades = []
-        tp_profits = []
-        sl_losses = []
+    for i, record in enumerate(sorted_records, start=1):
+        closed_pnl = float(record.get('closedPnl', 0))
+        avg_entry = float(record.get('avgEntryPrice', 0))
+        avg_exit = float(record.get('avgExitPrice', 0))
+        side = record.get('side', 'Buy')
 
-        for record in cumulative_records:
-            closed_pnl = float(record.get('closedPnl', 0))
-            avg_entry = float(record.get('avgEntryPrice', 0))
-            avg_exit = float(record.get('avgExitPrice', 0))
-            side = record.get('side', 'Buy')
+        # Calculate price movement
+        if avg_entry > 0:
+            if side == 'Buy':
+                price_change_pct = ((avg_exit - avg_entry) / avg_entry) * 100
+            else:
+                price_change_pct = ((avg_entry - avg_exit) / avg_entry) * 100
 
-            # Calculate price movement
-            if avg_entry > 0:
-                if side == 'Buy':
-                    price_change_pct = ((avg_exit - avg_entry) / avg_entry) * 100
-                else:
-                    price_change_pct = ((avg_entry - avg_exit) / avg_entry) * 100
+            if closed_pnl > 0.001:
+                tp_trades.append(record)
+                tp_profits.append(abs(price_change_pct))
+            elif closed_pnl < -0.001:
+                sl_trades.append(record)
+                sl_losses.append(abs(price_change_pct))
 
-                if closed_pnl > 0.001:
-                    tp_trades.append(record)
-                    tp_profits.append(abs(price_change_pct))
-                elif closed_pnl < -0.001:
-                    sl_trades.append(record)
-                    sl_losses.append(abs(price_change_pct))
+        # Add point every N trades (sampling) or always add last trade
+        if i % sample_rate == 0 or i == total_trades:
+            total_count = i
+            tp_count = len(tp_trades)
+            sl_count = len(sl_trades)
 
-        total_count = len(cumulative_records)
-        tp_count = len(tp_trades)
-        sl_count = len(sl_trades)
+            tp_rate = (tp_count / total_count) if total_count > 0 else 0.0
+            sl_rate = (sl_count / total_count) if total_count > 0 else 0.0
 
-        tp_rate = (tp_count / total_count) if total_count > 0 else 0.0
-        sl_rate = (sl_count / total_count) if total_count > 0 else 0.0
+            avg_tp_dist = (sum(tp_profits) / len(tp_profits)) if tp_profits else 0.0
+            avg_sl_dist = (sum(sl_losses) / len(sl_losses)) if sl_losses else 0.0
 
-        avg_tp_dist = (sum(tp_profits) / len(tp_profits)) if tp_profits else 0.0
-        avg_sl_dist = (sum(sl_losses) / len(sl_losses)) if sl_losses else 0.0
+            rr_ratio = (avg_tp_dist / avg_sl_dist) if avg_sl_dist > 0 else 0.0
 
-        rr_ratio = (avg_tp_dist / avg_sl_dist) if avg_sl_dist > 0 else 0.0
+            # Use trade timestamp for x-axis (not just date)
+            created_ms = int(record.get('createdTime', 0))
+            trade_datetime = datetime.fromtimestamp(created_ms / 1000)
 
-        trend_points.append(SLTPTrendPoint(
-            date=trade_date.isoformat(),
-            tp_hit_rate=tp_rate,
-            sl_hit_rate=sl_rate,
-            risk_reward_ratio=rr_ratio,
-            avg_tp_distance_pct=avg_tp_dist,
-            avg_sl_distance_pct=avg_sl_dist,
-            trade_count=total_count  # Shows cumulative trade count
-        ))
+            trend_points.append(SLTPTrendPoint(
+                date=trade_datetime.isoformat(),  # Full datetime for better x-axis
+                tp_hit_rate=tp_rate,
+                sl_hit_rate=sl_rate,
+                risk_reward_ratio=rr_ratio,
+                avg_tp_distance_pct=avg_tp_dist,
+                avg_sl_distance_pct=avg_sl_dist,
+                trade_count=total_count  # Shows cumulative trade count
+            ))
 
     return trend_points
 

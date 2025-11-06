@@ -264,6 +264,61 @@ class BybitService:
             logger.error(f"Failed to get closed P&L history: {e}")
             return []
 
+    def get_closed_pnl_history_paginated(self, symbol: str = None, start_time_ms: int = None, max_records: int = 1000) -> list:
+        """
+        Get closed P&L history from Bybit with pagination to fetch more than 100 records.
+
+        Args:
+            symbol: Trading pair (e.g., SOLUSDT). If None, gets all symbols.
+            start_time_ms: Start timestamp in milliseconds (e.g., Nov 1, 2025)
+            max_records: Maximum total records to fetch (will make multiple API calls)
+
+        Returns:
+            List of closed P&L records sorted by createdTime descending
+        """
+        if not self.adapter:
+            logger.warning("BybitAdapter not initialized - cannot get P&L history")
+            return []
+
+        try:
+            all_records = []
+            current_end_time = None  # Start from most recent
+
+            # Fetch in batches of 100 (Bybit's limit per request)
+            while len(all_records) < max_records:
+                batch_size = min(100, max_records - len(all_records))
+
+                pnl_records = self.adapter.get_closed_pnl_history(
+                    symbol=symbol,
+                    start_time_ms=start_time_ms,
+                    end_time_ms=current_end_time,
+                    limit=batch_size
+                )
+
+                if not pnl_records:
+                    break  # No more records
+
+                all_records.extend(pnl_records)
+
+                # Use oldest record's timestamp as next end_time for pagination
+                oldest_record_time = min(int(r.get('createdTime', 0)) for r in pnl_records)
+
+                # If we got less than requested or hit the start time, we're done
+                if len(pnl_records) < batch_size or (start_time_ms and oldest_record_time <= start_time_ms):
+                    break
+
+                # Set next end_time to 1ms before oldest record (to avoid duplicates)
+                current_end_time = oldest_record_time - 1
+
+                logger.info(f"📄 Fetched {len(pnl_records)} records (total: {len(all_records)}), continuing pagination...")
+
+            logger.info(f"✓ Retrieved {len(all_records)} closed P&L records from Bybit (paginated)")
+            return all_records
+
+        except Exception as e:
+            logger.error(f"Failed to get closed P&L history (paginated): {e}")
+            return []
+
     def build_equity_curve_from_bybit(self, limit: int = 100) -> list:
         """
         Build equity curve from real Bybit data (closed P&L history).
