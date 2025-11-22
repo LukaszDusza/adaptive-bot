@@ -47,6 +47,8 @@ services:
   # DOGEUSDT - v1.2.doge
   # UPDATED: prob-threshold 0.38 -> 0.6039 (ML optimal)
   # OPTIMIZED: TP 0.0156->0.025, TSL 0.0102->0.008, Dynamic TP (R:R fix)
+  # DCA: Single ATR-based level (1.5x multiplier = ~1.18% avg)
+  # RSI FILTER: Enabled by default (reversal-based entry)
   # ============================================
   bot-luk-doge-dca:
     <<: [*bot-base, *bot-common]
@@ -74,9 +76,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.5
 
   # ============================================
   # SOLUSDT - v1.2.sol
@@ -109,9 +108,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.5
 
   # ============================================
   # ETHUSDT - v1.2.eth
@@ -144,9 +140,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.5
 
   # ============================================
   # LINKUSDT - v1.2.link
@@ -179,9 +172,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.8
 
   # ============================================
   # HBARUSDT - v1.2.hbar
@@ -214,9 +204,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.9
 
   # ============================================
   # SUIUSDT - v1.2.sui
@@ -249,9 +236,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.7
 
   # ============================================
   # NEARUSDT - v1.2.near
@@ -284,9 +268,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 2.0
 
   # ============================================
   # TRXUSDT - v1.2.trx (NEW!)
@@ -319,9 +300,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.5
 
   # ============================================
   # KASUSDT - v1.2.kas (NEW!)
@@ -354,9 +332,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.8
 
   # ============================================
   # 1000PEPEUSDT - v1.2.1000pepe (NEW!)
@@ -389,9 +364,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.5
 
   # ============================================
   # XRPUSDT - v1.2.xrp (NEW!)
@@ -424,9 +396,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.5
 
   # ============================================
   # BRETTUSDT - v1.2.brett (NEW!)
@@ -460,9 +429,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.6
 
   # ============================================
   # ICPUSDT - v1.2.icp (NEW!)
@@ -495,9 +461,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.7
 
   # ============================================
   # ONDOUSDT - v1.2.ondo (NEW!)
@@ -530,9 +493,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.8
 
   # ============================================
   # PONKEUSDT - v1.2.ponke (NEW!)
@@ -565,9 +525,6 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.6
 
   # ============================================
   # WIFUSDT - v1.2.wif (NEW!)
@@ -601,6 +558,3 @@ services:
       --limit-order
       --limit-order-candles 16
       --dca-mode
-      --dca-level1-pct 0.006
-      --dca-atr-multiplier 1.5
-      --dca-max-swing-distance 1.5

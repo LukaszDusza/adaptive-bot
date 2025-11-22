@@ -62,11 +62,10 @@ class BotConfig:
     COOLDOWN_AFTER_LOSS_MINUTES: int = 30  # Minutes to wait before opening new position after ANY closed position (30min = 2x 15m candles, prevents re-entry on same candle)
     MAX_RETRIES: int = 3
     RETRY_DELAY: int = 3
-    # DCA (Dollar Cost Averaging) Mode - 3 limit orders at different levels
+    # DCA (Dollar Cost Averaging) Mode - Single ATR-based limit order
+    # Based on historical analysis (Nov 2025): Avg ATR = 0.785%, 1.5x multiplier = 1.177% distance
     DCA_ENABLED: bool = False  # Enable DCA mode (requires LIMIT_ORDER_MODE=True)
-    DCA_LEVEL1_PCT: float = 0.003  # Level 1: Fixed offset (-0.3% for LONG, +0.3% for SHORT)
-    DCA_ATR_MULTIPLIER: float = 0.55  # Level 2: ATR-based (ATR * 0.5)
-    DCA_MAX_SWING_DISTANCE_PCT: float = 1.6  # Level 3: Max distance to swing level (%)
+    DCA_ATR_MULTIPLIER: float = 1.5  # ATR-based distance (ATR * 1.5 = ~1.18% avg, recommended)
     # FIX #5: Magic numbers moved to config
     FEE_PCT: float = 0.0006  # 0.06% round-trip fees (maker+taker conservative estimate)
     PROFIT_PROTECTION_THRESHOLD: float = 0.0025  # 0.25% - minimum profit to activate protection
@@ -74,13 +73,19 @@ class BotConfig:
     API_RETRY_INITIAL_SLEEP: float = 0.5  # Initial sleep for API retries (exponential backoff)
     API_RETRY_MAX_ATTEMPTS: int = 5  # Max retry attempts for API calls
     POSITION_UPDATE_SLEEP: float = 2.0  # Sleep after order execution before checking position
-    DCA_MIN_LEVEL_DISTANCE_PCT: float = 0.001  # 0.1% - minimum distance between DCA levels
 
     # ICT Context Mode - Dynamic threshold adjustment based on Smart Money signals
     ICT_CONTEXT_MODE: bool = False  # Enable ICT context-aware decision making (OPCJA 3)
     ICT_MIN_STRENGTH: float = 0.3  # Minimum ICT strength to apply threshold reduction (0.0-1.0)
     ICT_MAX_THRESHOLD_REDUCTION: float = 0.20  # Max % reduction in thresholds when ICT strong (e.g., 0.20 = 20%)
     REGIME_SENSITIVITY: float = 1.0  # Multiplier for regime adjustments (1.0 = normal, 0.5 = less sensitive, 2.0 = more sensitive)
+
+    # RSI Reversal Filter - Enter on reversal FROM extreme, not AT extreme
+    RSI_REVERSAL_FILTER_ENABLED: bool = True  # Enable RSI reversal filter (crossing 70/30 levels)
+    RSI_HIGH_THRESHOLD: float = 65.0  # Block LONG if RSI above this without 30-cross (default: 65)
+    RSI_LOW_THRESHOLD: float = 35.0   # Block SHORT if RSI below this without 70-cross (default: 35)
+    RSI_OVERBOUGHT_LEVEL: float = 70.0  # RSI level for overbought (crossing down = SHORT signal)
+    RSI_OVERSOLD_LEVEL: float = 30.0   # RSI level for oversold (crossing up = LONG signal)
 
 
 class TradingBot:
@@ -636,15 +641,17 @@ class TradingBot:
 
     def _calculate_dca_levels(self, decision: str, current_price: float, df=None) -> list:
         """
-        Calculate 3 DCA limit order levels using Hybrid approach:
-        - Level 1: Fixed offset (DCA_LEVEL1_PCT)
-        - Level 2: ATR-based (ATR * DCA_ATR_MULTIPLIER)
-        - Level 3: Nearest swing low/high (within max DCA_MAX_SWING_DISTANCE_PCT)
+        Calculate single ATR-based DCA limit order level.
 
-        Returns list of 3 prices: [level1_price, level2_price, level3_price]
+        Based on historical analysis (Nov 2025):
+        - Average ATR: 0.785%
+        - Recommended multiplier: 1.5x
+        - Average distance: 1.177%
+
+        Returns list with 1 price: [dca_level]
         """
         try:
-            # Get ATR from last closed candle if available
+            # Get ATR from last closed candle
             atr = None
             if df is not None and len(df) > 1:
                 df_closed = df.iloc[:-1]
@@ -652,92 +659,48 @@ class TradingBot:
                 if 'atr_14' in last_row.index:
                     atr = last_row['atr_14']
 
-            levels = []
-
-            # LEVEL 1: Fixed percentage offset
-            if decision == "BUY":
-                level1 = current_price * (1 - self.config.DCA_LEVEL1_PCT)
-            else:  # SELL
-                level1 = current_price * (1 + self.config.DCA_LEVEL1_PCT)
-            levels.append(level1)
-
-            # LEVEL 2: ATR-based
+            # Calculate ATR-based DCA level
             if atr and atr > 0:
+                atr_distance = atr * self.config.DCA_ATR_MULTIPLIER
+
                 if decision == "BUY":
-                    level2 = current_price - (atr * self.config.DCA_ATR_MULTIPLIER)
+                    dca_level = current_price - atr_distance
                 else:  # SELL
-                    level2 = current_price + (atr * self.config.DCA_ATR_MULTIPLIER)
+                    dca_level = current_price + atr_distance
+
+                distance_pct = (atr_distance / current_price) * 100
+
+                logger.info(f"📊 DCA Level calculated for {decision}:")
+                logger.info(f"   Current price: ${current_price:.4f}")
+                logger.info(f"   ATR (14):      ${atr:.6f}")
+                logger.info(f"   Multiplier:    {self.config.DCA_ATR_MULTIPLIER}x")
+                logger.info(f"   Distance:      ${atr_distance:.6f} ({distance_pct:.3f}%)")
+                logger.info(f"   DCA Level:     ${dca_level:.4f}")
+
+                return [dca_level]
+
             else:
-                # Fallback if ATR not available: use 2x level1 offset
+                # Fallback if ATR not available: use fixed 1.2% offset
+                fallback_pct = 0.012  # 1.2% (close to 1.177% average)
+
                 if decision == "BUY":
-                    level2 = current_price * (1 - self.config.DCA_LEVEL1_PCT * 2)
+                    dca_level = current_price * (1 - fallback_pct)
                 else:
-                    level2 = current_price * (1 + self.config.DCA_LEVEL1_PCT * 2)
-            levels.append(level2)
+                    dca_level = current_price * (1 + fallback_pct)
 
-            # LEVEL 3: Swing-based (quality zone)
-            if decision == "BUY":
-                swing_level = self._find_nearest_swing_low(df, current_price, self.config.DCA_MAX_SWING_DISTANCE_PCT)
-                if swing_level:
-                    level3 = swing_level
-                else:
-                    # Fallback: 5x level1 offset (~1.5% for level1=0.3%)
-                    level3 = current_price * (1 - self.config.DCA_LEVEL1_PCT * 5)
-            else:  # SELL
-                swing_level = self._find_nearest_swing_high(df, current_price, self.config.DCA_MAX_SWING_DISTANCE_PCT)
-                if swing_level:
-                    level3 = swing_level
-                else:
-                    # Fallback: 5x level1 offset (~1.5% for level1=0.3%)
-                    level3 = current_price * (1 + self.config.DCA_LEVEL1_PCT * 5)
-            levels.append(level3)
+                logger.warning(f"⚠️  ATR not available, using fallback {fallback_pct*100:.1f}% offset")
+                logger.info(f"   DCA Level: ${dca_level:.4f}")
 
-            # Sort levels to ensure proper ordering (LONG: descending, SHORT: ascending)
-            if decision == "BUY":
-                levels.sort(reverse=True)  # Highest first (closest to current)
-            else:
-                levels.sort()  # Lowest first (closest to current)
-
-            # FIX #8: Ensure DCA levels are distinct (min 0.1% apart)
-            # This prevents Bybit from rejecting duplicate price levels
-            for i in range(len(levels) - 1):
-                distance_pct = abs(levels[i] - levels[i+1]) / levels[i]
-
-                if distance_pct < self.config.DCA_MIN_LEVEL_DISTANCE_PCT:
-                    logger.warning(f"⚠️  DCA levels too close: L{i+1}={levels[i]:.4f} vs L{i+2}={levels[i+1]:.4f} (distance: {distance_pct*100:.3f}%)")
-
-                    # Force minimum spacing (0.3% = 3x the minimum)
-                    if decision == "BUY":
-                        levels[i+1] = levels[i] * (1 - 0.003)  # Force -0.3% spacing for LONG
-                        logger.warning(f"   Adjusted L{i+2} to {levels[i+1]:.4f} (forced -0.3% spacing)")
-                    else:
-                        levels[i+1] = levels[i] * (1 + 0.003)  # Force +0.3% spacing for SHORT
-                        logger.warning(f"   Adjusted L{i+2} to {levels[i+1]:.4f} (forced +0.3% spacing)")
-
-            # Log DCA levels
-            logger.info(f"DCA Levels calculated for {decision}:")
-            logger.info(f"  Current: {current_price:.4f}")
-            logger.info(f"  Level 1 (Fixed): {levels[0]:.4f} ({abs((levels[0]/current_price - 1)*100):.2f}%)")
-            logger.info(f"  Level 2 (ATR):   {levels[1]:.4f} ({abs((levels[1]/current_price - 1)*100):.2f}%)")
-            logger.info(f"  Level 3 (Swing): {levels[2]:.4f} ({abs((levels[2]/current_price - 1)*100):.2f}%)")
-
-            return levels
+                return [dca_level]
 
         except Exception as e:
-            logger.error(f"Error calculating DCA levels: {e}", exc_info=True)
-            # Fallback: simple fixed percentage levels
+            logger.error(f"❌ Error calculating DCA level: {e}", exc_info=True)
+            # Fallback: fixed 1.2% offset
+            fallback_pct = 0.012
             if decision == "BUY":
-                return [
-                    current_price * (1 - 0.003),  # -0.3%
-                    current_price * (1 - 0.006),  # -0.6%
-                    current_price * (1 - 0.010)   # -1.0%
-                ]
+                return [current_price * (1 - fallback_pct)]
             else:
-                return [
-                    current_price * (1 + 0.003),  # +0.3%
-                    current_price * (1 + 0.006),  # +0.6%
-                    current_price * (1 + 0.010)   # +1.0%
-                ]
+                return [current_price * (1 + fallback_pct)]
 
     def _cancel_unfilled_limit_orders_safe(self, orders_to_cancel: list, reason: str = "position_closed"):
         """
@@ -1040,7 +1003,60 @@ class TradingBot:
                 # HOLD - log the reason
                 logger.info(f"⏸️  HOLD: Neither condition met (BUY={proba_buy:.3f}, SELL={proba_sell:.3f}, threshold={dynamic_prob_threshold:.3f}, ratio={confidence_ratio:.3f})")
 
-            logger.info(f"🎯 Final Decision: {decision}")
+            logger.info(f"🎯 ML Decision: {decision}")
+
+            # ========== RSI REVERSAL FILTER ==========
+            # Override ML decision based on RSI crossing levels (reversal signals)
+            # Logic: Enter on reversal FROM extreme, not AT extreme
+            # - SHORT: When RSI crosses OVERBOUGHT_LEVEL DOWN (reversal from overbought)
+            # - LONG: When RSI crosses OVERSOLD_LEVEL UP (reversal from oversold)
+            # - HOLD: If high/low RSI without recent crossing
+
+            if self.config.RSI_REVERSAL_FILTER_ENABLED:
+                rsi_current = last_row.get('rsi_14', 50)  # Default to neutral if missing
+                rsi_prev = df_closed.iloc[-2].get('rsi_14', 50) if len(df_closed) > 1 else rsi_current
+
+                original_decision = decision  # Store original for logging
+
+                # Check for RSI crossings (reversal signals)
+                rsi_crossed_ob_down = (rsi_prev > self.config.RSI_OVERBOUGHT_LEVEL and rsi_current <= self.config.RSI_OVERBOUGHT_LEVEL)
+                rsi_crossed_os_up = (rsi_prev < self.config.RSI_OVERSOLD_LEVEL and rsi_current >= self.config.RSI_OVERSOLD_LEVEL)
+
+                # OVERRIDE 1: RSI crossed OVERBOUGHT DOWN → SHORT signal (reversal from overbought)
+                if rsi_crossed_ob_down:
+                    if decision != "SELL":
+                        logger.info(f"🔴 RSI REVERSAL: Crossed {self.config.RSI_OVERBOUGHT_LEVEL} down ({rsi_prev:.1f} → {rsi_current:.1f}) - OVERRIDE to SHORT")
+                        decision = "SELL"
+                    else:
+                        logger.info(f"🔴 RSI REVERSAL: Crossed {self.config.RSI_OVERBOUGHT_LEVEL} down ({rsi_prev:.1f} → {rsi_current:.1f}) - Confirming SHORT signal")
+
+                # OVERRIDE 2: RSI crossed OVERSOLD UP → LONG signal (reversal from oversold)
+                elif rsi_crossed_os_up:
+                    if decision != "BUY":
+                        logger.info(f"🟢 RSI REVERSAL: Crossed {self.config.RSI_OVERSOLD_LEVEL} up ({rsi_prev:.1f} → {rsi_current:.1f}) - OVERRIDE to LONG")
+                        decision = "BUY"
+                    else:
+                        logger.info(f"🟢 RSI REVERSAL: Crossed {self.config.RSI_OVERSOLD_LEVEL} up ({rsi_prev:.1f} → {rsi_current:.1f}) - Confirming LONG signal")
+
+                # FILTER 1: Block LONG if RSI high without reversal signal
+                elif decision == "BUY" and rsi_current > self.config.RSI_HIGH_THRESHOLD:
+                    logger.warning(f"⚠️ RSI HIGH FILTER: RSI={rsi_current:.1f} >{self.config.RSI_HIGH_THRESHOLD} without {self.config.RSI_OVERSOLD_LEVEL}-cross - BLOCKING LONG (wait for reversal)")
+                    decision = "HOLD"
+
+                # FILTER 2: Block SHORT if RSI low without reversal signal
+                elif decision == "SELL" and rsi_current < self.config.RSI_LOW_THRESHOLD:
+                    logger.warning(f"⚠️ RSI LOW FILTER: RSI={rsi_current:.1f} <{self.config.RSI_LOW_THRESHOLD} without {self.config.RSI_OVERBOUGHT_LEVEL}-cross - BLOCKING SHORT (wait for reversal)")
+                    decision = "HOLD"
+
+                # Log filter summary
+                if decision != original_decision:
+                    logger.info(f"🔄 RSI Filter Applied: {original_decision} → {decision} (RSI: {rsi_current:.1f})")
+                else:
+                    logger.info(f"✓ RSI Filter: Passed (RSI: {rsi_current:.1f}, no override needed)")
+
+                logger.info(f"🎯 Final Decision (after RSI filter): {decision}")
+            else:
+                logger.info(f"⏭️  RSI Reversal Filter: DISABLED")
 
             # Cache decision data for later use
             self.last_decision_data = {
@@ -2012,47 +2028,32 @@ class TradingBot:
                     decision_data=self.last_decision_data
                 )
 
-                # ========== DCA MODE: Dynamic levels (1-3) based on available qty ==========
+                # ========== DCA MODE: Single ATR-based limit order ==========
                 if self.config.DCA_ENABLED:
-                    # Calculate 3 DCA levels using Hybrid approach
-                    all_dca_levels = self._calculate_dca_levels(decision, current_price, self.last_df)
+                    # Calculate single ATR-based DCA level
+                    dca_levels = self._calculate_dca_levels(decision, current_price, self.last_df)
 
-                    # Validate minimum order quantity & adjust number of levels
+                    # Validate minimum order quantity
                     min_qty = self.adapter.get_min_order_qty(self.config.TICKER)
-
-                    # Try 3 levels first (33% each)
-                    qty_per_level = self.adapter.round_qty(self.config.TICKER, qty / 3.0)
-                    num_levels = 3
+                    qty_per_level = self.adapter.round_qty(self.config.TICKER, qty)
 
                     if qty_per_level < min_qty:
-                        # Try 2 levels (50% each)
-                        qty_per_level = self.adapter.round_qty(self.config.TICKER, qty / 2.0)
-                        num_levels = 2
+                        logger.error(f"Total qty {qty_per_level:.4f} < minOrderQty {min_qty:.4f}")
+                        logger.error("Balance too low for DCA mode. Use regular limit order instead.")
+                        return
 
-                        if qty_per_level < min_qty:
-                            # Try 1 level (100%)
-                            qty_per_level = self.adapter.round_qty(self.config.TICKER, qty)
-                            num_levels = 1
+                    # Single level DCA
+                    num_levels = 1
+                    dca_price = dca_levels[0]
 
-                            if qty_per_level < min_qty:
-                                logger.error(f"Total qty {qty_per_level:.4f} < minOrderQty {min_qty:.4f}")
-                                logger.error("Balance too low for DCA mode. Use regular limit order instead.")
-                                return
+                    logger.info(f"📊 DCA Mode: Single ATR-based limit order")
+                    logger.info(f"   Level: ${dca_price:.4f} ({abs((dca_price/current_price - 1)*100):.2f}%)")
+                    logger.info(f"   Quantity: {qty_per_level:.4f}")
 
-                    # Use only the number of levels we can afford
-                    dca_levels = all_dca_levels[:num_levels]
-
-                    logger.warning(f"💡 DCA adjusted to {num_levels} level(s) (qty per level: {qty_per_level:.4f} >= {min_qty:.4f})")
-
-                    # Log which levels are being used
-                    for idx, price in enumerate(dca_levels, start=1):
-                        logger.info(f"   ✓ Using Level {idx}: {price:.4f} ({abs((price/current_price - 1)*100):.2f}%)")
-
-                    # Calculate SL/TP BEFORE placing orders (needed for Level 1)
-                    # SL will be based on furthest level (worst case)
-                    # TP will be based on average of all levels (assuming all fill)
-                    furthest_level = dca_levels[-1]  # Last level = furthest (sorted: closest to furthest)
-                    expected_avg_entry = sum(dca_levels) / len(dca_levels)
+                    # Calculate SL/TP for DCA level
+                    # SL based on DCA entry price (better than current price)
+                    furthest_level = dca_price  # Single level
+                    expected_avg_entry = dca_price  # Single level
 
                     if decision == "BUY":
                         planned_sl = furthest_level * (1 - self.config.TSL_PCT)
@@ -2061,88 +2062,77 @@ class TradingBot:
                         planned_sl = furthest_level * (1 + self.config.TSL_PCT)
                         planned_tp = expected_avg_entry * (1 - self.config.TP_PCT) if self.config.TP_PCT > 0 else 0
 
-                    logger.warning(f"📋 Placing DCA orders ({num_levels} level(s)): {position_type}")
+                    logger.warning(f"📋 Placing DCA order (ATR-based): {position_type}")
                     logger.warning(f"   Current: {current_price:.4f}")
-                    logger.warning(f"   Qty per level: {qty_per_level:.4f} ({qty_per_level / qty * 100:.1f}%)")
+                    logger.warning(f"   Limit:   {dca_price:.4f} ({abs((dca_price/current_price - 1)*100):.2f}%)")
+                    logger.warning(f"   Qty:     {qty_per_level:.4f}")
                     tp_display = f"{planned_tp:.4f}" if planned_tp > 0 else "OFF"
-                    logger.warning(f"   🛡️  Level 1 will have SL: {planned_sl:.4f} | TP: {tp_display}")
+                    logger.warning(f"   🛡️  SL: {planned_sl:.4f} | TP: {tp_display}")
 
-                    # Place DCA limit orders (1-3 levels depending on balance)
-                    for level_idx, limit_price in enumerate(dca_levels, start=1):
-                        try:
-                            # CRITICAL: Level 1 order includes SL/TP for immediate protection
-                            if level_idx == 1:
-                                resp = self.adapter.limit_open(
-                                    self.config.TICKER, side_str, qty_per_level, limit_price,
-                                    stop_loss=planned_sl,
-                                    take_profit=planned_tp if planned_tp > 0 else None
-                                )
-                            else:
-                                # Levels 2 & 3: No SL/TP (already set by Level 1)
-                                resp = self.adapter.limit_open(self.config.TICKER, side_str, qty_per_level, limit_price)
+                    # Place single ATR-based DCA limit order with SL/TP protection
+                    try:
+                        resp = self.adapter.limit_open(
+                            self.config.TICKER, side_str, qty_per_level, dca_price,
+                            stop_loss=planned_sl,
+                            take_profit=planned_tp if planned_tp > 0 else None
+                        )
 
-                            order_id = (resp.get("result") or {}).get("orderId")
+                        order_id = (resp.get("result") or {}).get("orderId")
 
-                            if not order_id:
-                                logger.error(f"Failed to place DCA level {level_idx} - no orderId returned")
-                                continue
+                        if not order_id:
+                            logger.error("Failed to place DCA order - no orderId returned")
+                            return
 
-                            # Track active limit order
-                            self.active_limit_orders.append({
-                                'order_id': order_id,
-                                'timestamp': time.time(),
-                                'side': position_type,
-                                'price': limit_price,
-                                'qty': qty_per_level,
-                                'decision': decision,
-                                'level': level_idx
-                            })
+                        # Track active limit order
+                        self.active_limit_orders.append({
+                            'order_id': order_id,
+                            'timestamp': time.time(),
+                            'side': position_type,
+                            'price': dca_price,
+                            'qty': qty_per_level,
+                            'decision': decision,
+                            'level': 1  # Single level
+                        })
 
-                            # Log event
-                            self.trade_logger.log_event(f"DCA_LIMIT_ORDER_L{level_idx}_PLACED", {
-                                "order_id": order_id,
-                                "level": level_idx,
-                                "order_type": "LIMIT",
-                                "limit_price": float(limit_price),
-                                "current_price": float(current_price),
-                                "quantity": float(qty_per_level),
-                                "side": position_type,
-                                "max_wait_seconds": self.config.MAX_WAITING_LIMIT_ORDER,
-                                "offset_pct": abs((limit_price / current_price - 1) * 100)
-                            })
+                        # Log event
+                        self.trade_logger.log_event("DCA_LIMIT_ORDER_PLACED", {
+                            "order_id": order_id,
+                            "order_type": "LIMIT",
+                            "limit_price": float(dca_price),
+                            "current_price": float(current_price),
+                            "quantity": float(qty_per_level),
+                            "side": position_type,
+                            "max_wait_seconds": self.config.MAX_WAITING_LIMIT_ORDER,
+                            "offset_pct": abs((dca_price / current_price - 1) * 100),
+                            "atr_multiplier": self.config.DCA_ATR_MULTIPLIER
+                        })
 
-                            logger.info(f"✓ DCA Level {level_idx} order placed: {order_id} @ {limit_price:.4f} ({abs((limit_price/current_price - 1)*100):.2f}%)")
+                        logger.info(f"✓ DCA order placed: {order_id} @ {dca_price:.4f} ({abs((dca_price/current_price - 1)*100):.2f}%)")
 
-                        except Exception as e:
-                            logger.error(f"Failed to place DCA level {level_idx}: {e}")
-
-                    if not self.active_limit_orders:
-                        logger.error("Failed to place any DCA orders")
+                    except Exception as e:
+                        logger.error(f"Failed to place DCA order: {e}")
                         return
 
                     # ========== DCA: Store state for tracking ==========
-                    # SL/TP were already calculated above and embedded in Level 1 order
-                    # Save to state for verification and tracking
+                    # SL/TP embedded in order for immediate protection when filled
                     self.state = {
                         'side': position_type.capitalize(),
                         'dca_mode': True,
-                        'dca_levels': dca_levels,
-                        'dca_furthest_level': furthest_level,
-                        'dca_expected_avg_entry': expected_avg_entry,
+                        'dca_level': dca_price,  # Single level
                         'planned_sl': planned_sl,
                         'planned_tp': planned_tp,
                         'decision': decision,
-                        'sl_tp_embedded': True  # Flag that SL/TP are in Level 1 order
+                        'sl_tp_embedded': True
                     }
                     self._save_state()
 
-                    logger.warning(f"✓ DCA orders placed ({len(self.active_limit_orders)} levels) | Wait max {self.config.MAX_WAITING_LIMIT_ORDER}s")
-                    logger.warning(f"   Expected avg entry: {expected_avg_entry:.4f}")
-                    logger.warning(f"   🛡️  SL/TP protection EMBEDDED in Level 1 order:")
-                    logger.warning(f"      SL: {planned_sl:.4f} (from Level 3: {furthest_level:.4f})")
+                    logger.warning(f"✓ DCA order placed | Wait max {self.config.MAX_WAITING_LIMIT_ORDER}s")
+                    logger.warning(f"   Entry: {dca_price:.4f}")
+                    logger.warning(f"   🛡️  SL/TP protection EMBEDDED in order:")
+                    logger.warning(f"      SL: {planned_sl:.4f}")
                     tp_str = f"{planned_tp:.4f}" if planned_tp > 0 else "OFF"
-                    logger.warning(f"      TP: {tp_str} (from avg: {expected_avg_entry:.4f})")
-                    logger.warning(f"   ⚠️  Position will be PROTECTED immediately when Level 1 fills!")
+                    logger.warning(f"      TP: {tp_str}")
+                    logger.warning(f"   ⚠️  Position will be PROTECTED immediately when order fills!")
                     return  # Exit - will check order status in run_cycle()
 
                 # ========== SINGLE LIMIT ORDER MODE (original logic) ==========
@@ -3007,9 +2997,14 @@ def launch_bot(args):
     config.COOLDOWN_AFTER_LOSS_MINUTES = getattr(args, 'cooldown_after_loss', 30)
     # DCA Mode
     config.DCA_ENABLED = getattr(args, 'dca_mode', False)
-    config.DCA_LEVEL1_PCT = getattr(args, 'dca_level1_pct', 0.003)
-    config.DCA_ATR_MULTIPLIER = getattr(args, 'dca_atr_multiplier', 0.5)
-    config.DCA_MAX_SWING_DISTANCE_PCT = getattr(args, 'dca_max_swing_distance', 1.5)
+    config.DCA_ATR_MULTIPLIER = getattr(args, 'dca_atr_multiplier', 1.5)  # Default 1.5x ATR (historical avg: 1.177%)
+
+    # RSI Reversal Filter
+    config.RSI_REVERSAL_FILTER_ENABLED = not getattr(args, 'no_rsi_reversal_filter', False)
+    config.RSI_HIGH_THRESHOLD = getattr(args, 'rsi_high_threshold', 65.0)
+    config.RSI_LOW_THRESHOLD = getattr(args, 'rsi_low_threshold', 35.0)
+    config.RSI_OVERBOUGHT_LEVEL = getattr(args, 'rsi_overbought_level', 70.0)
+    config.RSI_OVERSOLD_LEVEL = getattr(args, 'rsi_oversold_level', 30.0)
 
     version = getattr(args, 'version', 'v1.0')
 
@@ -3062,10 +3057,8 @@ def launch_bot(args):
             timeout_info += f" ({config.LIMIT_ORDER_CANDLES} candles × {config.TIMEFRAME})"
 
         if config.DCA_ENABLED:
-            print(f"Order Type:        DCA LIMIT (3 levels, timeout: {timeout_info})")
-            print(f"  Level 1 (Fixed): {config.DCA_LEVEL1_PCT*100:.2f}% offset")
-            print(f"  Level 2 (ATR):   {config.DCA_ATR_MULTIPLIER:.2f}x ATR")
-            print(f"  Level 3 (Swing): max {config.DCA_MAX_SWING_DISTANCE_PCT:.2f}% to swing level")
+            print(f"Order Type:        DCA LIMIT (ATR-based, timeout: {timeout_info})")
+            print(f"  Level:           {config.DCA_ATR_MULTIPLIER:.2f}x ATR (~{config.DCA_ATR_MULTIPLIER*0.785:.2f}% avg)")
         else:
             print(f"Order Type:        LIMIT (offset: {config.LIMIT_OFFSET_PCT*100:.2f}%, timeout: {timeout_info})")
     else:
@@ -3073,6 +3066,14 @@ def launch_bot(args):
 
     print(f"Profit Protection: {'ON (BE if profit peaks >0.25% then declines)' if config.PROTECT_PROFIT_ENABLED else 'OFF'}")
     print(f"Cooldown Period:   {config.COOLDOWN_AFTER_LOSS_MINUTES} minutes after ANY closed position (prevents re-entry on same candle)")
+
+    # RSI Reversal Filter info
+    if config.RSI_REVERSAL_FILTER_ENABLED:
+        print(f"RSI Filter:        ON (reversal-based entry)")
+        print(f"  Crossings:       SHORT @ RSI crosses {config.RSI_OVERBOUGHT_LEVEL} down, LONG @ RSI crosses {config.RSI_OVERSOLD_LEVEL} up")
+        print(f"  Blocks:          LONG if RSI >{config.RSI_HIGH_THRESHOLD} w/o 30-cross, SHORT if RSI <{config.RSI_LOW_THRESHOLD} w/o 70-cross")
+    else:
+        print(f"RSI Filter:        OFF")
 
     print(f"")
     print(f"Logs directory:    logs/")
@@ -3132,12 +3133,20 @@ if __name__ == "__main__":
                         help='Minutes to wait before opening new position after ANY closed position (default: 30 = 2x 15m candles, prevents re-entry on same candle)')
     # DCA Mode arguments
     parser.add_argument('--dca-mode', action='store_true',
-                        help='Enable DCA mode: place 3 limit orders at different levels (requires --limit-order)')
-    parser.add_argument('--dca-level1-pct', type=float, default=0.003,
-                        help='DCA Level 1: Fixed percentage offset (default: 0.003 = 0.3%%)')
-    parser.add_argument('--dca-atr-multiplier', type=float, default=0.5,
-                        help='DCA Level 2: ATR multiplier (default: 0.5)')
-    parser.add_argument('--dca-max-swing-distance', type=float, default=1.5,
-                        help='DCA Level 3: Max distance to swing level in %% (default: 1.5%%)')
+                        help='Enable DCA mode: place single ATR-based limit order (requires --limit-order)')
+    parser.add_argument('--dca-atr-multiplier', type=float, default=1.5,
+                        help='DCA ATR multiplier for limit order distance (default: 1.5x = ~1.18%% avg based on historical analysis)')
+
+    # RSI Reversal Filter arguments
+    parser.add_argument('--no-rsi-reversal-filter', action='store_true',
+                        help='Disable RSI reversal filter (enabled by default)')
+    parser.add_argument('--rsi-high-threshold', type=float, default=65.0,
+                        help='Block LONG if RSI above this without 30-cross (default: 65.0)')
+    parser.add_argument('--rsi-low-threshold', type=float, default=35.0,
+                        help='Block SHORT if RSI below this without 70-cross (default: 35.0)')
+    parser.add_argument('--rsi-overbought-level', type=float, default=70.0,
+                        help='RSI overbought level - crossing down triggers SHORT signal (default: 70.0)')
+    parser.add_argument('--rsi-oversold-level', type=float, default=30.0,
+                        help='RSI oversold level - crossing up triggers LONG signal (default: 30.0)')
 
     launch_bot(parser.parse_args())
