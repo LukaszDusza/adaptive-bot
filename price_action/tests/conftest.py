@@ -37,13 +37,13 @@ def sample_ohlcv_df():
     close = base_price + price_changes
 
     df = pd.DataFrame({
-        'timestamp': dates,
         'open': close + np.random.randn(100) * 0.2,
         'high': close + np.abs(np.random.randn(100)) * 0.5,
         'low': close - np.abs(np.random.randn(100)) * 0.5,
         'close': close,
         'volume': np.random.randint(1000, 10000, 100).astype(float),
-    })
+        'turnover': close * np.random.randint(1000, 10000, 100).astype(float)
+    }, index=dates)  # Set DatetimeIndex instead of timestamp column
 
     # Ensure OHLC logic is correct (high >= max(o,c), low <= min(o,c))
     df['high'] = df[['open', 'high', 'close']].max(axis=1)
