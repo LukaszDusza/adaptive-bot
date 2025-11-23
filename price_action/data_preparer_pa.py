@@ -99,6 +99,7 @@ import hashlib  # ENHANCEMENT #2: Persistent disk cache for features
 from pathlib import Path  # ENHANCEMENT #2: Cache directory management
 from feature_config import FEATURE_CONFIG  # ENHANCEMENT #8: Centralized configuration
 from logging_config import setup_logging, get_tqdm_settings  # Centralized logging
+from performance_utils import timer, PerformanceMonitor, fast_rsi, fast_sma, fast_ema  # PHASE 4: Performance optimizations
 
 # Setup logger for this module
 logger = setup_logging(__name__)
@@ -1440,6 +1441,7 @@ def _calculate_sr_context(df: pd.DataFrame) -> dict:
     }
 
 
+@timer  # PHASE 4: Performance monitoring
 def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_LEVEL_FULL):
     """
     Calculate features with granular complexity control.
@@ -3106,6 +3108,7 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
     return base_df, helper_dfs
 
 
+@timer  # PHASE 4: Performance monitoring
 def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timeframes: list = None, side: str = 'long', date_from: str = None, version: str = 'v1.0', model_features_to_preserve: list = None, fetch_max_history: bool = False, skip_slow_features: bool = False, feature_level: str = None, use_feature_feedback: bool = False, feedback_threshold: float = 0.95):
     """
     Fetch and prepare data for ML training.
