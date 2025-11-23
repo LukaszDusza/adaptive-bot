@@ -1918,9 +1918,9 @@ class TradingBot:
                 has_position = position and position.get('size', 0) > 0
                 logger.info(f"Exception recovery: position exists = {has_position}")
                 return has_position
-            except:
+            except (ConnectionError, TimeoutError, KeyError, ValueError) as e:
                 # If we can't even check, safer to assume no position
-                logger.warning("Cannot verify position after exception - assuming no position")
+                logger.warning(f"Cannot verify position after exception ({type(e).__name__}: {e}) - assuming no position")
                 return False
     
     def _open_position(self, decision: str):

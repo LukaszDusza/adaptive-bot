@@ -1345,8 +1345,8 @@ def validate_date_range(backtest_df: pd.DataFrame, training_metadata_path: str, 
         # Parse training end date (handle various formats)
         try:
             training_end = pd.to_datetime(training_end_str)
-        except:
-            logging.warning(f"Could not parse training_end_date: {training_end_str}. Skipping validation.")
+        except (ValueError, TypeError, pd.errors.ParserError) as e:
+            logging.warning(f"Could not parse training_end_date: {training_end_str} ({type(e).__name__}: {e}). Skipping validation.")
             return
 
         # Get backtest start date

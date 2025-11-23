@@ -749,8 +749,8 @@ def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close
             else:
                 logging.warning(f"Unknown timeframe format: {timeframe}, defaulting to 15m")
                 minutes_per_candle = 15
-        except:
-            logging.warning(f"Failed to parse timeframe: {timeframe}, defaulting to 15m")
+        except (ValueError, AttributeError, TypeError) as e:
+            logging.warning(f"Failed to parse timeframe: {timeframe} ({type(e).__name__}: {e}), defaulting to 15m")
             minutes_per_candle = 15
 
         # Calculate candles per year (24/7 trading)
