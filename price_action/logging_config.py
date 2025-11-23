@@ -19,9 +19,57 @@ Usage:
 import logging
 import logging.handlers
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Optional
+
+
+class SensitiveDataFilter(logging.Filter):
+    """
+    Redact sensitive data from logs (API keys, secrets, passwords).
+
+    This filter prevents accidental logging of credentials and API keys
+    which could lead to security breaches if logs are exposed.
+    """
+
+    PATTERNS = [
+        # API keys (20+ uppercase alphanumeric characters)
+        (r'[A-Z0-9]{20,}', '[REDACTED_KEY]'),
+
+        # Secret fields in JSON/dict strings
+        (r'(secret|password|api_key|api_secret)["\']?\s*[:=]\s*["\']?[^"\'\s,}]+', r'\1: [REDACTED]'),
+
+        # Authorization headers
+        (r'(Authorization|X-API-Key):\s*[^\s]+', r'\1: [REDACTED]'),
+
+        # Potential private keys (PEM format)
+        (r'-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----.*?-----END (RSA |EC |DSA )?PRIVATE KEY-----',
+         '[REDACTED_PRIVATE_KEY]'),
+    ]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """
+        Filter log record to redact sensitive data.
+
+        Args:
+            record: Log record to filter
+
+        Returns:
+            True (always pass record, but with sanitized message)
+        """
+        # Get message (force evaluation of lazy formatting)
+        message = record.getMessage()
+
+        # Apply all redaction patterns
+        for pattern, replacement in self.PATTERNS:
+            message = re.sub(pattern, replacement, message, flags=re.IGNORECASE | re.DOTALL)
+
+        # Update record message
+        record.msg = message
+        record.args = ()  # Clear args to prevent re-formatting
+
+        return True
 
 
 class CompactFormatter(logging.Formatter):
@@ -107,6 +155,10 @@ def setup_logging(
     # Use colors in console if running in terminal
     use_colors = sys.stdout.isatty() and os.name != 'nt'  # Colors for Linux/Mac terminals
     console_handler.setFormatter(CompactFormatter(use_colors=use_colors))
+
+    # Add sensitive data filter to console handler
+    console_handler.addFilter(SensitiveDataFilter())
+
     logger.addHandler(console_handler)
 
     # File handler with rotation (optional)
@@ -132,6 +184,10 @@ def setup_logging(
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         file_handler.setFormatter(file_formatter)
+
+        # Add sensitive data filter to file handler
+        file_handler.addFilter(SensitiveDataFilter())
+
         logger.addHandler(file_handler)
 
     # Prevent propagation to root logger (avoid duplicate logs)

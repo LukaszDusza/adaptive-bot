@@ -1,5 +1,7 @@
 import argparse
+import sys
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
 
 def main():
@@ -56,6 +58,69 @@ def main():
                         help='Enable profit protection: move SL to breakeven if profit peaks >0.25%% but declines before hitting partial TP')
 
     args = parser.parse_args()
+
+    # Validate configuration based on mode
+    try:
+        if args.train:
+            from config_validation import TrainingConfigValidated
+            validated_config = TrainingConfigValidated(
+                ticker=args.ticker,
+                timeframe=args.timeframe,
+                helper_timeframes=args.helper_timeframes or [],
+                side=args.side,
+                version=args.version,
+                label_trials=args.label_trials,
+                model_trials=args.model_trials,
+                top_n_features=args.top_n_features,
+                limit=args.limit,
+                date_from=args.date_from,
+                fetch_max_history=args.fetch_max_history
+            )
+        elif args.backtest:
+            from config_validation import BacktestConfigValidated
+            validated_config = BacktestConfigValidated(
+                ticker=args.ticker,
+                timeframe=args.timeframe,
+                helper_timeframes=args.helper_timeframes or [],
+                version=args.version,
+                probability_threshold=args.prob_threshold,
+                min_confidence_ratio=args.min_confidence_ratio,
+                tp_pct=args.tp_pct,
+                tsl_pct=args.tsl_pct,
+                trade_size_usd=args.trade_size,
+                leverage=args.leverage,
+                partial_tp_enabled=args.partial_tp,
+                dynamic_tp_enabled=args.dynamic_tp,
+                limit=args.limit
+            )
+        elif args.run_bot:
+            from config_validation import BotConfigValidated
+            validated_config = BotConfigValidated(
+                ticker=args.ticker,
+                timeframe=args.timeframe,
+                helper_timeframes=args.helper_timeframes or [],
+                trade_size_usd=args.trade_size,
+                leverage=args.leverage,
+                tp_pct=args.tp_pct,
+                tsl_pct=args.tsl_pct,
+                probability_threshold=args.prob_threshold,
+                min_confidence_ratio=args.min_confidence_ratio,
+                partial_tp_enabled=args.partial_tp,
+                dynamic_tp_enabled=args.dynamic_tp,
+                hedge_mode=args.hedge_mode,
+                limit_order_mode=args.limit_order,
+                max_waiting_limit_order=args.max_waiting_limit_order,
+                limit_offset_pct=args.limit_offset_pct,
+                protect_profit_enabled=args.protect_profit
+            )
+    except ValidationError as e:
+        print("\n❌ BŁĄD KONFIGURACJI - Nieprawidłowe parametry:\n")
+        for error in e.errors():
+            field = ' → '.join(str(loc) for loc in error['loc'])
+            msg = error['msg']
+            print(f"  • {field}: {msg}")
+        print("\n")
+        sys.exit(1)
 
     if args.train:
 

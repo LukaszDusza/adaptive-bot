@@ -87,6 +87,19 @@ class BotConfig:
     RSI_OVERBOUGHT_LEVEL: float = 70.0  # RSI level for overbought (crossing down = SHORT signal)
     RSI_OVERSOLD_LEVEL: float = 30.0   # RSI level for oversold (crossing up = LONG signal)
 
+    def __repr__(self):
+        """
+        Safe representation without exposing sensitive data.
+
+        SECURITY: This method intentionally excludes API keys, secrets, and
+        any other sensitive configuration that should not appear in logs.
+        """
+        return (
+            f"BotConfig(ticker={self.TICKER}, timeframe={self.TIMEFRAME}, "
+            f"leverage={self.LEVERAGE}, trade_size={self.TRADE_SIZE_USD}, "
+            f"tp={self.TP_PCT}, tsl={self.TSL_PCT}, threshold={self.PROBABILITY_THRESHOLD})"
+        )
+
 
 class TradingBot:
     """Trading bot with advanced logging"""
