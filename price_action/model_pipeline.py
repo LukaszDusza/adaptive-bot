@@ -19,6 +19,19 @@ from scipy.stats import ks_2samp
 # CRITICAL FIX #1: Import from data_preparer instead of duplicating (removes 113 lines)
 from data_preparer_pa import remove_correlated_features
 
+# PHASE 1 IMPROVEMENTS: Profit-aware optimization + Adaptive labels
+# CRITICAL FIX: Uses forward simulation without look-ahead bias
+from profit_aware_optimizer import (
+    profit_aware_objective_score,
+    find_optimal_threshold_for_profit,
+    evaluate_on_holdout,
+    simulate_trades_forward
+)
+from adaptive_labels import (
+    get_adaptive_triple_barrier_labels,
+    analyze_barrier_distribution
+)
+
 import logging
 import sys
 from pathlib import Path
@@ -947,7 +960,9 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
 
 def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_model_trials: int, ticker: str,
                           timeframe: str, helper_timeframes: list = None, side: str = 'long', version: str = 'v1.0',
-                          min_recall_target: float = 0.55, top_n_features: int = None):
+                          min_recall_target: float = 0.55, top_n_features: int = None,
+                          use_adaptive_labels: bool = True, use_profit_aware_threshold: bool = True,
+                          live_tp_pct: float = 0.03, live_sl_pct: float = 0.01, live_fee_pct: float = 0.0006):
     strategy_id = _get_strategy_id(ticker, timeframe, helper_timeframes, side)
 
     version_dir = os.path.join("models", version, strategy_id)
@@ -1068,8 +1083,9 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         trial.set_user_attr("label_distribution", actual_dist.to_dict())
 
         scores = []
-        # OPTYMALIZACJA: Zredukowano z 6 do 3 splits (2x szybciej)
-        for fold_idx, (train_index, val_index) in enumerate(walk_forward_split(X, n_splits=3, test_size=0.15)):
+        # FIX #4: Increased from 3 to 5 splits for better validation robustness
+        # (Prevents overfitting to specific period, especially important with rolling window)
+        for fold_idx, (train_index, val_index) in enumerate(walk_forward_split(X, n_splits=5, test_size=0.15)):
             X_train, X_val, y_train, y_val = X.iloc[train_index], X.iloc[val_index], y.iloc[train_index], y.iloc[val_index]
             if y_train.nunique() < 3:
                 continue
@@ -1101,9 +1117,21 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         if not scores:
             return 0.0
 
-        # FIX #4: Return base_score directly (no balance penalty multiplier)
-        final_score = np.mean(scores)
-        trial.set_user_attr("f1_score", final_score)
+        # Calculate base score
+        base_score = np.mean(scores)
+
+        # FIX #4 (NEW): Add regularization penalty for extreme barrier values
+        # Penalize very tight barriers (< 0.8%) or very wide barriers (> 3.5%)
+        # This prevents overfitting to extreme parameter values
+        regularization_penalty = 1.0
+        if barrier_size < 0.008 or barrier_size > 0.035:
+            regularization_penalty = 0.85  # 15% penalty for extreme values
+
+        # Apply penalty
+        final_score = base_score * regularization_penalty
+
+        trial.set_user_attr("f1_score", base_score)
+        trial.set_user_attr("regularization_penalty", regularization_penalty)
         return final_score
 
     logging.info("\n--- ETAP 1: Rozpoczynanie optymalizacji parametrów etykiet ---")
@@ -1168,8 +1196,38 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     logging.info(f"  Stop Loss: {sl*100:.2f}%")
     logging.info(f"  Time Limit: {best_label_params['time_limit']} candles")
     logging.info(f"  Expected 50% win rate on random walk (unbiased)")
-    final_labels = get_triple_barrier_labels(df_features['close'], df_features.index, pt, sl,
-                                             best_label_params['time_limit'])
+
+    # PHASE 1 IMPROVEMENT #3: Adaptive labels (if enabled)
+    if use_adaptive_labels:
+        logging.info(f"\n🔥 PHASE 1 IMPROVEMENT #3: Using ADAPTIVE barriers (ATR-based)")
+        final_labels = get_adaptive_triple_barrier_labels(
+            df=df_features,
+            t_events=df_features.index,
+            base_barrier_pct=pt,
+            atr_multiplier=1.5,
+            base_time_limit=best_label_params['time_limit'],
+            min_barrier_pct=0.005,
+            max_barrier_pct=0.05,
+            verbose=True
+        )
+
+        # Analyze barrier distribution
+        logging.info("\n📊 Analyzing adaptive barrier distribution...")
+        barrier_analysis = analyze_barrier_distribution(
+            df_features,
+            final_labels,
+            base_barrier_pct=pt,
+            atr_multiplier=1.5
+        )
+
+        # Save barrier analysis
+        barrier_analysis_path = os.path.join(version_dir, "adaptive_barrier_analysis.csv")
+        barrier_analysis.to_csv(barrier_analysis_path)
+        logging.info(f"💾 Barrier analysis saved to: {barrier_analysis_path}")
+    else:
+        logging.info(f"\n⚠️  Using STATIC barriers (legacy mode)")
+        final_labels = get_triple_barrier_labels(df_features['close'], df_features.index, pt, sl,
+                                                 best_label_params['time_limit'])
 
     logging.info(f"\n--- Przygotowywanie binarnego zestawu danych dla modelu '{side.upper()}' ---")
     X_full_multi = train_val_df.copy()
@@ -1351,40 +1409,79 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     pd.concat([drift_calib_df, drift_holdout_df]).to_csv(drift_report_path, index=False)
     logging.info(f"💾 Drift report saved to: {drift_report_path}")
     # ============================================================================
-    # FIX #5: Threshold tuning on CALIBRATION set (not holdout!)
+    # FIX #5 + PHASE 1 IMPROVEMENT #1: Threshold tuning on CALIBRATION set
     # ============================================================================
     logging.info("\n--- ANALIZA PROGÓW DECYZYJNYCH (Threshold Tuning na CALIBRATION) ---")
-    logging.info(f"POPRAWKA #4 & #6: Threshold optimization - target {min_recall_target*100:.0f}% recall")
     logging.info("FIX #5: Using CALIBRATION set (never seen by model during training)")
-    precisions, recalls, thresholds = precision_recall_curve(y_calib, calib_probas[:, 1])
 
-    # POPRAWKA #6: Parametryzowany min_recall (domyślnie 0.55, było hardcoded)
-    min_recall = min_recall_target
-    valid_indices = np.where(recalls[:-1] >= min_recall)[0]
+    # PHASE 1 IMPROVEMENT #1: Profit-aware threshold tuning (if enabled)
+    if use_profit_aware_threshold:
+        logging.info(f"\n🔥 PHASE 1 IMPROVEMENT #1: Using PROFIT-AWARE threshold optimization")
 
-    if len(valid_indices) > 0:
-        best_idx = valid_indices[np.argmax(precisions[valid_indices])]
-        optimal_threshold = thresholds[best_idx]
-        optimal_precision = precisions[best_idx]
-        optimal_recall = recalls[best_idx]
+        # Get calibration prices for trade simulation
+        calib_prices = df_features.loc[X_calib.index, 'close']
+
+        # Find optimal threshold for profit (not accuracy!)
+        # CRITICAL FIX: Uses forward simulation (no look-ahead bias)
+        # FIX #1: Use same TP/SL as live bot (configurable)
+        # FIX #5: Pass max_holding_period from label params
+        optimal_threshold, profit_metrics = find_optimal_threshold_for_profit(
+            model=final_model,
+            X_calib=X_calib,
+            prices=calib_prices,
+            side=side,  # 'long' or 'short'
+            tp_pct=live_tp_pct,  # FIXED: From config (matches live bot)
+            sl_pct=live_sl_pct,  # FIXED: From config (matches live bot)
+            fee_pct=live_fee_pct,  # FIXED: From config (matches live bot)
+            threshold_range=(0.30, 0.85),
+            threshold_step=0.01,
+            min_trades=10,
+            max_holding_period=best_label_params['time_limit']  # FIX #5: Match label params
+        )
+
+        # Save profit metrics
+        profit_metrics_path = os.path.join(version_dir, "profit_aware_threshold_metrics.json")
+        with open(profit_metrics_path, 'w') as f:
+            # Convert numpy types to native Python for JSON serialization
+            metrics_serializable = {k: float(v) if isinstance(v, (np.floating, np.integer)) else v
+                                   for k, v in profit_metrics.items()}
+            json.dump(metrics_serializable, f, indent=2)
+        logging.info(f"💾 Profit metrics saved to: {profit_metrics_path}")
+
     else:
-        best_idx = np.argmax(recalls[:-1])
-        optimal_threshold = thresholds[best_idx]
-        optimal_precision = precisions[best_idx]
-        optimal_recall = recalls[best_idx]
+        # LEGACY: Traditional accuracy-based threshold tuning
+        logging.info(f"\n⚠️  Using LEGACY threshold optimization (recall-focused)")
+        logging.info(f"POPRAWKA #4 & #6: Threshold optimization - target {min_recall_target*100:.0f}% recall")
 
-    default_idx = np.argmin(np.abs(thresholds - 0.5))
-    default_precision = precisions[default_idx]
-    default_recall = recalls[default_idx]
+        precisions, recalls, thresholds = precision_recall_curve(y_calib, calib_probas[:, 1])
 
-    logging.info(f"Próg domyślny (0.5):")
-    logging.info(f"  Precision: {default_precision:.3f}, Recall: {default_recall:.3f}, F1: {2 * default_precision * default_recall / (default_precision + default_recall + 1e-8):.3f}")
-    logging.info(f"\nPróg optymalny ({optimal_threshold:.3f}) dla recall >= {min_recall}:")
-    logging.info(f"  Precision: {optimal_precision:.3f}, Recall: {optimal_recall:.3f}, F1: {2 * optimal_precision * optimal_recall / (optimal_precision + optimal_recall + 1e-8):.3f}")
-    if optimal_recall >= min_recall:
-        logging.info(f"✓ Osiągnięto minimalny recall {min_recall}")
-    else:
-        logging.warning(f"⚠ Nie udało się osiągnąć recall >= {min_recall}. Najlepszy recall: {optimal_recall:.3f}")
+        # POPRAWKA #6: Parametryzowany min_recall (domyślnie 0.55, było hardcoded)
+        min_recall = min_recall_target
+        valid_indices = np.where(recalls[:-1] >= min_recall)[0]
+
+        if len(valid_indices) > 0:
+            best_idx = valid_indices[np.argmax(precisions[valid_indices])]
+            optimal_threshold = thresholds[best_idx]
+            optimal_precision = precisions[best_idx]
+            optimal_recall = recalls[best_idx]
+        else:
+            best_idx = np.argmax(recalls[:-1])
+            optimal_threshold = thresholds[best_idx]
+            optimal_precision = precisions[best_idx]
+            optimal_recall = recalls[best_idx]
+
+        default_idx = np.argmin(np.abs(thresholds - 0.5))
+        default_precision = precisions[default_idx]
+        default_recall = recalls[default_idx]
+
+        logging.info(f"Próg domyślny (0.5):")
+        logging.info(f"  Precision: {default_precision:.3f}, Recall: {default_recall:.3f}, F1: {2 * default_precision * default_recall / (default_precision + default_recall + 1e-8):.3f}")
+        logging.info(f"\nPróg optymalny ({optimal_threshold:.3f}) dla recall >= {min_recall}:")
+        logging.info(f"  Precision: {optimal_precision:.3f}, Recall: {optimal_recall:.3f}, F1: {2 * optimal_precision * optimal_recall / (optimal_precision + optimal_recall + 1e-8):.3f}")
+        if optimal_recall >= min_recall:
+            logging.info(f"✓ Osiągnięto minimalny recall {min_recall}")
+        else:
+            logging.warning(f"⚠ Nie udało się osiągnąć recall >= {min_recall}. Najlepszy recall: {optimal_recall:.3f}")
     # ============================================================================
     # POPRAWKA #1: Heurystyczna rekomendacja dla min_confidence_ratio
     # ============================================================================

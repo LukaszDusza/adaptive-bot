@@ -96,7 +96,9 @@ class BacktestEngine:
                  timeframe: str = '15m',
                  suppress_limit_logs: bool = False,
                  cooldown_minutes: int = 30,
-                 warmup_candles: int = 200):
+                 warmup_candles: int = 200,
+                 enable_dca: bool = False,
+                 dca_atr_multiplier: float = 1.5):
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
         self.maker_fee = maker_fee
@@ -109,6 +111,10 @@ class BacktestEngine:
         self.limit_offset_pct = limit_offset_pct
         self.timeframe = timeframe
         self.suppress_limit_logs = suppress_limit_logs
+
+        # DCA mode settings
+        self.enable_dca = enable_dca
+        self.dca_atr_multiplier = dca_atr_multiplier
 
         # Cooldown settings (matches live bot behavior)
         self.cooldown_minutes = cooldown_minutes
@@ -468,21 +474,40 @@ class BacktestEngine:
 
     def place_limit_order(self, candle: pd.Series, candle_index: int, side: str,
                          probability: float, risk_pct: float, tp_pct: float, sl_pct: float):
-        """Place a limit order (like bot.py)"""
+        """Place a limit order (matches bot.py - supports both regular and DCA mode)"""
         if self.pending_limit_order or self.position:
             return
 
         current_price = candle['close']  # Use close price for reference
         position_size = self.current_capital * risk_pct
 
-        # Calculate limit price with offset (matches bot.py logic)
-        if side == 'Long':
-            # LONG: Buy cheaper (limit below current price)
-            limit_price = current_price * (1 - self.limit_offset_pct)
-        else:
-            # SHORT: Sell higher (limit above current price)
-            limit_price = current_price * (1 + self.limit_offset_pct)
+        # Calculate limit price based on mode
+        if self.enable_dca:
+            # DCA MODE: Use ATR-based level
+            decision = "BUY" if side == 'Long' else "SELL"
+            dca_levels = self._calculate_dca_levels(decision, current_price, candle)
+            limit_price = dca_levels[0]  # Single level
 
+            if not self.suppress_limit_logs:
+                offset_pct = abs((limit_price / current_price - 1) * 100)
+                logging.info(f"📋 DCA LIMIT ORDER PLACED: {side} @ {limit_price:.4f} | "
+                            f"Current: {current_price:.4f} | ATR-based: {offset_pct:.2f}% | "
+                            f"Max wait: {self.limit_order_candles} candles")
+        else:
+            # REGULAR LIMIT ORDER: Use fixed offset
+            if side == 'Long':
+                # LONG: Buy cheaper (limit below current price)
+                limit_price = current_price * (1 - self.limit_offset_pct)
+            else:
+                # SHORT: Sell higher (limit above current price)
+                limit_price = current_price * (1 + self.limit_offset_pct)
+
+            if not self.suppress_limit_logs:
+                logging.info(f"📋 LIMIT ORDER PLACED: {side} @ {limit_price:.4f} | "
+                            f"Current: {current_price:.4f} | Offset: {self.limit_offset_pct*100:.2f}% | "
+                            f"Max wait: {self.limit_order_candles} candles")
+
+        # Create pending limit order
         self.pending_limit_order = PendingLimitOrder(
             side=side,
             limit_price=limit_price,
@@ -493,11 +518,6 @@ class BacktestEngine:
             tp_pct=tp_pct,
             sl_pct=sl_pct
         )
-
-        if not self.suppress_limit_logs:
-            logging.info(f"📋 LIMIT ORDER PLACED: {side} @ {limit_price:.4f} | "
-                        f"Current: {current_price:.4f} | Offset: {self.limit_offset_pct*100:.2f}% | "
-                        f"Max wait: {self.limit_order_candles} candles")
 
     def check_limit_order_fill(self, candle: pd.Series, candle_index: int) -> bool:
         """
@@ -599,6 +619,55 @@ class BacktestEngine:
         # Clear pending order
         self.pending_limit_order = None
 
+    def _calculate_dca_levels(self, decision: str, current_price: float, candle: pd.Series) -> list:
+        """
+        Calculate single ATR-based DCA limit order level (matches bot.py logic).
+
+        Based on historical analysis (Nov 2025):
+        - Average ATR: 0.785%
+        - Recommended multiplier: 1.5x
+        - Average distance: 1.177%
+
+        Returns list with 1 price: [dca_level]
+        """
+        # Get ATR from candle
+        atr = candle.get('atr_14', None)
+
+        # Calculate ATR-based DCA level
+        if atr and atr > 0:
+            atr_distance = atr * self.dca_atr_multiplier
+
+            if decision == "BUY":
+                dca_level = current_price - atr_distance
+            else:  # SELL
+                dca_level = current_price + atr_distance
+
+            distance_pct = (atr_distance / current_price) * 100
+
+            if not self.suppress_limit_logs:
+                logging.info(f"📊 DCA Level calculated for {decision}:")
+                logging.info(f"   Current price: ${current_price:.4f}")
+                logging.info(f"   ATR (14):      ${atr:.6f}")
+                logging.info(f"   Multiplier:    {self.dca_atr_multiplier}x")
+                logging.info(f"   Distance:      ${atr_distance:.6f} ({distance_pct:.3f}%)")
+                logging.info(f"   DCA Level:     ${dca_level:.4f}")
+
+            return [dca_level]
+        else:
+            # Fallback if ATR not available: use fixed 1.2% offset
+            fallback_pct = 0.012  # 1.2% (close to 1.177% average)
+
+            if decision == "BUY":
+                dca_level = current_price * (1 - fallback_pct)
+            else:
+                dca_level = current_price * (1 + fallback_pct)
+
+            if not self.suppress_limit_logs:
+                logging.warning(f"⚠️  ATR not available, using fallback {fallback_pct*100:.1f}% offset")
+                logging.info(f"   DCA Level: ${dca_level:.4f}")
+
+            return [dca_level]
+
     def open_position(self, candle: pd.Series, side: str, probability: float,
                      risk_pct: float, tp_pct: float, sl_pct: float):
         """Open new position (uses close price to match live bot market order execution)"""
@@ -685,7 +754,10 @@ class BacktestEngine:
 
         # Log limit order mode if enabled
         if self.enable_limit_order:
-            logging.info(f"Limit Order Mode ENABLED: offset={self.limit_offset_pct*100:.2f}%, max_wait={self.limit_order_candles} candles")
+            if self.enable_dca:
+                logging.info(f"DCA Mode ENABLED: ATR-based (multiplier={self.dca_atr_multiplier}x, ~{self.dca_atr_multiplier*0.785:.2f}% avg), max_wait={self.limit_order_candles} candles")
+            else:
+                logging.info(f"Limit Order Mode ENABLED: offset={self.limit_offset_pct*100:.2f}%, max_wait={self.limit_order_candles} candles")
 
         # Apply warmup period (skip first N candles for indicator stability)
         start_index = max(1, self.warmup_candles)
@@ -1367,7 +1439,9 @@ def main(args):
         limit_offset_pct=getattr(args, 'limit_offset_pct', 0.005),
         timeframe=args.timeframe,
         cooldown_minutes=getattr(args, 'cooldown_minutes', 30),  # Matches live bot default
-        warmup_candles=getattr(args, 'warmup_candles', 200)  # Skip first N candles for indicator stability
+        warmup_candles=getattr(args, 'warmup_candles', 200),  # Skip first N candles for indicator stability
+        enable_dca=getattr(args, 'dca_mode', False),  # DCA mode (matches bot.py)
+        dca_atr_multiplier=getattr(args, 'dca_atr_multiplier', 1.5)  # ATR multiplier for DCA (matches bot.py)
     )
     
     results = engine.run(
@@ -1481,6 +1555,11 @@ if __name__ == "__main__":
                         help='Maximum candles to wait for limit order fill before cancelling')
     parser.add_argument('--limit-offset-pct', type=float, default=0.005,
                         help='Limit order price offset percentage (default 0.5%%)')
+    # DCA Mode arguments (matches bot.py)
+    parser.add_argument('--dca-mode', action='store_true',
+                        help='Enable DCA mode: place single ATR-based limit order (requires --limit-order)')
+    parser.add_argument('--dca-atr-multiplier', type=float, default=1.5,
+                        help='DCA ATR multiplier for limit order distance (default: 1.5x = ~1.18%% avg based on historical analysis)')
     parser.add_argument('--cooldown-minutes', type=int, default=30,
                         help='Minutes to wait after position close before allowing new entry (default: 30, matches live bot)')
     parser.add_argument('--warmup-candles', type=int, default=200,
