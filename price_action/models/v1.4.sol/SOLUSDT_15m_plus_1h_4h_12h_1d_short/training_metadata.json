@@ -1,0 +1,55 @@
+{
+  "version": "v1.4.sol",
+  "ticker": "SOLUSDT",
+  "timeframe": "15m",
+  "helper_timeframes": [
+    "1h",
+    "4h",
+    "12h",
+    "1d"
+  ],
+  "side": "short",
+  "n_label_trials": 50,
+  "n_model_trials": 50,
+  "best_label_params": {
+    "barrier_size": 0.016010863065280552,
+    "time_limit": 23
+  },
+  "best_model_params": {
+    "n_estimators": 748,
+    "learning_rate": 0.04402986840637099,
+    "reg_alpha": 56.392904642039525,
+    "reg_lambda": 22.880809129017887,
+    "num_leaves": 29,
+    "colsample_bytree": 0.6180228398335489,
+    "subsample": 0.8210712927627747,
+    "subsample_freq": 5,
+    "min_child_samples": 270
+  },
+  "optimal_threshold": 0.33450420665467856,
+  "recommended_min_confidence_ratio": 1.17,
+  "n_features_selected": 86,
+  "n_features_total": 242,
+  "n_samples_train": 11784,
+  "n_samples_calibration": 1446,
+  "n_samples_holdout": 1503,
+  "pipeline_version": "v2.1",
+  "fixes_applied": [
+    "FIX #1: Symmetric barriers (PT=SL) - eliminates positive bias",
+    "FIX #2: Removed SMOTE - use class_weight='balanced'",
+    "FIX #3: Added 2% gap to walk-forward CV - prevents data leakage",
+    "FIX #4: Removed balance penalty - natural label distribution",
+    "FIX #5: 3-way split (train/calib/holdout) - proper threshold tuning"
+  ],
+  "enhancements_v2.1": [
+    "POPRAWKA #1: Heuristic min_confidence_ratio recommendation",
+    "POPRAWKA #2: CV-based feature selection (5 folds)",
+    "POPRAWKA #4: Pruning after fold 1 (was fold 0)",
+    "POPRAWKA #5: Early stopping for final model",
+    "POPRAWKA #6: Parametrized min_recall_target",
+    "POPRAWKA #7: Gap size respects feature lookback (min 200)",
+    "POPRAWKA #8: Expanded hyperparameter ranges",
+    "POPRAWKA #9: Feature drift monitoring (KS test)",
+    "POPRAWKA #10: Fine-grained threshold search (21 values)"
+  ]
+}

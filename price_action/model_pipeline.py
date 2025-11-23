@@ -7,9 +7,8 @@ import os
 import json
 import gc  # ENHANCEMENT #2: Explicit garbage collection
 import warnings
-from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import classification_report, f1_score, fbeta_score, precision_recall_curve, precision_score, recall_score
+from sklearn.metrics import classification_report, f1_score, precision_recall_curve, precision_score, recall_score
 from numba import njit
 # FIX #2: SMOTE removed - LightGBM's class_weight='balanced' is superior for trading
 from typing import Tuple, List
@@ -19,14 +18,8 @@ from scipy.stats import ks_2samp
 # CRITICAL FIX #1: Import from data_preparer instead of duplicating (removes 113 lines)
 from data_preparer_pa import remove_correlated_features
 
-# PHASE 1 IMPROVEMENTS: Profit-aware optimization + Adaptive labels
-# CRITICAL FIX: Uses forward simulation without look-ahead bias
-from profit_aware_optimizer import (
-    profit_aware_objective_score,
-    find_optimal_threshold_for_profit,
-    evaluate_on_holdout,
-    simulate_trades_forward
-)
+# PHASE 1 IMPROVEMENTS: Adaptive labels
+from profit_aware_optimizer import find_optimal_threshold_for_profit
 from adaptive_labels import (
     get_adaptive_triple_barrier_labels,
     analyze_barrier_distribution

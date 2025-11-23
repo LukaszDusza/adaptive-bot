@@ -86,7 +86,6 @@ import numpy as np
 import pandas_ta as ta
 from dotenv import load_dotenv
 from bybit_adapter import BybitAdapter
-import asyncio
 from scipy.signal import find_peaks
 import json
 from typing import Tuple, List
@@ -99,7 +98,7 @@ import hashlib  # ENHANCEMENT #2: Persistent disk cache for features
 from pathlib import Path  # ENHANCEMENT #2: Cache directory management
 from feature_config import FEATURE_CONFIG  # ENHANCEMENT #8: Centralized configuration
 from logging_config import setup_logging, get_tqdm_settings  # Centralized logging
-from performance_utils import timer, PerformanceMonitor, fast_rsi, fast_sma, fast_ema  # PHASE 4: Performance optimizations
+from performance_utils import timer  # PHASE 4: Performance monitoring
 
 # Setup logger for this module
 logger = setup_logging(__name__)

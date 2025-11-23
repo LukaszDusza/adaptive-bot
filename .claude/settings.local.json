@@ -88,7 +88,13 @@
       "Bash(docker system prune:*)",
       "Bash(xargs:*)",
       "Bash(npm run build:*)",
-      "Bash(sed:*)"
+      "Bash(sed:*)",
+      "Bash(tee:*)",
+      "Bash(backtest_v1.4_nov1-9.log)",
+      "Bash(backtest_v1.4_nov1-9_fixed.log)",
+      "Bash(/tmp/test_output.txt)",
+      "Bash(pytest:*)",
+      "Bash(vulture:*)"
     ],
     "deny": [],
     "ask": []

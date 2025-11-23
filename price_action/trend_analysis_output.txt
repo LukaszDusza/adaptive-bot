@@ -1,0 +1,192 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║        TREND DIRECTION ANALYSIS - ARE LOSSES COUNTER-TREND?               ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+📊 Analyzing 20 worst losses from Thursday Nov 7
+
+================================================================================
+🔍 TREND ANALYSIS - SMA 200 DIRECTION
+================================================================================
+
+❌ LINKUSDT BUY @ 18:45
+   Entry: $15.5865 | P&L: $-1.90
+   Close: $16.0870 | SMA 200: $14.9956
+   Distance from SMA: +7.28%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ BRETTUSDT SELL @ 10:50
+   Entry: $0.0208 | P&L: $-1.59
+   Close: $0.0245 | SMA 200: $0.0221
+   Distance from SMA: +11.11%
+   Market Trend: UPTREND (bullish)
+   ⚠️  COUNTER-TREND TRADE!
+      Opened SHORT in UPTREND (price above SMA 200)
+
+❌ PONKEUSDT BUY @ 18:09
+   Entry: $0.0541 | P&L: $-1.56
+   Close: $0.0579 | SMA 200: $0.0497
+   Distance from SMA: +16.46%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ DOGEUSDT BUY @ 15:49
+   Entry: $0.1703 | P&L: $-1.54
+   Close: $0.1805 | SMA 200: $0.1657
+   Distance from SMA: +8.92%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ ONDOUSDT BUY @ 15:49
+   Entry: $0.6360 | P&L: $-1.51
+   Close: $0.6749 | SMA 200: $0.6128
+   Distance from SMA: +10.14%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ WIFUSDT BUY @ 16:21
+   Entry: $0.4644 | P&L: $-1.48
+   Close: $0.4898 | SMA 200: $0.4388
+   Distance from SMA: +11.63%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ ETHUSDT SELL @ 10:03
+   Entry: $3283.3534 | P&L: $-1.45
+   Close: $3444.3700 | SMA 200: $3355.2730
+   Distance from SMA: +2.66%
+   Market Trend: UPTREND (bullish)
+   ⚠️  COUNTER-TREND TRADE!
+      Opened SHORT in UPTREND (price above SMA 200)
+
+❌ DOGEUSDT BUY @ 17:11
+   Entry: $0.1768 | P&L: $-1.25
+   Close: $0.1805 | SMA 200: $0.1657
+   Distance from SMA: +8.92%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ BRETTUSDT SELL @ 09:47
+   Entry: $0.0214 | P&L: $-1.24
+   Close: $0.0245 | SMA 200: $0.0221
+   Distance from SMA: +11.11%
+   Market Trend: UPTREND (bullish)
+   ⚠️  COUNTER-TREND TRADE!
+      Opened SHORT in UPTREND (price above SMA 200)
+
+❌ 1000PEPEUSDT BUY @ 16:52
+   Entry: $0.0060 | P&L: $-1.24
+   Close: $0.0063 | SMA 200: $0.0057
+   Distance from SMA: +10.04%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ XRPUSDT BUY @ 16:53
+   Entry: $2.2958 | P&L: $-1.23
+   Close: $2.3290 | SMA 200: $2.2680
+   Distance from SMA: +2.69%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ PONKEUSDT BUY @ 01:55
+   Entry: $0.0489 | P&L: $-1.14
+   Close: $0.0579 | SMA 200: $0.0497
+   Distance from SMA: +16.46%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ BRETTUSDT BUY @ 01:57
+   Entry: $0.0218 | P&L: $-1.12
+   Close: $0.0245 | SMA 200: $0.0221
+   Distance from SMA: +11.11%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ ETHUSDT BUY @ 16:28
+   Entry: $3328.9900 | P&L: $-1.09
+   Close: $3444.3700 | SMA 200: $3355.2730
+   Distance from SMA: +2.66%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ WIFUSDT BUY @ 17:13
+   Entry: $0.4781 | P&L: $-1.09
+   Close: $0.4898 | SMA 200: $0.4388
+   Distance from SMA: +11.63%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ ONDOUSDT BUY @ 16:52
+   Entry: $0.6591 | P&L: $-1.08
+   Close: $0.6749 | SMA 200: $0.6128
+   Distance from SMA: +10.14%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ PONKEUSDT SELL @ 07:53
+   Entry: $0.0497 | P&L: $-1.08
+   Close: $0.0579 | SMA 200: $0.0497
+   Distance from SMA: +16.46%
+   Market Trend: UPTREND (bullish)
+   ⚠️  COUNTER-TREND TRADE!
+      Opened SHORT in UPTREND (price above SMA 200)
+
+❌ WIFUSDT BUY @ 15:17
+   Entry: $0.4479 | P&L: $-1.08
+   Close: $0.4898 | SMA 200: $0.4388
+   Distance from SMA: +11.63%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ HBARUSDT BUY @ 16:55
+   Entry: $0.1746 | P&L: $-1.06
+   Close: $0.1792 | SMA 200: $0.1690
+   Distance from SMA: +6.05%
+   Market Trend: UPTREND (bullish)
+   ✅ WITH-TREND TRADE
+
+❌ WIFUSDT SELL @ 10:49
+   Entry: $0.4358 | P&L: $-1.06
+   Close: $0.4898 | SMA 200: $0.4388
+   Distance from SMA: +11.63%
+   Market Trend: UPTREND (bullish)
+   ⚠️  COUNTER-TREND TRADE!
+      Opened SHORT in UPTREND (price above SMA 200)
+
+================================================================================
+📊 SUMMARY
+================================================================================
+
+📈 TREND ALIGNMENT:
+   Total Trades Analyzed: 20
+   ❌ Counter-Trend Trades: 5 (25.0%)
+   ✅ With-Trend Trades: 15 (75.0%)
+
+💰 P&L BY TREND DIRECTION:
+   Counter-Trend P&L: $-6.41
+   With-Trend P&L: $-19.39
+   Avg Counter-Trend Loss: $-1.28
+   Avg With-Trend P&L: $-1.29
+
+📊 BREAKDOWN BY SIDE:
+
+   LONG trades:
+      Total: 15
+      Counter-Trend (price < SMA 200): 0 (0.0%)
+      Counter-Trend P&L: $0.00
+
+   SHORT trades:
+      Total: 5
+      Counter-Trend (price > SMA 200): 5 (100.0%)
+      Counter-Trend P&L: $-6.41
+
+================================================================================
+💡 KEY INSIGHT
+================================================================================
+
+✅ GOOD: Tylko 25.0% tradów przeciwko trendowi
+   Problem leży gdzie indziej
+
+💾 Results saved to: trend_analysis_thursday.csv
+
+✓ Analysis complete!

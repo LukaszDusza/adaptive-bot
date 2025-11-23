@@ -19,10 +19,10 @@ import logging
 import json
 import numpy as np
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 from dotenv import load_dotenv
 
-from bybit_adapter import BybitAdapter, BybitAPIError
+from bybit_adapter import BybitAdapter
 from data_preparer_pa import fetch_and_prepare_data
 from trade_logger import TradeLogger
 from prediction_logger import PredictionLogger
@@ -30,7 +30,7 @@ from feature_cache import FeatureCache
 from trade_metrics import TradeMetricsCalculator
 
 # Logging setup with rotation and compact formatting
-from logging_config import setup_logging, get_bot_logger
+from logging_config import setup_logging
 
 # Setup logger for bot module
 logger = setup_logging('bot', enable_file_logging=True)
@@ -60,7 +60,6 @@ class BotConfig:
     LIMIT_OFFSET_PCT: float = 0.005  # Price offset for limit orders (0.5% default)
     PROTECT_PROFIT_ENABLED: bool = False  # Enable profit protection: move SL to BE if profit peaks >0.25% but declines
     COOLDOWN_AFTER_LOSS_MINUTES: int = 30  # Minutes to wait before opening new position after ANY closed position (30min = 2x 15m candles, prevents re-entry on same candle)
-    MAX_RETRIES: int = 3
     RETRY_DELAY: int = 3
     # DCA (Dollar Cost Averaging) Mode - Single ATR-based limit order
     # Based on historical analysis (Nov 2025): Avg ATR = 0.785%, 1.5x multiplier = 1.177% distance
@@ -68,11 +67,8 @@ class BotConfig:
     DCA_ATR_MULTIPLIER: float = 1.5  # ATR-based distance (ATR * 1.5 = ~1.18% avg, recommended)
     # FIX #5: Magic numbers moved to config
     FEE_PCT: float = 0.0006  # 0.06% round-trip fees (maker+taker conservative estimate)
-    PROFIT_PROTECTION_THRESHOLD: float = 0.0025  # 0.25% - minimum profit to activate protection
-    PROFIT_PROTECTION_TRIGGER: float = 0.0025  # 0.25% - if profit drops to this, move SL to BE
     API_RETRY_INITIAL_SLEEP: float = 0.5  # Initial sleep for API retries (exponential backoff)
     API_RETRY_MAX_ATTEMPTS: int = 5  # Max retry attempts for API calls
-    POSITION_UPDATE_SLEEP: float = 2.0  # Sleep after order execution before checking position
 
     # ICT Context Mode - Dynamic threshold adjustment based on Smart Money signals
     ICT_CONTEXT_MODE: bool = False  # Enable ICT context-aware decision making (OPCJA 3)
@@ -219,40 +215,6 @@ class TradingBot:
                 logger.warning(f"Retry {attempt + 1}/{max_attempts} for {func.__name__} after {sleep_time:.2f}s: {e}")
                 time.sleep(sleep_time)
 
-        return None
-
-    def _wait_for_position_update(self, expected_change: str = None, max_attempts: int = None) -> Optional[Dict]:
-        """
-        Wait for Bybit to update position info with exponential backoff.
-
-        FIX #9: Replaces hardcoded time.sleep(2) with intelligent retry.
-
-        Args:
-            expected_change: Description of expected change (for logging)
-            max_attempts: Max retry attempts (default: from config)
-
-        Returns:
-            Position dict or None if not found after max attempts
-        """
-        if max_attempts is None:
-            max_attempts = self.config.API_RETRY_MAX_ATTEMPTS
-
-        change_msg = f" (expecting: {expected_change})" if expected_change else ""
-        logger.debug(f"Waiting for position update{change_msg}...")
-
-        for attempt in range(max_attempts):
-            sleep_time = self.config.API_RETRY_INITIAL_SLEEP * (1.5 ** attempt)
-            time.sleep(sleep_time)
-
-            try:
-                position = self.adapter.get_position(self.config.TICKER)
-                if position:
-                    logger.debug(f"Position found after {attempt + 1} attempt(s)")
-                    return position
-            except Exception as e:
-                logger.warning(f"Position check attempt {attempt + 1}/{max_attempts} failed: {e}")
-
-        logger.warning(f"Position not found after {max_attempts} attempts{change_msg}")
         return None
 
     def _init_adapter(self):
@@ -561,96 +523,6 @@ class TradingBot:
                     value = value.item()
                 indicators[feat] = float(value) if value is not None else None
         return indicators
-
-    def _find_nearest_swing_low(self, df, current_price: float, max_distance_pct: float = 1.5) -> Optional[float]:
-        """
-        Find nearest swing low below current price within max_distance_pct.
-
-        Swing low = local minimum where low[i] < low[i-1] AND low[i] < low[i+1]
-        """
-        try:
-            if df is None or len(df) < 5:
-                return None
-
-            # Use closed candles only (exclude last forming candle)
-            df_closed = df.iloc[:-1]
-
-            # Look back last 50 candles for swing lows
-            lookback = min(50, len(df_closed) - 2)
-            swing_lows = []
-
-            for i in range(len(df_closed) - lookback, len(df_closed) - 1):
-                if i <= 0:
-                    continue
-
-                # Check if this is a swing low (local minimum)
-                if df_closed.iloc[i]['low'] < df_closed.iloc[i-1]['low'] and \
-                   df_closed.iloc[i]['low'] < df_closed.iloc[i+1]['low']:
-                    swing_low_price = df_closed.iloc[i]['low']
-
-                    # Only consider swing lows below current price
-                    if swing_low_price < current_price:
-                        distance_pct = abs((current_price - swing_low_price) / current_price) * 100
-
-                        # Within max distance
-                        if distance_pct <= max_distance_pct:
-                            swing_lows.append((swing_low_price, distance_pct))
-
-            # Return nearest swing low (smallest distance)
-            if swing_lows:
-                swing_lows.sort(key=lambda x: x[1])  # Sort by distance
-                return swing_lows[0][0]
-
-            return None
-
-        except Exception as e:
-            logger.error(f"Error finding swing low: {e}")
-            return None
-
-    def _find_nearest_swing_high(self, df, current_price: float, max_distance_pct: float = 1.5) -> Optional[float]:
-        """
-        Find nearest swing high above current price within max_distance_pct.
-
-        Swing high = local maximum where high[i] > high[i-1] AND high[i] > high[i+1]
-        """
-        try:
-            if df is None or len(df) < 5:
-                return None
-
-            # Use closed candles only (exclude last forming candle)
-            df_closed = df.iloc[:-1]
-
-            # Look back last 50 candles for swing highs
-            lookback = min(50, len(df_closed) - 2)
-            swing_highs = []
-
-            for i in range(len(df_closed) - lookback, len(df_closed) - 1):
-                if i <= 0:
-                    continue
-
-                # Check if this is a swing high (local maximum)
-                if df_closed.iloc[i]['high'] > df_closed.iloc[i-1]['high'] and \
-                   df_closed.iloc[i]['high'] > df_closed.iloc[i+1]['high']:
-                    swing_high_price = df_closed.iloc[i]['high']
-
-                    # Only consider swing highs above current price
-                    if swing_high_price > current_price:
-                        distance_pct = abs((swing_high_price - current_price) / current_price) * 100
-
-                        # Within max distance
-                        if distance_pct <= max_distance_pct:
-                            swing_highs.append((swing_high_price, distance_pct))
-
-            # Return nearest swing high (smallest distance)
-            if swing_highs:
-                swing_highs.sort(key=lambda x: x[1])  # Sort by distance
-                return swing_highs[0][0]
-
-            return None
-
-        except Exception as e:
-            logger.error(f"Error finding swing high: {e}")
-            return None
 
     def _calculate_dca_levels(self, decision: str, current_price: float, df=None) -> list:
         """
