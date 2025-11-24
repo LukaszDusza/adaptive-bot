@@ -92,26 +92,18 @@ from typing import Tuple, List
 import logging
 import sys
 from tqdm import tqdm
-import gc  # ENHANCEMENT #3: Explicit garbage collection for memory management
-from concurrent.futures import ThreadPoolExecutor, as_completed  # ENHANCEMENT #1: Parallel API calls
-import hashlib  # ENHANCEMENT #2: Persistent disk cache for features
-from pathlib import Path  # ENHANCEMENT #2: Cache directory management
-from feature_config import FEATURE_CONFIG  # ENHANCEMENT #8: Centralized configuration
-from logging_config import setup_logging, get_tqdm_settings  # Centralized logging
-from performance_utils import timer  # PHASE 4: Performance monitoring
+import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
+from pathlib import Path
+from feature_config import FEATURE_CONFIG
+from logging_config import setup_logging, get_tqdm_settings
+from performance_utils import timer
 
-# Setup logger for this module
 logger = setup_logging(__name__)
-from logging.handlers import RotatingFileHandler  # ETAP 2.1: File logging
+from logging.handlers import RotatingFileHandler
 
-# ============================================================================
-# LOGGING: Using centralized logging_config module (imported above)
-# ============================================================================
-# Old setup_logging() function removed - now using logging_config.setup_logging()
 
-# ============================================================================
-# ENHANCEMENT #9: FEATURE IMPORTANCE FEEDBACK LOOP
-# ============================================================================
 
 def _load_feature_importance_rankings(ticker: str, timeframe: str, helper_timeframes: list,
                                      side: str, version: str) -> pd.DataFrame:
@@ -173,7 +165,6 @@ def get_weak_features_to_skip(ticker: str, timeframe: str, helper_timeframes: li
     if rankings_df.empty:
         return []
 
-    # Features beyond cumulative threshold are weak
     weak_features = rankings_df[rankings_df['cumulative_importance'] > cumulative_threshold]['feature'].tolist()
 
     if weak_features:
@@ -183,18 +174,13 @@ def get_weak_features_to_skip(ticker: str, timeframe: str, helper_timeframes: li
 
     return weak_features
 
-# ============================================================================
-# ENHANCEMENT #7: FEATURE LEVEL CONTROL
-# ============================================================================
 
-# Feature complexity levels for granular control
-FEATURE_LEVEL_BASIC = 'basic'       # Tier 0-1: OHLCV + basic TA (fastest, ~50 features)
-FEATURE_LEVEL_STANDARD = 'standard' # Tier 0-2: + advanced PA, NO ICT (medium, ~150 features)
-FEATURE_LEVEL_FULL = 'full'         # All tiers: + ICT + patterns (complete, ~300 features)
+FEATURE_LEVEL_BASIC = 'basic'
+FEATURE_LEVEL_STANDARD = 'standard'
+FEATURE_LEVEL_FULL = 'full'
 
 VALID_FEATURE_LEVELS = [FEATURE_LEVEL_BASIC, FEATURE_LEVEL_STANDARD, FEATURE_LEVEL_FULL]
 
-# Mapping dla backwards compatibility z skip_slow_features flag
 def _resolve_feature_level(feature_level: str = None, skip_slow_features: bool = False) -> str:
     """
     Resolve feature level from new parameter or legacy flag.
@@ -212,16 +198,12 @@ def _resolve_feature_level(feature_level: str = None, skip_slow_features: bool =
             )
         return feature_level
 
-    # Legacy flag handling
     if skip_slow_features:
         return FEATURE_LEVEL_STANDARD
 
     return FEATURE_LEVEL_FULL
 
 
-# ============================================================================
-# NOWE FUNKCJE: Wskaźniki kompozytowe i usuwanie korelacji
-# ============================================================================
 
 def _compute_autocorr_rolling_optimized(series: pd.Series, window: int = 20) -> pd.Series:
     """
@@ -246,15 +228,12 @@ def _compute_autocorr_rolling_optimized(series: pd.Series, window: int = 20) -> 
     result = np.zeros(n)
     result[:] = np.nan
 
-    # Create sliding window view (zero-copy, just pointer manipulation)
     if n < window:
         return pd.Series(result, index=series.index)
 
     windows = sliding_window_view(arr, window_shape=window)
 
-    # Compute lag-1 autocorr for all windows
     for i, window_data in enumerate(windows):
-        # Remove NaN
         valid = window_data[~np.isnan(window_data)]
 
         if len(valid) < 2:
@@ -279,15 +258,11 @@ def add_oversold_overbought_signal(df: pd.DataFrame) -> pd.DataFrame:
      0: Neutral (RSI między 30 a 70)
      1: Oversold (RSI < 30, potencjalny odbicie w górę)
     """
-    # Inicjalizuj jako 0 (neutral) dla wszystkich wierszy
     signal = pd.Series(0, index=df.index, dtype=np.int8)
     
     if 'rsi_14' in df.columns:
-        # Oversold: RSI < 30 -> bullish signal (potencjalny buy)
         signal[df['rsi_14'] < 30] = 1
-        # Overbought: RSI > 70 -> bearish signal (potencjalny sell)
         signal[df['rsi_14'] > 70] = -1
-        # Wszystkie pozostałe (30 <= RSI <= 70) pozostają jako 0 (neutral)
     
     df['oversold_overbought_signal'] = signal
     return df
@@ -308,26 +283,22 @@ def add_market_state_indicator(df: pd.DataFrame) -> pd.DataFrame:
     """
     msi = pd.Series(0, index=df.index)
     
-    # RSI component
     rsi_signal = pd.Series(0, index=df.index)
     if 'rsi_14' in df.columns:
-        rsi_signal[df['rsi_14'] < 30] = -2  # oversold
-        rsi_signal[df['rsi_14'] < 20] = -3  # extreme oversold
-        rsi_signal[df['rsi_14'] > 70] = 2   # overbought
-        rsi_signal[df['rsi_14'] > 80] = 3   # extreme overbought
+        rsi_signal[df['rsi_14'] < 30] = -2
+        rsi_signal[df['rsi_14'] < 20] = -3
+        rsi_signal[df['rsi_14'] > 70] = 2
+        rsi_signal[df['rsi_14'] > 80] = 3
     
-    # Trend component (using SMAs if available)
     trend_signal = pd.Series(0, index=df.index)
     if 'above_sma_20' in df.columns and 'above_sma_50' in df.columns:
-        trend_signal = (df['above_sma_20'] + df['above_sma_50']) - 1  # -1, 0, or 1
+        trend_signal = (df['above_sma_20'] + df['above_sma_50']) - 1
     
-    # Volume component
     volume_signal = pd.Series(0, index=df.index)
     if 'volume_vs_ma_20' in df.columns:
-        volume_signal[df['volume_vs_ma_20'] > 1.5] = 1  # high volume
-        volume_signal[df['volume_vs_ma_20'] < 0.7] = -1  # low volume
+        volume_signal[df['volume_vs_ma_20'] > 1.5] = 1
+        volume_signal[df['volume_vs_ma_20'] < 0.7] = -1
     
-    # Composite MSI
     msi = rsi_signal + trend_signal + volume_signal
     msi = msi.clip(-3, 3)
     
@@ -346,19 +317,15 @@ def add_momentum_regime(df: pd.DataFrame) -> pd.DataFrame:
     """
     momentum_score = pd.Series(0, index=df.index)
     
-    # Short-term momentum
     if 'price_change_pct_5' in df.columns:
         momentum_score += np.sign(df['price_change_pct_5'])
     
-    # Medium-term momentum
     if 'roc_10' in df.columns:
         momentum_score += np.sign(df['roc_10'])
     
-    # RSI momentum direction
     if 'rsi_14' in df.columns:
         momentum_score += np.sign(df['rsi_14'] - 50)
     
-    # Normalize to [-1, 0, 1]
     momentum_regime = pd.Series(0, index=df.index)
     momentum_regime[momentum_score <= -2] = -1
     momentum_regime[momentum_score >= 2] = 1
@@ -378,18 +345,15 @@ def add_volume_confirmation_score(df: pd.DataFrame) -> pd.DataFrame:
     """
     vcs = pd.Series(0, index=df.index)
     
-    # Price direction
     price_up = (df['close'] > df['open']).astype(int)
     price_down = (df['close'] < df['open']).astype(int)
     
-    # High volume condition
     high_volume = False
     if 'volume_vs_ma_20' in df.columns:
         high_volume = (df['volume_vs_ma_20'] > 1.2)
     
-    # Confirmation logic
-    vcs[(price_up == 1) & high_volume] = 1   # Bullish with volume
-    vcs[(price_down == 1) & high_volume] = -1  # Bearish with volume
+    vcs[(price_up == 1) & high_volume] = 1
+    vcs[(price_down == 1) & high_volume] = -1
     
     df['volume_confirmation_score'] = vcs
     return df
@@ -408,20 +372,16 @@ def add_multi_factor_sentiment(df: pd.DataFrame) -> pd.DataFrame:
     """
     sentiment = pd.Series(0.0, index=df.index)
     
-    # RSI component
     if 'rsi_14' in df.columns:
-        rsi_score = (df['rsi_14'] - 50) / 50  # Normalize to [-1, 1]
+        rsi_score = (df['rsi_14'] - 50) / 50
         sentiment += rsi_score
     
-    # Momentum component
     if 'momentum_regime' in df.columns:
         sentiment += df['momentum_regime']
     
-    # Volume component
     if 'volume_confirmation_score' in df.columns:
         sentiment += df['volume_confirmation_score']
     
-    # Trend component
     if 'above_sma_20' in df.columns and 'above_sma_50' in df.columns:
         trend_score = (df['above_sma_20'] + df['above_sma_50']) - 1
         sentiment += trend_score
@@ -451,54 +411,43 @@ def remove_correlated_features(df: pd.DataFrame,
     logger.info(f"{'='*60}")
     logger.info(f"Próg korelacji: {correlation_threshold}")
     logger.info(f"Początkowa liczba cech: {df.shape[1]}")
-    # Domyślna lista ważnych cech
     if keep_important is None:
         keep_important = [
-            # Podstawowe wskaźniki (klasyczne)
             'rsi_14', 'volume_vs_ma_20', 'dist_from_vwap', 'atr_normalized',
             
-            # Wskaźniki kompozytowe (już istniejące)
             'market_state_indicator', 'momentum_regime', 'volume_confirmation_score',
             'multi_factor_sentiment', 'oversold_overbought_signal',
             
-            # ====================================================================
-            # ICT & SMART MONEY - NAJWYŻSZY PRIORYTET (nowe)
-            # ====================================================================
-            'ict_composite_score',           # Master ICT score - KLUCZOWA CECHA
-            'fvg_signal',                    # Fair Value Gaps
-            'fvg_size',                      # Wielkość FVG
-            'liquidity_sweep',               # Liquidity Sweeps - bardzo ważne
-            'liquidity_sweep_strength',      # Siła sweep
-            'order_block',                   # Order Blocks - gdzie smart money
-            'order_block_strength',          # Siła OB
-            'breaker_block',                 # Breaker Blocks
-            'market_structure_shift',        # MSS - Change of Character
-            'market_structure_direction',    # Kierunek struktury
-            'institutional_candle',          # Świece instytucjonalne
-            'institutional_candle_strength', # Siła inst. candle
+            'ict_composite_score',
+            'fvg_signal',
+            'fvg_size',
+            'liquidity_sweep',
+            'liquidity_sweep_strength',
+            'order_block',
+            'order_block_strength',
+            'breaker_block',
+            'market_structure_shift',
+            'market_structure_direction',
+            'institutional_candle',
+            'institutional_candle_strength',
             
-            # Smart Money Context Features (kombinacje)
-            'ob_with_fvg',                   # OB + FVG = silny sygnał
-            'high_conviction_sweep',         # Sweep + volume
-            'structure_aligned_ob',          # OB aligned z trendem
-            'fvg_sweep_confluence',          # FVG zone + sweep reversal
+            'ob_with_fvg',
+            'high_conviction_sweep',
+            'structure_aligned_ob',
+            'fvg_sweep_confluence',
         ]
     
-    # Cechy numeryczne (bez targetu)
     cols_to_analyze = df.select_dtypes(include=[np.number]).columns.tolist()
     if target_col and target_col in cols_to_analyze:
         cols_to_analyze.remove(target_col)
     
-    # Macierz korelacji
     logger.info(f"Obliczanie macierzy korelacji dla {len(cols_to_analyze)} cech...")
     corr_matrix = df[cols_to_analyze].corr().abs()
     
-    # Górny trójkąt
     upper_triangle = corr_matrix.where(
         np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
     )
     
-    # Znajdź pary o wysokiej korelacji
     to_drop = set()
     high_corr_pairs = []
     
@@ -515,17 +464,13 @@ def remove_correlated_features(df: pd.DataFrame,
                     'correlation': upper_triangle.loc[corr_feature, column]
                 })
                 
-                # Decyzja którą cechę usunąć
-                # PRIORITY 1: Never drop features in keep_important
                 if column in keep_important and corr_feature in keep_important:
-                    # Both are important - keep both (don't add either to drop list)
                     continue
                 elif column in keep_important and corr_feature not in keep_important:
                     to_drop.add(corr_feature)
                 elif corr_feature in keep_important and column not in keep_important:
                     to_drop.add(column)
                 else:
-                    # Neither is important - drop the one with lower variance
                     var_col = df[column].var()
                     var_corr = df[corr_feature].var()
                     if var_col < var_corr:
@@ -533,7 +478,6 @@ def remove_correlated_features(df: pd.DataFrame,
                     else:
                         to_drop.add(corr_feature)
     
-    # Raport
     logger.info(f"\nZnaleziono {len(high_corr_pairs)} par cech o korelacji > {correlation_threshold}")
     if high_corr_pairs:
         logger.info("\nTop 10 najwyższych korelacji:")
@@ -548,7 +492,6 @@ def remove_correlated_features(df: pd.DataFrame,
             logger.info(f"  - {feature}")
         if len(to_drop_list) > 20:
             logger.info(f"  ... i {len(to_drop_list) - 20} więcej")
-    # Usuń
     df_cleaned = df.drop(columns=to_drop_list, errors='ignore')
     
     logger.info(f"\nKońcowa liczba cech: {df_cleaned.shape[1]}")
@@ -557,9 +500,6 @@ def remove_correlated_features(df: pd.DataFrame,
     return df_cleaned, to_drop_list
 
 
-# ============================================================================
-# ICT & SMART MONEY CONCEPTS
-# ============================================================================
 
 def detect_fair_value_gaps(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -571,16 +511,12 @@ def detect_fair_value_gaps(df: pd.DataFrame) -> pd.DataFrame:
     Te gap'y często działają jak magnesy - cena wraca aby je wypełnić.
     Smart Money używa ich jako entry zones.
     """
-    # Bullish FVG: obecny low > high sprzed 2 świec (zwróć boolean Series!)
     fvg_bullish = (df['low'] > df['high'].shift(2))
     
-    # Bearish FVG: obecny high < low sprzed 2 świec (zwróć boolean Series!)
     fvg_bearish = (df['high'] < df['low'].shift(2))
     
-    # Signal: 1 = bullish FVG, -1 = bearish FVG, 0 = brak
     df['fvg_signal'] = fvg_bullish.astype(int) - fvg_bearish.astype(int)
     
-    # Rozmiar gap'u (znormalizowany przez cenę)
     df['fvg_size'] = np.where(
         fvg_bullish, 
         (df['low'] - df['high'].shift(2)) / df['close'],
@@ -591,25 +527,12 @@ def detect_fair_value_gaps(df: pd.DataFrame) -> pd.DataFrame:
         )
     )
     
-    # FIX LOOK-AHEAD BIAS: Sprawdzamy czy istnieje NIEZAPEŁNIONY FVG z przeszłości
-    # Zamiast patrzeć w przyszłość, patrzymy wstecz: czy FVG z przeszłości nadal jest aktywny?
     df['fvg_filled'] = 0
-    for i in range(1, 6):  # sprawdź FVG z ostatnich 5 świec
-        # Bullish FVG (z przeszłości) jest wypełniony jeśli obecna cena spadła do jego poziomu
-        # fvg_bullish.shift(i) = czy i świec temu był bullish FVG
-        # df['high'].shift(i+2) = górna granica tego FVG (high sprzed i+2 świec w tamtym momencie)
-        # Wypełniony = df['low'] (obecny) <= df['high'].shift(i+2).shift(i) (górna granica FVG)
-        # WAIT - to nadal jest look-ahead! Muszę inaczej.
+    for i in range(1, 6):
 
-        # CORRECT APPROACH: Czy FVG który był i świec temu został wypełniony OD TAMTEJ PORY?
-        # Bullish FVG z pozycji i był wypełniony jeśli w międzyczasie cena spadła
-        # ale to wymaga patrzenia w przód od momentu FVG...
 
-        # FINAL FIX: Usuwamy tę feature całkowicie jako problematyczną
-        # Zamiast tego: czy w ostatnich N świecach BYŁ FVG (binary feature)
         pass
 
-    # NEW FEATURE (no look-ahead): Czy w ostatnich N świecach wystąpił FVG?
     df['recent_fvg_bullish'] = fvg_bullish.rolling(5).max().fillna(0).astype(int)
     df['recent_fvg_bearish'] = fvg_bearish.rolling(5).max().fillna(0).astype(int)
     df.drop(columns=['fvg_filled'], inplace=True, errors='ignore')
@@ -627,31 +550,23 @@ def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 20) -> pd.DataFram
     Bullish Sweep: cena bierze recent low + natychmiastowy reversal w górę
     Bearish Sweep: cena bierze recent high + natychmiastowy reversal w dół
     """
-    # Znajdź recent extreme levels
     recent_high = df['high'].rolling(lookback).max()
     recent_low = df['low'].rolling(lookback).min()
     
-    # Bullish Liquidity Sweep: 
-    # - cena bierze recent low (sweep stop lossów)
-    # - świeca zamyka się wyżej (reversal)
     sweep_low = (
-        (df['low'] <= recent_low.shift(1)) &  # zbiera płynność
-        (df['close'] > df['open']) &           # bullish reversal candle
-        (df['close'] > recent_low.shift(1))    # zamyka powyżej swept level
+        (df['low'] <= recent_low.shift(1)) &
+        (df['close'] > df['open']) &
+        (df['close'] > recent_low.shift(1))
     )
     
-    # Bearish Liquidity Sweep:
-    # - cena bierze recent high (sweep stop lossów)
-    # - świeca zamyka się niżej (reversal)
     sweep_high = (
-        (df['high'] >= recent_high.shift(1)) &  # zbiera płynność
-        (df['close'] < df['open']) &             # bearish reversal candle
-        (df['close'] < recent_high.shift(1))     # zamyka poniżej swept level
+        (df['high'] >= recent_high.shift(1)) &
+        (df['close'] < df['open']) &
+        (df['close'] < recent_high.shift(1))
     )
     
     df['liquidity_sweep'] = sweep_low.astype(int) - sweep_high.astype(int)
     
-    # Siła sweep'u - jak daleko cena poszła poza level
     df['liquidity_sweep_strength'] = np.where(
         sweep_low,
         (recent_low.shift(1) - df['low']) / df['close'],
@@ -662,7 +577,6 @@ def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 20) -> pd.DataFram
         )
     )
     
-    # Czy sweep miał wysokie volume (bardziej wiarygodny)
     if 'volume_vs_ma_20' in df.columns:
         df['liquidity_sweep_with_volume'] = (
             (df['liquidity_sweep'] != 0) & 
@@ -682,39 +596,31 @@ def detect_order_blocks(df: pd.DataFrame, impulse_threshold: float = 0.015) -> p
     Bullish OB: ostatnia bearish świeca przed silnym ruchem w górę
     Bearish OB: ostatnia bullish świeca przed silnym ruchem w dół
     """
-    # Wykryj silne impulsy (>1.5% w 3 świece)
     price_change_3 = df['close'].pct_change(3)
     bullish_impulse = (price_change_3 > impulse_threshold)
     bearish_impulse = (price_change_3 < -impulse_threshold)
     
-    # Sprawdź czy poprzednia świeca była przeciwna
     bearish_candle = (df['close'] < df['open'])
     bullish_candle = (df['close'] > df['open'])
     
-    # Bullish Order Block: bearish świeca przed bullish impulsem
     bullish_ob = bullish_impulse & bearish_candle.shift(1)
     
-    # Bearish Order Block: bullish świeca przed bearish impulsem
     bearish_ob = bearish_impulse & bullish_candle.shift(1)
     
     df['order_block'] = bullish_ob.astype(int) - bearish_ob.astype(int)
     
-    # Siła Order Block = wielkość impulsu
     df['order_block_strength'] = np.where(
         bullish_ob,
         price_change_3,
         np.where(bearish_ob, -price_change_3, 0)
     )
     
-    # Dystans do Order Block (jak daleko jesteśmy od ostatniego OB)
     last_bullish_ob_price = df['close'].where(bullish_ob).ffill()
     last_bearish_ob_price = df['close'].where(bearish_ob).ffill()
 
-    # Jeśli brak order blocks w oknie danych, fillna(0) oznacza "brak OB w historii"
     df['dist_from_bullish_ob'] = ((df['close'] - last_bullish_ob_price) / df['close']).fillna(0.0)
     df['dist_from_bearish_ob'] = ((df['close'] - last_bearish_ob_price) / df['close']).fillna(0.0)
     
-    # Czy testujemy Order Block (w zasięgu ±0.5%)
     df['testing_bullish_ob'] = (df['dist_from_bullish_ob'].abs() < 0.005).astype(int)
     df['testing_bearish_ob'] = (df['dist_from_bearish_ob'].abs() < 0.005).astype(int)
     
@@ -730,26 +636,22 @@ def detect_breaker_blocks(df: pd.DataFrame) -> pd.DataFrame:
     
     To sign of "Change of Character" - zmiana struktury rynku.
     """
-    # Wykryj czy poprzedni support został przebity
     support_level = df['low'].rolling(10).min()
     support_broken = (
-        (df['low'].shift(3) == support_level.shift(3)) &  # był support
-        (df['close'] < support_level.shift(3)) &           # został przebity w dół
-        (df['close'].shift(1) >= support_level.shift(3))   # dopiero co przebiliśmy
+        (df['low'].shift(3) == support_level.shift(3)) &
+        (df['close'] < support_level.shift(3)) &
+        (df['close'].shift(1) >= support_level.shift(3))
     )
     
-    # Wykryj czy poprzedni resistance został przebity
     resistance_level = df['high'].rolling(10).max()
     resistance_broken = (
-        (df['high'].shift(3) == resistance_level.shift(3)) &  # był resistance
-        (df['close'] > resistance_level.shift(3)) &            # został przebity w górę
-        (df['close'].shift(1) <= resistance_level.shift(3))    # dopiero co przebiliśmy
+        (df['high'].shift(3) == resistance_level.shift(3)) &
+        (df['close'] > resistance_level.shift(3)) &
+        (df['close'].shift(1) <= resistance_level.shift(3))
     )
     
-    # Breaker signal: 1 = bullish break, -1 = bearish break
     df['breaker_block'] = resistance_broken.astype(int) - support_broken.astype(int)
     
-    # Siła breakout (jak daleko poszliśmy poza level)
     df['breaker_strength'] = np.where(
         resistance_broken,
         (df['close'] - resistance_level.shift(3)) / df['close'],
@@ -773,33 +675,24 @@ def detect_market_structure_shift(df: pd.DataFrame, swing_period: int = 10) -> p
     
     MSS występuje gdy ta struktura zostaje złamana.
     """
-    # FIX LOOK-AHEAD BIAS: Usunięcie center=True (patrzenie w przyszłość)
-    # Zamiast tego używamy tylko danych historycznych
-    # Swing High = highest high w ostatnich swing_period świecach
     highs_window = df['high'].rolling(window=swing_period, center=False).max()
     is_swing_high = (df['high'] == highs_window)
 
-    # Swing Low = lowest low w ostatnich swing_period świecach
     lows_window = df['low'].rolling(window=swing_period, center=False).min()
     is_swing_low = (df['low'] == lows_window)
     
-    # Track ostatniego swing high/low
     last_swing_high = df['high'].where(is_swing_high).ffill()
     last_swing_low = df['low'].where(is_swing_low).ffill()
     
-    # Bullish MSS: przebiliśmy ostatni swing high (breaking resistance)
     bullish_mss = (df['close'] > last_swing_high.shift(1)) & (last_swing_high.shift(1).notna())
     
-    # Bearish MSS: przebiliśmy ostatni swing low (breaking support)
     bearish_mss = (df['close'] < last_swing_low.shift(1)) & (last_swing_low.shift(1).notna())
     
     df['market_structure_shift'] = bullish_mss.astype(int) - bearish_mss.astype(int)
     
-    # Jak dawno był ostatni MSS (0 = właśnie teraz, rośnie z czasem)
     mss_occurred = (df['market_structure_shift'] != 0)
     df['bars_since_mss'] = (~mss_occurred).cumsum() - (~mss_occurred).cumsum().where(~mss_occurred).ffill().fillna(0)
     
-    # Kierunek obecnej struktury (1 = uptrend, -1 = downtrend, 0 = neutral)
     df['market_structure_direction'] = df['market_structure_shift'].replace(0, np.nan).ffill().fillna(0)
     
     return df
@@ -816,22 +709,17 @@ def detect_institutional_candles(df: pd.DataFrame) -> pd.DataFrame:
     2. Volume > 1.5x średnia (wysokie zainteresowanie)
     3. Close w górnej/dolnej części range (pokazuje dominację)
     """
-    # Wielkość świecy vs średnia
     candle_range = df['high'] - df['low']
     avg_range = candle_range.rolling(50).mean()
     large_range = (candle_range > avg_range * 2)
     
-    # Wysoki volume
     high_volume = (df['volume'] > df['volume'].rolling(50).mean() * 1.5)
     
-    # Pozycja close w range świecy
     close_position = (df['close'] - df['low']) / (candle_range + 1e-8)
     
-    # Bullish institutional: duża świeca, high vol, close w górnych 30%
     close_in_upper = (close_position > 0.7)
     bullish_institutional = (large_range & high_volume & close_in_upper)
     
-    # Bearish institutional: duża świeca, high vol, close w dolnych 30%
     close_in_lower = (close_position < 0.3)
     bearish_institutional = (large_range & high_volume & close_in_lower)
     
@@ -839,7 +727,6 @@ def detect_institutional_candles(df: pd.DataFrame) -> pd.DataFrame:
         bullish_institutional.astype(int) - bearish_institutional.astype(int)
     )
     
-    # Siła świecy instytucjonalnej
     df['institutional_candle_strength'] = np.where(
         bullish_institutional | bearish_institutional,
         (candle_range / avg_range) * (df['volume'] / df['volume'].rolling(50).mean()),
@@ -858,17 +745,13 @@ def detect_liquidity_voids(df: pd.DataFrame, volume_threshold: float = 0.5) -> p
     
     Retail lubi handlować w tych obszarach, Smart Money ich unika.
     """
-    # Nisko-wolumenowe świece (< 50% średniej)
     avg_volume = df['volume'].rolling(50).mean()
     low_volume = (df['volume'] < avg_volume * volume_threshold)
     
-    # Zlicz ile ostatnich świec miało niski volume
     df['liquidity_void_depth'] = low_volume.astype(int).rolling(5).sum()
     
-    # Czy jesteśmy w strefie liquidity void (3+ świece z niskim volume)
     df['in_liquidity_void'] = (df['liquidity_void_depth'] >= 3).astype(int)
     
-    # Siła void (jak niskie było volume)
     df['liquidity_void_strength'] = np.where(
         low_volume,
         1 - (df['volume'] / avg_volume),
@@ -899,21 +782,17 @@ def _calculate_bars_since_event_vectorized(event_occurred: pd.Series, cap: int =
     event_indices = np.where(event_occurred)[0]
 
     if len(event_indices) == 0:
-        # No events occurred, return cap for all
         return pd.Series(cap, index=event_occurred.index)
 
-    # For each position, find index of last event before it
     positions = np.arange(len(event_occurred))
     last_event_idx = np.searchsorted(event_indices, positions, side='right') - 1
 
-    # Calculate bars since last event
     bars_since = np.where(
         last_event_idx >= 0,
         positions - event_indices[last_event_idx],
-        cap  # No event before this position
+        cap
     )
 
-    # Clip to cap and return
     return pd.Series(np.clip(bars_since, 0, cap), index=event_occurred.index)
 
 
@@ -935,7 +814,6 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
     """
     logger.info("  === ICT & SMART MONEY CONCEPTS ===")
     if parallel:
-        # ENHANCEMENT #10: Parallel feature computation (2-3x speedup)
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         detection_tasks = [
@@ -961,14 +839,11 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
                         pbar.set_postfix_str(f"{name}")
                     pbar.update(1)
 
-        # Merge all results into df
         for result_df in results.values():
-            # Only take columns that are not in original df
             new_cols = [col for col in result_df.columns if col not in df.columns]
             if new_cols:
                 df = pd.concat([df, result_df[new_cols]], axis=1)
     else:
-        # Sequential (original implementation)
         logger.info("    → Fair Value Gaps (FVG)...")
         df = detect_fair_value_gaps(df)
 
@@ -990,40 +865,27 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
         logger.info("    → Liquidity Voids...")
         df = detect_liquidity_voids(df, volume_threshold=0.5)
     
-    # ========================================================================
-    # COMPOSITE ICT SCORE - agregacja wszystkich sygnałów ICT
-    # To jest KLUCZOWA cecha - model powinien jej dać dużą wagę
-    # ========================================================================
     logger.info("    → Composite ICT Score (HIGH IMPORTANCE)...")
-    # PERFORMANCE FIX: Batch adding ICT features to avoid DataFrame fragmentation
     ict_features = {}
 
     ict_composite_score_raw = (
-        df['fvg_signal'] * 0.15 +                    # FVG jako entry zones
-        df['liquidity_sweep'] * 0.25 +               # Sweeps = silny sygnał
-        df['order_block'] * 0.20 +                   # OB = gdzie smart money siedzi
-        df['breaker_block'] * 0.15 +                 # Breaker = zmiana charakteru
-        df['market_structure_shift'] * 0.20 +        # MSS = change of trend
-        df['institutional_candle'] * 0.05            # Potwierdzenie przez volume
+        df['fvg_signal'] * 0.15 +
+        df['liquidity_sweep'] * 0.25 +
+        df['order_block'] * 0.20 +
+        df['breaker_block'] * 0.15 +
+        df['market_structure_shift'] * 0.20 +
+        df['institutional_candle'] * 0.05
     )
 
-    # Znormalizuj do zakresu [-1, 1] dla łatwiejszej interpretacji
     max_abs = ict_composite_score_raw.abs().max()
     if max_abs > 0:
         ict_features['ict_composite_score'] = ict_composite_score_raw / max_abs
     else:
         ict_features['ict_composite_score'] = ict_composite_score_raw
 
-    # ========================================================================
-    # EXPERIMENT 3A: ROLLING ICT FEATURES - Zmniejszenie sparsity
-    # Ciągłe features zamiast sparse binary → LightGBM preferuje continuous
-    # ========================================================================
     logger.info("    → Rolling ICT Features (EXPERIMENT 3A - reduce sparsity)...")
-    # 1. Rolling average ICT composite score (smoothed signal)
     ict_features['ict_composite_score_ma_10'] = ict_features['ict_composite_score'].rolling(10, min_periods=1).mean()
 
-    # 2. Recent ICT activity flag (binary but more frequent)
-    # Czy w ostatnich 10 świecach był JAKIKOLWIEK ICT sygnał
     ict_features['recent_ict_activity'] = (
         (df['fvg_signal'].abs().rolling(10).max() > 0) |
         (df['liquidity_sweep'].abs().rolling(10).max() > 0) |
@@ -1031,63 +893,45 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
         (df['breaker_block'].abs().rolling(10).max() > 0)
     ).astype(int)
 
-    # 3. Bars since last event (continuous features - HIGHLY VALUABLE for ML)
-    # Te features są CIĄGŁE i dają modelowi informację "jak dawno"
-    # OPTIMIZED: Replaced 3 slow loops with vectorized function (100x speedup)
 
-    # Bars since last FVG (any direction)
     fvg_occurred = (df['fvg_signal'] != 0)
     ict_features['bars_since_last_fvg'] = _calculate_bars_since_event_vectorized(fvg_occurred, cap=50)
 
-    # Bars since last liquidity sweep (any direction)
     sweep_occurred = (df['liquidity_sweep'] != 0)
     ict_features['bars_since_last_sweep'] = _calculate_bars_since_event_vectorized(sweep_occurred, cap=50)
 
-    # Bars since last order block (any direction)
     ob_occurred = (df['order_block'] != 0)
     ict_features['bars_since_last_ob'] = _calculate_bars_since_event_vectorized(ob_occurred, cap=50)
 
     logger.info("    ✓ Rolling ICT Features: 7 nowych continuous features dodanych")
-    # ========================================================================
-    # SMART MONEY CONTEXT FEATURES - dodatkowe cechy kontekstowe
-    # ========================================================================
     logger.info("    → Smart Money Context Features...")
-    # Czy jesteśmy przy Order Block + FVG (bardzo silny sygnał)
     ict_features['ob_with_fvg'] = (
         ((df['testing_bullish_ob'] == 1) & (df['fvg_signal'] == 1)) |
         ((df['testing_bearish_ob'] == 1) & (df['fvg_signal'] == -1))
     ).astype(int)
 
-    # Liquidity sweep + institutional volume (highest conviction)
     if 'liquidity_sweep_with_volume' in df.columns:
         ict_features['high_conviction_sweep'] = (
             (df['liquidity_sweep_with_volume'] != 0) &
             (df['institutional_candle'] != 0)
         ).astype(int) * np.sign(df['liquidity_sweep_with_volume'])
 
-    # Market structure aligned with OB (trend confirmation)
     ict_features['structure_aligned_ob'] = (
         ((df['market_structure_direction'] == 1) & (df['order_block'] == 1)) |
         ((df['market_structure_direction'] == -1) & (df['order_block'] == -1))
     ).astype(int)
 
-    # FVG zone + liquidity sweep = potential reversal point
-    # If there was a recent FVG and now there's a liquidity sweep, it could indicate reversal
     ict_features['fvg_sweep_confluence'] = (
-        ((df['recent_fvg_bullish'] == 1) & (df['liquidity_sweep'] == -1)) |  # Bullish FVG + bearish sweep
-        ((df['recent_fvg_bearish'] == 1) & (df['liquidity_sweep'] == 1))     # Bearish FVG + bullish sweep
+        ((df['recent_fvg_bullish'] == 1) & (df['liquidity_sweep'] == -1)) |
+        ((df['recent_fvg_bearish'] == 1) & (df['liquidity_sweep'] == 1))
     ).astype(int)
 
-    # Batch add all ICT features at once
     df = pd.concat([df, pd.DataFrame(ict_features, index=df.index)], axis=1)
     
     logger.info("    ✓ ICT/Smart Money: 37+ nowych cech dodanych (30 base + 7 rolling features)")
     return df
 
 
-# ============================================================================
-# KONIEC NOWYCH FUNKCJI
-# ============================================================================
 
 def find_hidden_divergence(prices: pd.Series, indicator: pd.Series, lookback: int) -> pd.Series:
     """
@@ -1101,7 +945,6 @@ def find_hidden_divergence(prices: pd.Series, indicator: pd.Series, lookback: in
 
     signals = pd.Series(0, index=prices.index)
 
-    # Ukryta dywergencja niedźwiedzia (niższy szczyt ceny, wyższy szczyt wskaźnika)
     for i in range(1, len(price_peaks)):
         for j in range(max(0, i - lookback), i):
             if prices.iloc[price_peaks[i]] < prices.iloc[price_peaks[j]]:
@@ -1112,7 +955,6 @@ def find_hidden_divergence(prices: pd.Series, indicator: pd.Series, lookback: in
                         signals.iloc[price_peaks[i]] = -1
                         break
 
-    # Ukryta dywergencja bycza (wyższy dołek ceny, niższy dołek wskaźnika)
     for i in range(1, len(price_troughs)):
         for j in range(max(0, i - lookback), i):
             if prices.iloc[price_troughs[i]] > prices.iloc[price_troughs[j]]:
@@ -1127,19 +969,16 @@ def find_hidden_divergence(prices: pd.Series, indicator: pd.Series, lookback: in
 
 def _detect_engulfing(df: pd.DataFrame) -> pd.Series:
     """Detects bullish and bearish engulfing patterns. OPTIMIZED: Vectorized (50-100x faster)."""
-    # Pre-compute all required shifts
     prev_open = df['open'].shift(1)
     prev_close = df['close'].shift(1)
     curr_open = df['open']
     curr_close = df['close']
 
-    # Bullish engulfing conditions (all vectorized)
     prev_bearish = prev_close < prev_open
     curr_bullish = curr_close > curr_open
     curr_engulfs_prev = (curr_open <= prev_close) & (curr_close >= prev_open)
     bullish_engulfing = prev_bearish & curr_bullish & curr_engulfs_prev
 
-    # Bearish engulfing conditions
     prev_bullish = prev_close > prev_open
     curr_bearish = curr_close < curr_open
     curr_engulfs_prev_bear = (curr_open >= prev_close) & (curr_close <= prev_open)
@@ -1155,15 +994,12 @@ def _detect_hammer(df: pd.DataFrame) -> pd.Series:
     upper_wick = df['high'] - np.maximum(df['open'], df['close'])
     total_range = df['high'] - df['low']
 
-    # Avoid division by zero
     body_pct = np.where(total_range > 0, body / total_range, 0)
     lower_wick_pct = np.where(total_range > 0, lower_wick / total_range, 0)
     upper_wick_pct = np.where(total_range > 0, upper_wick / total_range, 0)
 
-    # Hammer: small body, long lower wick
     hammer = (body_pct < 0.3) & (lower_wick_pct > 2 * body_pct) & (upper_wick_pct < body_pct)
 
-    # Inverted hammer: small body, long upper wick
     inverted_hammer = (body_pct < 0.3) & (upper_wick_pct > 2 * body_pct) & (lower_wick_pct < body_pct)
 
     return hammer.astype(int) - inverted_hammer.astype(int)
@@ -1184,23 +1020,19 @@ def _detect_three_line_strike(df: pd.DataFrame) -> pd.Series:
     """Three Line Strike pattern - strong reversal signal (TIER 3). OPTIMIZED: Vectorized (50-100x faster)."""
     pattern = pd.Series(0, index=df.index)
 
-    # Check last 3 candles (all bearish for bullish strike)
     bearish_1 = df['close'].shift(1) < df['open'].shift(1)
     bearish_2 = df['close'].shift(2) < df['open'].shift(2)
     bearish_3 = df['close'].shift(3) < df['open'].shift(3)
     all_bearish = bearish_1 & bearish_2 & bearish_3
 
-    # Current candle is large bullish
     curr_bullish = (df['close'] > df['open']) & (df['close'] > df['open'].shift(3))
     bullish_strike = all_bearish & curr_bullish
 
-    # Check last 3 candles (all bullish for bearish strike)
     bullish_1 = df['close'].shift(1) > df['open'].shift(1)
     bullish_2 = df['close'].shift(2) > df['open'].shift(2)
     bullish_3 = df['close'].shift(3) > df['open'].shift(3)
     all_bullish = bullish_1 & bullish_2 & bullish_3
 
-    # Current candle is large bearish
     curr_bearish = (df['close'] < df['open']) & (df['close'] < df['open'].shift(3))
     bearish_strike = all_bullish & curr_bearish
 
@@ -1213,14 +1045,12 @@ def _detect_morning_evening_star(df: pd.DataFrame) -> pd.Series:
     body_1 = np.abs(df['close'].shift(1) - df['open'].shift(1))
     body_2 = np.abs(df['close'] - df['open'])
 
-    # Morning star (bullish reversal)
     bearish_candle_0 = df['close'].shift(2) < df['open'].shift(2)
     small_middle = body_1 < body_0 * 0.3
     bullish_candle_2 = df['close'] > df['open']
     strong_bullish = body_2 > body_0 * 0.5
     morning_star = bearish_candle_0 & small_middle & bullish_candle_2 & strong_bullish
 
-    # Evening star (bearish reversal)
     bullish_candle_0 = df['close'].shift(2) > df['open'].shift(2)
     bearish_candle_2 = df['close'] < df['open']
     strong_bearish = body_2 > body_0 * 0.5
@@ -1242,7 +1072,6 @@ def _safe_atr(df: pd.DataFrame, length: int = 14):
     """
     atr_result = df.ta.atr(length=length)
     if isinstance(atr_result, pd.DataFrame):
-        # pandas_ta sometimes returns DataFrame, take first column
         atr_result = atr_result.iloc[:, 0]
     return atr_result
 
@@ -1260,7 +1089,6 @@ def _safe_rsi(df: pd.DataFrame, length: int = 14):
     """
     rsi_result = df.ta.rsi(length=length)
     if isinstance(rsi_result, pd.DataFrame):
-        # pandas_ta sometimes returns DataFrame, take first column
         rsi_result = rsi_result.iloc[:, 0]
     return rsi_result
 
@@ -1292,20 +1120,15 @@ def _calculate_volume_regime_score(df: pd.DataFrame) -> pd.Series:
     vol_ma_20 = df['volume'].rolling(20).mean()
     vol_ma_50 = df['volume'].rolling(50).mean()
 
-    # Component 1: Volume level (normalized to [-1, 1])
     vol_level = (df['volume'] / vol_ma_20 - 1).clip(-1, 1)
 
-    # Component 2: Volume trend (is volume increasing?)
     vol_trend = np.sign(df['volume'].pct_change(5))
 
-    # Component 3: Volume consistency (how many high-volume candles recently)
     vol_consistency = ((df['volume'] > vol_ma_20).astype(int).rolling(20).mean() * 2 - 1)
 
-    # Component 4: Volume extremes (z-score)
     vol_std = df['volume'].rolling(50).std()
     vol_z = ((df['volume'] - vol_ma_50) / (vol_std + 1e-8)).clip(-2, 2) / 2
 
-    # Weighted composite
     volume_regime = (
         vol_level * 0.3 +
         vol_trend * 0.3 +
@@ -1340,35 +1163,29 @@ def _calculate_momentum_quality_score(df: pd.DataFrame) -> pd.Series:
      0: Neutral/choppy
      1: Strong bullish momentum with high conviction
     """
-    # Adaptive RSI (use fast in volatile, slow in calm)
     rsi_7 = _safe_rsi(df, 7)
     rsi_21 = _safe_rsi(df, 21)
 
-    # Calculate volatility regime (ATR percentile)
     atr = _safe_atr(df, 14)
     atr_norm = atr / df['close']
     volatility_regime = atr_norm.rolling(100).rank(pct=True)
 
-    # Adaptive RSI: fast RSI in high vol, slow RSI in low vol
     adaptive_rsi = (rsi_7 * volatility_regime + rsi_21 * (1 - volatility_regime))
-    rsi_signal = (adaptive_rsi - 50) / 50  # Normalize to [-1, 1]
+    rsi_signal = (adaptive_rsi - 50) / 50
 
-    # Price acceleration (2nd derivative)
     price_accel = df['close'].pct_change(5).diff()
     accel_signal = np.sign(price_accel) * np.minimum(np.abs(price_accel) * 100, 1)
 
-    # Multi-period consensus
     consensus = (
         (df['close'].pct_change(5) > 0).astype(int) +
         (df['close'].pct_change(10) > 0).astype(int) +
         (df['close'].pct_change(20) > 0).astype(int)
-    ) / 3 * 2 - 1  # Normalize to [-1, 1]
+    ) / 3 * 2 - 1
 
-    # Weighted composite
     momentum_quality = (
-        rsi_signal * 0.4 +        # RSI dominates (proven reliable)
-        accel_signal * 0.3 +      # Acceleration shows conviction
-        consensus * 0.3           # Consensus confirms direction
+        rsi_signal * 0.4 +
+        accel_signal * 0.3 +
+        consensus * 0.3
     )
 
     return momentum_quality.clip(-1, 1)
@@ -1394,22 +1211,18 @@ def _calculate_sr_context(df: pd.DataFrame) -> dict:
     2. sr_strength: How strong is nearest level [0=weak, 1=strong]
     3. sr_action: What's happening at S/R [0=nothing, 1=bounce, -1=break]
     """
-    # Calculate S/R levels
     resistance_50 = df['high'].rolling(50).max()
     support_50 = df['low'].rolling(50).min()
 
-    # 1. PROXIMITY: normalize position within S/R range
     sr_range = resistance_50 - support_50
     sr_proximity = ((df['close'] - support_50) / (sr_range + 1e-8) * 2 - 1).clip(-1, 1)
 
-    # 2. STRENGTH: how many touches in last 100 candles
     resistance_touches = (np.abs((df['close'] - resistance_50) / resistance_50) < 0.005)
     support_touches = (np.abs((df['close'] - support_50) / support_50) < 0.005)
 
     resistance_strength = resistance_touches.astype(int).rolling(100).sum() / 10
     support_strength = support_touches.astype(int).rolling(100).sum() / 10
 
-    # Use strength of nearest level
     dist_to_res = np.abs(df['close'] - resistance_50) / df['close']
     dist_to_sup = np.abs(df['close'] - support_50) / df['close']
     sr_strength = np.where(
@@ -1418,7 +1231,6 @@ def _calculate_sr_context(df: pd.DataFrame) -> dict:
         support_strength
     ).clip(0, 1)
 
-    # 3. ACTION: are we bouncing or breaking?
     at_resistance = (dist_to_res < 0.005)
     at_support = (dist_to_sup < 0.005)
 
@@ -1426,11 +1238,11 @@ def _calculate_sr_context(df: pd.DataFrame) -> dict:
     price_moved_down = (df['close'] < df['close'].shift(3))
 
     sr_action = np.where(
-        at_resistance & price_moved_down, 1,    # Bounce off resistance
-        np.where(at_support & price_moved_up, 1,  # Bounce off support
-        np.where(at_resistance & price_moved_up, -1,  # Break above resistance
-        np.where(at_support & price_moved_down, -1,    # Break below support
-        0)))  # No action
+        at_resistance & price_moved_down, 1,
+        np.where(at_support & price_moved_up, 1,
+        np.where(at_resistance & price_moved_up, -1,
+        np.where(at_support & price_moved_down, -1,
+        0)))
     )
 
     return {
@@ -1440,7 +1252,7 @@ def _calculate_sr_context(df: pd.DataFrame) -> dict:
     }
 
 
-@timer  # PHASE 4: Performance monitoring
+@timer
 def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_LEVEL_FULL):
     """
     Calculate features with granular complexity control.
@@ -1457,39 +1269,29 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     Returns:
         DataFrame with computed features
     """
-    # Suppress DataFrame fragmentation warnings (performance is acceptable, warnings clutter logs)
     import warnings
     warnings.filterwarnings('ignore', message='DataFrame is highly fragmented')
 
     logger.info(f"⚙️  Computing features (level={feature_level})...")
-    # ENHANCEMENT #8: Load configuration instead of hardcoded values
     SWING_WINDOW = FEATURE_CONFIG['price_action']['swing_window']
     VOLUME_MA_WINDOW = FEATURE_CONFIG['indicators']['volume_ma_window']
     BBANDS_LEN = FEATURE_CONFIG['indicators']['bbands_period']
     BBANDS_STD = FEATURE_CONFIG['indicators']['bbands_std']
 
-    # ========================================================================
-    # OPTIMIZATION #4: Pre-calculate commonly used values to avoid redundant operations
-    # Performance gain: ~1.3-1.5x (15-20% reduction in redundant calculations)
-    # ========================================================================
     _cache = {
-        # Price changes (most common)
         'close_pct_3': df_out['close'].pct_change(3),
         'close_pct_5': df_out['close'].pct_change(5),
         'close_pct_10': df_out['close'].pct_change(10),
         'close_pct_20': df_out['close'].pct_change(20),
         'close_diff_1': df_out['close'].diff(),
         'close_diff_3': df_out['close'].diff(3),
-        # Volume stats (reused many times)
         'volume_ma_20': df_out['volume'].rolling(20).mean(),
         'volume_ma_50': df_out['volume'].rolling(50).mean(),
-        # Common price calculations
         'high_low_range': df_out['high'] - df_out['low'],
-        'price_range': df_out['high'] - df_out['low'],  # Alias for backward compatibility
+        'price_range': df_out['high'] - df_out['low'],
         'body_size': np.abs(df_out['close'] - df_out['open']),
     }
 
-    # Add price_range to df_out (required by old models)
     df_out['price_range'] = _cache['price_range']
 
     logger.debug("  1. Struktura rynku...")
@@ -1524,9 +1326,8 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
 
     logger.debug("  4. Zmienność i prędkość...")
     atr_result = _safe_atr(df_out, 14)
-    # pandas_ta sometimes returns DataFrame, ensure we get Series
     if isinstance(atr_result, pd.DataFrame):
-        atr_result = atr_result.iloc[:, 0]  # Take first column
+        atr_result = atr_result.iloc[:, 0]
     df_out['atr_normalized'] = atr_result / df_out['close']
     df_out['price_change_pct_5'] = df_out['close'].pct_change(periods=5)
     bbands = df_out.ta.bbands(length=BBANDS_LEN, std=BBANDS_STD)
@@ -1550,35 +1351,30 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     df_out['dist_from_vwap'] = (df_out['close'] - df_out['vwap']) / df_out['vwap']
 
     logger.debug("  6. Momentum i sygnały odwrócenia (ADAPTIVE)...")
-    # Standard RSI (dla kompatybilności)
     rsi = _safe_rsi(df_out, 14)
     rsi_7 = _safe_rsi(df_out, 7)
     rsi_21 = _safe_rsi(df_out, 21)
 
-    # PERFORMANCE FIX: Batch adding momentum features to avoid DataFrame fragmentation
     momentum_features = {}
 
-    # Helper to ensure Series (not DataFrame)
     def _ensure_series(x):
         if isinstance(x, pd.DataFrame):
             return x.iloc[:, 0]
         return x
 
-    # === PRIORYTET 2: ADAPTIVE RSI ===
     momentum_features['rsi_14'] = _ensure_series(rsi)
-    momentum_features['rsi_7'] = _ensure_series(rsi_7)  # Fast RSI (short period dla capture sharp moves)
-    momentum_features['rsi_21'] = _ensure_series(rsi_21)  # Slow RSI (long period dla filtrowanie noise)
-    momentum_features['rsi_momentum'] = _ensure_series(rsi).diff(3)  # 1st derivative - czy RSI rośnie/spada
-    momentum_features['rsi_acceleration'] = _ensure_series(rsi).diff(3).diff(3)  # 2nd derivative - czy momentum przyspiesza
-    momentum_features['rsi_spread'] = _ensure_series(rsi_7) - _ensure_series(rsi_21)  # Fast - slow, mean reversion indicator
-    momentum_features['rsi_dist_from_50'] = (_ensure_series(rsi) - 50) / 50  # Normalized to [-1, 1]
-    momentum_features['rsi_volatility'] = _ensure_series(rsi).rolling(20).std()  # Czy RSI jest stabilny czy choppy
+    momentum_features['rsi_7'] = _ensure_series(rsi_7)
+    momentum_features['rsi_21'] = _ensure_series(rsi_21)
+    momentum_features['rsi_momentum'] = _ensure_series(rsi).diff(3)
+    momentum_features['rsi_acceleration'] = _ensure_series(rsi).diff(3).diff(3)
+    momentum_features['rsi_spread'] = _ensure_series(rsi_7) - _ensure_series(rsi_21)
+    momentum_features['rsi_dist_from_50'] = (_ensure_series(rsi) - 50) / 50
+    momentum_features['rsi_volatility'] = _ensure_series(rsi).rolling(20).std()
     momentum_features['hidden_divergence'] = find_hidden_divergence(df_out['close'], _ensure_series(rsi), lookback=60)
     momentum_features['engulfing'] = _detect_engulfing(df_out)
     momentum_features['hammer'] = _detect_hammer(df_out)
     momentum_features['doji'] = _detect_doji(df_out)
 
-    # Additional candlestick patterns for better price action signals
     momentum_features['three_white_soldiers'] = (
         (df_out['close'] > df_out['open']) &
         (df_out['close'].shift(1) > df_out['open'].shift(1)) &
@@ -1587,94 +1383,68 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
         (df_out['close'].shift(1) > df_out['close'].shift(2))
     ).astype(int)
 
-    # Batch add all momentum features at once
     df_out = pd.concat([df_out, pd.DataFrame(momentum_features, index=df_out.index)], axis=1)
 
-    # COMPOSITE INDICATOR #2: Momentum Quality Score
-    # PERFORMANCE FIX: Use batched approach to avoid DataFrame fragmentation
     logger.info("  🔬 Composite #2: Momentum Quality Score...")
     composite_momentum = {}
     composite_momentum['momentum_quality_score'] = _calculate_momentum_quality_score(df_out)
     df_out = pd.concat([df_out, pd.DataFrame(composite_momentum, index=df_out.index)], axis=1)
 
-    # OPTIMIZATION: Price structure features - trend quality indicators
-    # OPTIMIZED: Vectorized approach (100-200x faster than loop)
     logger.debug("  6B. Price structure analysis (higher highs/lows)...")
     window = 20
 
-    # Vectorized calculation using numpy arrays
     high_arr = df_out['high'].values
     low_arr = df_out['low'].values
 
-    # Create shifted arrays (window × N matrix)
     high_shifts = np.column_stack([df_out['high'].shift(i).values for i in range(window + 1)])
     low_shifts = np.column_stack([df_out['low'].shift(i).values for i in range(window + 1)])
 
-    # Count higher highs/lows (vectorized comparison across all shifts)
     higher_highs = np.sum(high_shifts[:, :-1] > high_shifts[:, 1:], axis=1)
     higher_lows = np.sum(low_shifts[:, :-1] > low_shifts[:, 1:], axis=1)
 
-    # PERFORMANCE FIX: Batch adding price structure features to avoid DataFrame fragmentation
     price_structure_features = {}
     price_structure_features['higher_highs_count_20'] = pd.Series(higher_highs, index=df_out.index)
     price_structure_features['higher_lows_count_20'] = pd.Series(higher_lows, index=df_out.index)
     price_structure_features['trend_structure_score'] = ((higher_highs + higher_lows) / (2 * window)) * 2 - 1
 
-    # Batch add price structure features at once
     df_out = pd.concat([df_out, pd.DataFrame(price_structure_features, index=df_out.index)], axis=1)
 
     logger.debug("  7. Cechy mikrostruktury rynku...")
-    # PERFORMANCE FIX: Batch adding microstructure features to avoid DataFrame fragmentation
     microstructure_features = {}
 
-    # Order Flow Proxy (bez orderbook)
     price_volume_trend = ((df_out['close'] - df_out['close'].shift(1)) /
                           df_out['close'].shift(1)) * df_out['volume']
     microstructure_features['price_volume_trend'] = price_volume_trend
     microstructure_features['cumulative_delta'] = price_volume_trend.rolling(window=20).sum()
 
-    # Volume-Weighted Price Momentum
     microstructure_features['vwap_momentum'] = (df_out['close'] - df_out['vwap'].rolling(window=10).mean()) / df_out['vwap']
 
-    # Tick direction proxy
     tick_direction = np.sign(df_out['close'] - df_out['close'].shift(1))
     microstructure_features['tick_direction'] = tick_direction
     microstructure_features['tick_persistence'] = tick_direction.rolling(window=5).sum()
 
-    # Batch add microstructure features at once
     df_out = pd.concat([df_out, pd.DataFrame(microstructure_features, index=df_out.index)], axis=1)
 
     logger.debug("  8. Zaawansowane cechy wolumenu...")
-    # PERFORMANCE FIX: Batch adding volume features to avoid DataFrame fragmentation
     volume_features = {}
 
-    # Volume Profile Approximation
     volume_features['volume_ma_ratio_short'] = df_out['volume'] / df_out['volume'].rolling(5).mean()
     volume_features['volume_ma_ratio_long'] = df_out['volume'] / df_out['volume'].rolling(50).mean()
 
-    # Volume Acceleration
     volume_features['volume_acceleration'] = df_out['volume'].diff() / df_out['volume'].shift(1)
 
-    # Turnover-based features (wykorzystaj kolumnę 'turnover')
-    # POPRAWKA: avg_trade_size powinien być ZNORMALIZOWANY względem ceny
-    # aby nie był skorelowany z surową ceną
     typical_price = (df_out['high'] + df_out['low'] + df_out['close']) / 3
     avg_trade_size_raw = df_out['turnover'] / (df_out['volume'] + 1e-8)
 
-    # Normalizuj przez typową cenę aby usunąć korelację z poziomem ceny
     volume_features['avg_trade_size_norm'] = avg_trade_size_raw / (typical_price + 1e-8)
 
-    # Rolling average dla porównania (czy trade size rośnie/maleje)
     volume_features['avg_trade_size_momentum'] = (
         avg_trade_size_raw / (avg_trade_size_raw.rolling(50).mean() + 1e-8)
     )
 
-    # Batch add volume features at once (no need to add avg_trade_size_raw - it's not needed)
     df_out = pd.concat([df_out, pd.DataFrame(volume_features, index=df_out.index)], axis=1)
 
     logger.debug("  8B. Order Flow Proxies (bez orderbook)...")
-    # PERFORMANCE FIX: Batch adding to avoid DataFrame fragmentation
-    # BATCH 1: Base features (needed as dependencies for later calculations)
     base_order_flow = {}
     base_order_flow['aggressive_buy_volume'] = df_out['volume'].where(
         (df_out['close'] > df_out['open']) & (df_out['close'] > df_out['close'].shift(1)), 0)
@@ -1682,7 +1452,6 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
         (df_out['close'] < df_out['open']) & (df_out['close'] < df_out['close'].shift(1)), 0)
     df_out = pd.concat([df_out, pd.DataFrame(base_order_flow, index=df_out.index)], axis=1)
     
-    # BATCH 2: Derived features (dependent on batch 1)
     derived_order_flow = {}
     derived_order_flow['buy_sell_imbalance_20'] = (
         df_out['aggressive_buy_volume'].rolling(20).sum() - 
@@ -1698,7 +1467,6 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     derived_order_flow['volume_delta_pct'] = df_out['volume'].pct_change()
     df_out = pd.concat([df_out, pd.DataFrame(derived_order_flow, index=df_out.index)], axis=1)
     
-    # BATCH 3: Advanced features (dependent on batch 2)
     advanced_order_flow = {}
     advanced_order_flow['volume_delta_positive'] = df_out['volume_delta'].where(df_out['close'] > df_out['open'], 0).rolling(10).sum()
     advanced_order_flow['volume_delta_negative'] = df_out['volume_delta'].where(df_out['close'] < df_out['open'], 0).rolling(10).sum()
@@ -1710,55 +1478,38 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     advanced_order_flow['large_sell_trade'] = ((advanced_order_flow['volume_z_score'] > 2) & (df_out['close'] < df_out['open'])).astype(int)
     advanced_order_flow['tape_speed_20'] = (df_out['volume'] > volume_mean).astype(int).rolling(20).sum()
     
-    # OPTIMIZED: Use cached pct_change(5)
     price_momentum = _cache['close_pct_5']
     volume_momentum = df_out['volume'].pct_change(5)
     advanced_order_flow['momentum_volume_divergence'] = price_momentum - volume_momentum
     
     df_out = pd.concat([df_out, pd.DataFrame(advanced_order_flow, index=df_out.index)], axis=1)
     
-    # TIER 2B: Advanced Order Flow (dodatkowe cechy dla lepszej separacji)
-    # Collect all new features in a dictionary to add at once
     tier2b_features = {}
     
-    # Volume Profile Approximation
-    # OPTIMIZED: Use cached high_low_range
     tier2b_features['volume_per_price_unit'] = df_out['volume'] / (_cache['high_low_range'] + 1e-8)
     
-    # Buy/Sell Volume Ratio (stosunek, nie różnica)
     tier2b_features['buy_sell_ratio'] = (df_out['aggressive_buy_volume'] + 1) / (df_out['aggressive_sell_volume'] + 1)
     tier2b_features['buy_sell_ratio_ma20'] = tier2b_features['buy_sell_ratio'].rolling(20).mean()
     
-    # Cumulative Buy/Sell Pressure - POPRAWIONE
-    # Zamiast używać (1 - buy_pressure), użyjemy osobno obliczonego sell_pressure
     tier2b_features['cumulative_buy_pressure'] = df_out['buy_pressure'].rolling(50).sum()
-    # Sell pressure jako osobna cecha (nie matematyczna odwrotność)
     sell_pressure = (df_out['high'] - df_out['close']) / (df_out['high'] - df_out['low'] + 1e-8)
     tier2b_features['cumulative_sell_pressure'] = sell_pressure.rolling(50).sum()
-    # Netowa presja (różnica między buy i sell)
     tier2b_features['net_buy_sell_pressure'] = tier2b_features['cumulative_buy_pressure'] - tier2b_features['cumulative_sell_pressure']
     
-    # Volume-Weighted Price Action
     tier2b_features['vwap_distance_weighted'] = df_out['dist_from_vwap'] * df_out['volume_vs_ma_20']
     
-    # Delta Volume Change Rate
     tier2b_features['volume_change_rate'] = df_out['volume'].pct_change()
     tier2b_features['volume_acceleration_ma'] = tier2b_features['volume_change_rate'].rolling(10).mean()
     
-    # Add TIER 2B features to dataframe
     df_out = pd.concat([df_out, pd.DataFrame(tier2b_features, index=df_out.index)], axis=1)
 
-    # COMPOSITE INDICATOR #1: Volume Regime Score
-    # PERFORMANCE FIX: Use batched approach to avoid DataFrame fragmentation
     logger.info("  🔬 Composite #1: Volume Regime Score...")
     composite_volume = {}
     composite_volume['volume_regime_score'] = _calculate_volume_regime_score(df_out)
     df_out = pd.concat([df_out, pd.DataFrame(composite_volume, index=df_out.index)], axis=1)
 
-    # TIER 2C: Confidence/Meta Features (dla precision boost)
     tier2c_features = {}
     
-    # Multi-timeframe alignment strength
     if 'sma_20_slope_4h' in df_out.columns and 'sma_20_slope_12h' in df_out.columns:
         tier2c_features['multi_tf_momentum_strength'] = (
             np.sign(df_out['price_change_pct_5']) + 
@@ -1767,78 +1518,56 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
         )
         tier2c_features['multi_tf_alignment'] = (tier2c_features['multi_tf_momentum_strength'].abs() == 3).astype(int)
     
-    # Volume confirmation score (ile z ostatnich N świec miało wysokie volume przy ruchu w górę)
     tier2c_features['bullish_volume_count'] = (
         (df_out['close'] > df_out['open']) & 
         (df_out['volume'] > df_out['volume'].rolling(20).mean())
     ).astype(int).rolling(10).sum()
     
-    # Trend strength composite
     if 'adx_14' in df_out.columns:
         tier2c_features['trend_strength_composite'] = (
-            (df_out['adx_14'] > 25).astype(int) * 2 +  # Strong trend
-            (df_out['price_change_pct_5'] > 0).astype(int)  # Positive momentum
+            (df_out['adx_14'] > 25).astype(int) * 2 +
+            (df_out['price_change_pct_5'] > 0).astype(int)
         )
     
-    # Regime consistency (czy jesteśmy w stabilnym reżimie?)
     if 'volatility_regime' in df_out.columns:
         tier2c_features['regime_stability'] = 1 - df_out['volatility_regime'].rolling(20).std().fillna(0)
     
-    # Add TIER 2C features to dataframe
     df_out = pd.concat([df_out, pd.DataFrame(tier2c_features, index=df_out.index)], axis=1)
 
     logger.debug("  9. Cechy zmienności i range'u...")
     volatility_features = {}
     
-    # True Range Percentile
     atr_14 = _safe_atr(df_out, 14)
     volatility_features['tr_percentile'] = atr_14.rank(pct=True).rolling(window=50).mean()
     
-    # High-Low Range vs Body
     volatility_features['range_to_body'] = (df_out['high'] - df_out['low']) / (abs(df_out['close'] - df_out['open']) + 1e-8)
     
-    # Volatility Regime Detection - MOVED to section 11 (momentum indicators)
-    # Now using percentile-based regime (more stationary than z-score)
-    # volatility_regime calculated in section 11
     
-    # Add volatility features to dataframe
     df_out = pd.concat([df_out, pd.DataFrame(volatility_features, index=df_out.index)], axis=1)
 
     logger.debug("  10. Kombinacje cech (interakcje)...")
-    # RSI x Volume (momentum z potwierdzeniem wolumenu)
     interaction_features = {}
     interaction_features['rsi_volume_interaction'] = df_out['rsi_14'] * df_out['volume_vs_ma_20']
     
-    # Price Position x Volume (czy cena przy kluczowych poziomach ma wsparcie wolumenu)
     interaction_features['pivot_volume_interaction'] = df_out['dist_from_s1'] * df_out['volume_vs_ma_20']
     
-    # Volatility x Momentum
     interaction_features['volatility_momentum'] = df_out['atr_normalized'] * df_out['price_change_pct_5']
     
-    # BBW Squeeze x Volume (czy ściskanie bollinger bands następuje przy niskim/wysokim wolumenie)
     if 'bbw_squeeze' in df_out.columns:
         interaction_features['bbw_volume_interaction'] = df_out['bbw_squeeze'] * df_out['volume_vs_ma_20']
     
-    # Distance from VWAP x RSI (czy odchylenie od VWAP jest ekstremalnie + oversold/overbought)
     interaction_features['vwap_rsi_interaction'] = df_out['dist_from_vwap'] * (df_out['rsi_14'] - 50) / 50
 
     df_out = pd.concat([df_out, pd.DataFrame(interaction_features, index=df_out.index)], axis=1)
 
-    # ========================================================================
-    # TIER 1B: MOVING AVERAGES AND TREND FEATURES (for main timeframe)
-    # FIX: These were missing for main timeframe - only existed for helpers
-    # Required by confluence features in calculate_confluence_features()
-    # ========================================================================
     logger.debug("  10B. Moving averages and trend features...")
 
-    # BATCH 1: Calculate SMAs first
     sma_features = {}
     sma_features['sma_20'] = df_out['close'].rolling(20).mean()
     sma_features['sma_50'] = df_out['close'].rolling(50).mean()
     sma_features['sma_100'] = df_out['close'].rolling(100).mean()
     df_out = pd.concat([df_out, pd.DataFrame(sma_features, index=df_out.index)], axis=1)
 
-    # BATCH 2: Calculate derived features (depend on SMAs from batch 1)
     sma_derived = {}
     sma_derived['above_sma_20'] = (df_out['close'] > df_out['sma_20']).astype(int)
     sma_derived['above_sma_50'] = (df_out['close'] > df_out['sma_50']).astype(int)
@@ -1849,46 +1578,30 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     sma_derived['dist_from_sma_50'] = (df_out['close'] - df_out['sma_50']) / (df_out['sma_50'] + 1e-8)
     df_out = pd.concat([df_out, pd.DataFrame(sma_derived, index=df_out.index)], axis=1)
 
-    # ========================================================================
-    # TIER 2: ADVANCED PRICE ACTION FEATURES (standard+ only)
-    # Skip features 11-19 if feature_level='basic'
-    # ========================================================================
     if feature_level == FEATURE_LEVEL_BASIC:
         logger.info(f"  ⏭️  Skipping TIER 2 features (11-19) - basic mode")
-        # Jump to end of function (TIER 1 only)
         df_out.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df_out = df_out.copy()  # Defragment
+        df_out = df_out.copy()
         return df_out
 
-    # TIER 2 continues here for standard/full modes
     logger.debug("  11. Zaawansowane momentum indicators (REGIME-AWARE)...")
     momentum_features = {}
 
-    # === PRIORYTET 4: REGIME DETECTION NAJPIERW ===
-    # ADX dla trend strength (nie direction)
     adx = df_out.ta.adx(length=14)
     if adx is not None and len(adx.columns) >= 1:
-        momentum_features['adx_14'] = adx.iloc[:, 0]  # Trend strength
+        momentum_features['adx_14'] = adx.iloc[:, 0]
 
-        # Regime classification (continuous)
-        # ADX < 20: ranging, 20-40: weak trend, >40: strong trend
-        momentum_features['trend_regime'] = adx.iloc[:, 0] / 100  # Normalize to 0-1
+        momentum_features['trend_regime'] = adx.iloc[:, 0] / 100
 
-    # Volatility regime (percentile-based)
     atr_norm = _safe_atr(df_out, 14) / df_out['close']
     momentum_features['volatility_regime'] = atr_norm.rolling(100).rank(pct=True)
 
-    # === MOMENTUM FEATURES (context-aware) ===
 
-    # Stochastic Oscillator (KEEP, ale tylko K, bez D i cross)
     stoch = df_out.ta.stoch(high='high', low='low', close='close', k=14, d=3)
     if stoch is not None and not stoch.empty:
-        momentum_features['stoch_k'] = stoch.iloc[:, 0]  # %K only
-        # Stochastic momentum (velocity)
+        momentum_features['stoch_k'] = stoch.iloc[:, 0]
         momentum_features['stoch_momentum'] = stoch.iloc[:, 0].diff(3)
 
-    # ROC - ale tylko ATR-normalized (remove raw ROC)
-    # OPTIMIZED: Use cached pct_change
     atr_norm_roc = _safe_atr(df_out, 14) / df_out['close']
     momentum_features['roc_5_atr_adj'] = (
         _cache['close_pct_5'] / (atr_norm_roc + 1e-8)
@@ -1897,28 +1610,20 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
         _cache['close_pct_10'] / (atr_norm_roc + 1e-8)
     )
 
-    # Momentum Acceleration (2nd derivative) - DOBRY, KEEP
-    # OPTIMIZED: Use cached pct_change(5)
     momentum_features['momentum_accel'] = _cache['close_pct_5'].diff() * 100
 
-    # RSI-Price Divergence (continuous version, nie binary)
-    # OPTIMIZED: Use cached pct_change(10)
     momentum_features['rsi_price_divergence'] = (
         df_out['rsi_14'].pct_change(10) - _cache['close_pct_10']
     )
 
-    # MFI (Money Flow Index) - CONDITIONAL na trend regime
     mfi = df_out.ta.mfi(high='high', low='low', close='close', volume='volume', length=14)
     if mfi is not None:
         momentum_features['mfi_14'] = mfi
-        # MFI effectiveness (works better w trending markets)
         if 'trend_regime' in momentum_features:
             momentum_features['mfi_trend_adjusted'] = (
                 mfi * momentum_features['trend_regime']
             )
 
-    # CCI - REMOVE (least useful, commodity-focused)
-    # Zamiast CCI: Momentum Z-Score (better for crypto)
     price_change = df_out['close'].pct_change(10)
     momentum_features['momentum_zscore'] = (
         (price_change - price_change.rolling(100).mean()) /
@@ -1928,68 +1633,48 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     df_out = pd.concat([df_out, pd.DataFrame(momentum_features, index=df_out.index)], axis=1)
 
     logger.debug("  12. Cechy czasowe (temporal features) - REMOVED per optimization recommendations...")
-    # OPTIMIZATION: Temporal features removed to reduce overfitting to time patterns
-    # Model should focus on price action, not clock-based patterns
-    # Previously: hour_sin, hour_cos, day_sin, day_cos, is_weekend, session
-    # These features were dominating (19.8% combined importance) but causing poor generalization
     
-    # Defragment DataFrame mid-way to avoid PerformanceWarnings in subsequent sections
     df_out = df_out.copy()
 
     logger.debug("  13. Volume-Price Divergence (NORMALIZED)...")
-    # FIX NON-STATIONARY: Normalize cumulative features using rolling windows
 
-    # On-Balance Volume (OBV) - NORMALIZED
     obv_raw = (np.sign(df_out['close'].diff()) * df_out['volume']).fillna(0).cumsum()
     obv_ma_100 = obv_raw.rolling(100).mean()
     obv_std_100 = obv_raw.rolling(100).std()
-    # Normalized OBV (z-score over rolling window)
     df_out['obv'] = (obv_raw - obv_ma_100) / (obv_std_100 + 1e-8)
     df_out['obv_ma_20'] = df_out['obv'].rolling(20).mean()
     df_out['obv_divergence'] = (df_out['obv'] - df_out['obv_ma_20']) / (df_out['obv_ma_20'].abs() + 1e-8)
 
-    # Volume-Price Trend (VPT) - NORMALIZED
     vpt_raw = (df_out['close'].pct_change() * df_out['volume']).fillna(0).cumsum()
     vpt_ma_100 = vpt_raw.rolling(100).mean()
     vpt_std_100 = vpt_raw.rolling(100).std()
-    # Normalized VPT (z-score over rolling window)
     df_out['vpt'] = (vpt_raw - vpt_ma_100) / (vpt_std_100 + 1e-8)
     df_out['vpt_ma_20'] = df_out['vpt'].rolling(20).mean()
 
-    # Accumulation/Distribution Line - NORMALIZED
-    # A/D = ((Close - Low) - (High - Close)) / (High - Low) * Volume
     ad_multiplier = ((df_out['close'] - df_out['low']) - (df_out['high'] - df_out['close'])) / (df_out['high'] - df_out['low'] + 1e-8)
     ad_raw = (ad_multiplier * df_out['volume']).cumsum()
     ad_ma_100 = ad_raw.rolling(100).mean()
     ad_std_100 = ad_raw.rolling(100).std()
-    # Normalized A/D Line (z-score over rolling window)
     df_out['ad_line'] = (ad_raw - ad_ma_100) / (ad_std_100 + 1e-8)
     df_out['ad_line_ma_20'] = df_out['ad_line'].rolling(20).mean()
     
-    # Chaikin Money Flow (CMF)
     df_out['cmf_20'] = (ad_multiplier * df_out['volume']).rolling(20).sum() / (df_out['volume'].rolling(20).sum() + 1e-8)
 
     logger.debug("  14. TIER 2A: Market Regime Classification...")
-    # ADX (Average Directional Index) - siła trendu
     adx = df_out.ta.adx(high='high', low='low', close='close', length=14)
     if adx is not None and not adx.empty:
         df_out['adx_14'] = adx['ADX_14']
-        # ADX > 25 = trending, < 20 = ranging
         df_out['is_trending'] = (df_out['adx_14'] > 25).astype(int)
     
-    # Volatility clustering (GARCH-like proxy)
     returns = df_out['close'].pct_change()
     df_out['return_volatility'] = returns.rolling(20).std()
     df_out['volatility_clustering'] = df_out['return_volatility'] / (df_out['return_volatility'].rolling(100).mean() + 1e-8)
     
-    # Trend consistency (ile z ostatnich N świec było bullish/bearish)
     df_out['bullish_candle'] = (df_out['close'] > df_out['open']).astype(int)
-    df_out['trend_consistency_10'] = df_out['bullish_candle'].rolling(10).mean()  # 0 = all bearish, 1 = all bullish
+    df_out['trend_consistency_10'] = df_out['bullish_candle'].rolling(10).mean()
     df_out['trend_consistency_20'] = df_out['bullish_candle'].rolling(20).mean()
     
-    # Choppiness Index (czy rynek jest choppy/ranging)
-    # Simplified version
-    tr = _safe_atr(df_out, 1)  # true range without smoothing
+    tr = _safe_atr(df_out, 1)
     tr_sum = tr.rolling(14).sum()
     high_low_diff = df_out['high'].rolling(14).max() - df_out['low'].rolling(14).min()
     df_out['choppiness_14'] = 100 * np.log10(tr_sum / (high_low_diff + 1e-8)) / np.log10(14)
@@ -1997,81 +1682,60 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     df_out.drop(columns=['bullish_candle'], inplace=True, errors='ignore')
 
     logger.debug("  15. TIER 2: Dodatkowe interakcje cech...")
-    # Volume × Volatility (czy wysokie volume = wysokie volatility?)
     if 'volatility_regime' in df_out.columns:
         df_out['volume_volatility_interaction'] = df_out['volume_vs_ma_20'] * df_out['volatility_regime']
     
-    # Momentum × Trend Strength (czy momentum jest zgodne z trendem?)
     if 'adx_14' in df_out.columns:
         df_out['momentum_trend_strength'] = df_out['price_change_pct_5'] * df_out['adx_14']
     
-    # Candlestick patterns × Volume (czy pattern ma volume confirmation?)
     df_out['engulfing_volume'] = df_out['engulfing'] * df_out['volume_vs_ma_20']
     df_out['hammer_volume'] = df_out['hammer'] * df_out['volume_vs_ma_20']
     
-    # Time-based × Volatility (czy pewne godziny są bardziej volatile?)
     if 'hour_sin' in df_out.columns and 'volatility_regime' in df_out.columns:
         df_out['time_volatility_interaction'] = df_out['hour_sin'] * df_out['volatility_regime']
 
     logger.debug("  16. TIER 2: Bid-ask spread proxies...")
-    # High-Low spread jako proxy dla liquidity
     df_out['hl_spread'] = (df_out['high'] - df_out['low']) / (df_out['close'] + 1e-8)
     df_out['hl_spread_ma'] = df_out['hl_spread'].rolling(20).mean()
     df_out['hl_spread_normalized'] = df_out['hl_spread'] / (df_out['hl_spread_ma'] + 1e-8)
     
-    # Close position within candle (gdzie close jest względem high/low)
     df_out['close_position'] = (df_out['close'] - df_out['low']) / (df_out['high'] - df_out['low'] + 1e-8)
     
-    # Roll model estimate of spread (correlation of price changes)
-    # OPTIMIZED: Using manual implementation (30-40x faster than rolling().apply())
     price_changes = df_out['close'].diff()
     df_out['price_change_autocorr'] = _compute_autocorr_rolling_optimized(price_changes, window=20)
     
-    # Effective spread proxy: |close - (high+low)/2| / midpoint
     midpoint = (df_out['high'] + df_out['low']) / 2
     df_out['effective_spread_proxy'] = abs(df_out['close'] - midpoint) / (midpoint + 1e-8)
 
-    # ENHANCEMENT #3: Memory cleanup after TIER 2 features
     gc.collect()
 
     logger.debug("  17. TIER 3: Support/Resistance Detection...")
-    # Rolling highs/lows jako S/R proxies (prostsza wersja bez scipy)
     df_out['resistance_50'] = df_out['high'].rolling(50).max()
     df_out['support_50'] = df_out['low'].rolling(50).min()
     df_out['dist_from_resistance'] = (df_out['close'] - df_out['resistance_50']) / (df_out['resistance_50'] + 1e-8)
     df_out['dist_from_support'] = (df_out['close'] - df_out['support_50']) / (df_out['support_50'] + 1e-8)
     
-    # Czy cena testuje resistance/support (0.5% threshold)
     df_out['testing_resistance'] = (abs(df_out['dist_from_resistance']) < 0.005).astype(int)
     df_out['testing_support'] = (abs(df_out['dist_from_support']) < 0.005).astype(int)
     
-    # Dodatkowe S/R z dłuższych okresów dla multi-level detection
     df_out['resistance_100'] = df_out['high'].rolling(100).max()
     df_out['support_100'] = df_out['low'].rolling(100).min()
     df_out['near_resistance_100'] = (abs((df_out['close'] - df_out['resistance_100']) / (df_out['resistance_100'] + 1e-8)) < 0.01).astype(int)
     df_out['near_support_100'] = (abs((df_out['close'] - df_out['support_100']) / (df_out['support_100'] + 1e-8)) < 0.01).astype(int)
     
-    # S/R strength: ile razy cena odbijała się od poziomu
-    # Proxy: czy w ciągu ostatnich 20 świec cena była blisko aktualnego S/R
     df_out['resistance_strength'] = (df_out['high'] >= df_out['resistance_50'] * 0.995).astype(int).rolling(20).sum()
     df_out['support_strength'] = (df_out['low'] <= df_out['support_50'] * 1.005).astype(int).rolling(20).sum()
     
-    # OPTIMIZATION: Enhanced S/R strength features
     logger.debug("  17B. Enhanced S/R strength analysis...")
-    sr_threshold = 0.005  # 0.5%
+    sr_threshold = 0.005
     lookback = 100
     
-    # Touch count for resistance
     resistance_touches = (abs((df_out['close'] - df_out['resistance_50']) / df_out['resistance_50']) < sr_threshold)
     df_out['resistance_touch_count'] = resistance_touches.astype(int).rolling(window=lookback).sum()
     
-    # Touch count for support
     support_touches = (abs((df_out['close'] - df_out['support_50']) / df_out['support_50']) < sr_threshold)
     df_out['support_touch_count'] = support_touches.astype(int).rolling(window=lookback).sum()
     
-    # Bounce ratio (how often price bounces vs breaks through)
-    # FIXED: Removed look-ahead bias - was using shift(-1) which peeks into future
-    # Now checks if previous candle touched S/R and current candle moved away (bounce)
     resistance_bounces = resistance_touches.shift(1) & (df_out['close'] < df_out['close'].shift(1))
     df_out['resistance_bounce_ratio'] = (
         resistance_bounces.astype(int).rolling(window=lookback).sum() /
@@ -2084,7 +1748,6 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
         (df_out['support_touch_count'] + 1)
     )
     
-    # Break momentum - volume and price change when breaking through S/R
     resistance_breaks = (df_out['close'].shift(1) < df_out['resistance_50']) & (df_out['close'] > df_out['resistance_50'])
     price_change_on_break = (df_out['close'] - df_out['resistance_50']) / df_out['resistance_50']
     volume_ratio_on_break = df_out['volume'] / df_out['volume'].rolling(window=20).mean()
@@ -2095,84 +1758,59 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     df_out['support_break_momentum'] = (price_change_on_break_down * volume_ratio_on_break).where(support_breaks, 0)
 
     logger.debug("  18. TIER 3: Advanced Price Action Patterns...")
-    # Użyj nowych funkcji pattern detection
     df_out['three_line_strike'] = _detect_three_line_strike(df_out)
     df_out['morning_evening_star'] = _detect_morning_evening_star(df_out)
     
-    # Gap detection (dla crypto mniej użyteczne, ale możliwe przy niskiej płynności)
-    # Gap up: low obecnej świecy > high poprzedniej świecy
     df_out['gap_up'] = ((df_out['low'] - df_out['high'].shift(1)) / (df_out['high'].shift(1) + 1e-8) > 0.002).astype(int)
-    # Gap down: high obecnej świecy < low poprzedniej świecy
     df_out['gap_down'] = ((df_out['high'] - df_out['low'].shift(1)) / (df_out['low'].shift(1) + 1e-8) < -0.002).astype(int)
     
-    # Czy poprzednia świeca zamknęła się blisko high/low (potencjalne continuation)
     df_out['closed_near_high'] = ((df_out['close'].shift(1) - df_out['low'].shift(1)) / (df_out['high'].shift(1) - df_out['low'].shift(1) + 1e-8) > 0.8).astype(int)
     df_out['closed_near_low'] = ((df_out['close'].shift(1) - df_out['low'].shift(1)) / (df_out['high'].shift(1) - df_out['low'].shift(1) + 1e-8) < 0.2).astype(int)
 
     logger.debug("  19. TIER 3: Support/Resistance Interaction Features...")
-    # Support/Resistance × Volume (czy testy S/R mają volume confirmation?)
     df_out['resistance_volume_interaction'] = df_out['dist_from_resistance'] * df_out['volume_vs_ma_20']
     df_out['support_volume_interaction'] = df_out['dist_from_support'] * df_out['volume_vs_ma_20']
     
-    # Testing S/R × Volume (czy test S/R ma wysokie volume?)
     df_out['testing_resistance_with_volume'] = df_out['testing_resistance'] * df_out['volume_vs_ma_20']
     df_out['testing_support_with_volume'] = df_out['testing_support'] * df_out['volume_vs_ma_20']
     
-    # S/R × Momentum (czy przy S/R jest silny momentum?)
     df_out['resistance_momentum_interaction'] = df_out['testing_resistance'] * abs(df_out['price_change_pct_5'])
     df_out['support_momentum_interaction'] = df_out['testing_support'] * abs(df_out['price_change_pct_5'])
     
-    # S/R × RSI (czy przy S/R RSI jest w overbought/oversold?)
     if 'rsi_14' in df_out.columns:
         df_out['resistance_rsi_interaction'] = df_out['testing_resistance'] * (df_out['rsi_14'] / 100)
         df_out['support_rsi_interaction'] = df_out['testing_support'] * (1 - df_out['rsi_14'] / 100)
 
-    # COMPOSITE INDICATOR #3: S/R Context Score (3 features)
     logger.info("  🔬 Composite #3: S/R Context Score...")
     sr_context_features = _calculate_sr_context(df_out)
     df_out = pd.concat([df_out, pd.DataFrame(sr_context_features, index=df_out.index)], axis=1)
 
-    # ENHANCEMENT #3: Memory cleanup after TIER 3 features
     gc.collect()
 
-    # ========================================================================
-    # TIER 3: COMPOSITE INDICATORS & ADVANCED FEATURES (full only)
-    # Skip features 20-22 if feature_level='standard'
-    # ========================================================================
     if feature_level == FEATURE_LEVEL_STANDARD:
         logger.info(f"  ⏭️  Skipping TIER 3-4 features (20-22) - standard mode")
-        # Jump to end of function (TIER 1-2 only)
         df_out.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df_out = df_out.copy()  # Defragment
+        df_out = df_out.copy()
         return df_out
 
-    # TIER 3-4 continues here for full mode only
-    # POPRAWKA #3: TIER 4 - Enhanced Momentum Features dla LONG
     logger.debug("  20. POPRAWKA #3: TIER 4 - Enhanced Momentum Features dla LONG...")
-    # ENHANCEMENT #10: Use parallel ICT computation if enabled in config
     parallel_ict = FEATURE_CONFIG['performance'].get('parallel_ict', True)
     enhanced_momentum_features = {}
     
-    # Price momentum acceleration (2nd derivative) - wykrywa przyspieszenie ruchu
-    # OPTIMIZED: Use cached pct_change
     enhanced_momentum_features['price_accel_3'] = _cache['close_pct_3'].diff()
     enhanced_momentum_features['price_accel_5'] = _cache['close_pct_5'].diff()
 
-    # Multi-period momentum consensus (0 = bearish, 1 = bullish)
-    # OPTIMIZED: Use cached pct_change
     enhanced_momentum_features['momentum_consensus'] = (
         (_cache['close_pct_5'] > 0).astype(int) +
         (_cache['close_pct_10'] > 0).astype(int) +
         (_cache['close_pct_20'] > 0).astype(int)
     ) / 3
     
-    # Volume-confirmed momentum (czy momentum jest wspierany przez wolumen)
     enhanced_momentum_features['vol_confirmed_momentum'] = (
         (df_out['close'] > df_out['close'].shift(5)) & 
         (df_out['volume'] > df_out['volume'].rolling(20).mean())
     ).astype(int)
     
-    # Breakout detection (price crossing above resistance with volume)
     if 'resistance_50' in df_out.columns:
         enhanced_momentum_features['breakout_signal'] = (
             (df_out['close'] > df_out['resistance_50']) &
@@ -2180,11 +1818,9 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
             (df_out['volume'] > df_out['volume'].rolling(20).mean() * 1.5)
         ).astype(int)
     
-    # Trend acceleration (czy trend przyspiesza czy zwalnia)
     if 'sma_20_slope_4h' in df_out.columns:
         enhanced_momentum_features['trend_acceleration'] = df_out['sma_20_slope_4h'].diff()
     
-    # Momentum strength score (composite indicator)
     enhanced_momentum_features['momentum_strength_score'] = (
         enhanced_momentum_features['momentum_consensus'] * 0.3 +
         enhanced_momentum_features['vol_confirmed_momentum'] * 0.4 +
@@ -2193,37 +1829,28 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     
     df_out = pd.concat([df_out, pd.DataFrame(enhanced_momentum_features, index=df_out.index)], axis=1)
 
-    # === PRIORYTET 3: VOLUME-CONFIRMED MOMENTUM (continuous versions) ===
     logger.debug("  20B. Volume-Confirmed Momentum Features...")
     volume_momentum = {}
 
-    # Volume-weighted price momentum (VOL * price change)
-    # OPTIMIZED: Use cached values
     volume_momentum['vol_weighted_roc_5'] = (
         _cache['close_pct_5'] *
         (df_out['volume'] / _cache['volume_ma_20'])
     )
 
-    # Momentum strength ratio (momentum / ATR)
-    # OPTIMIZED: Use cached pct_change(10)
     atr_vm = _safe_atr(df_out, 14)
     volume_momentum['momentum_strength_ratio'] = (
         _cache['close_pct_10'].abs() / (atr_vm / df_out['close'] + 1e-8)
     )
 
-    # Volume divergence from momentum
-    # (czy volume potwierdza direction ceny)
     price_up = (df_out['close'] > df_out['close'].shift(5)).astype(int)
     vol_increasing = (df_out['volume'] > df_out['volume'].shift(5)).astype(int)
     volume_momentum['vol_price_alignment'] = (price_up == vol_increasing).astype(float)
 
-    # RSI-Volume concordance (czy extreme RSI ma volume backup)
     if 'rsi_14' in df_out.columns:
         rsi_extreme = ((df_out['rsi_14'] < 30) | (df_out['rsi_14'] > 70)).astype(float)
         vol_spike = (df_out['volume'] > df_out['volume'].rolling(20).mean() * 1.5).astype(float)
         volume_momentum['rsi_vol_concordance'] = rsi_extreme * vol_spike
 
-    # Money Flow (continuous version - better than binary MFI)
     typical_price = (df_out['high'] + df_out['low'] + df_out['close']) / 3
     money_flow = typical_price * df_out['volume']
     volume_momentum['money_flow_ratio'] = (
@@ -2232,11 +1859,7 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
 
     df_out = pd.concat([df_out, pd.DataFrame(volume_momentum, index=df_out.index)], axis=1)
     logger.info(f"     ✓ Dodano {len(volume_momentum)} volume-momentum features")
-    # === KONIEC PRIORYTET 3 ===
 
-    # ========================================================================
-    # NOWE: Dodanie wskaźników kompozytowych
-    # ========================================================================
     logger.debug("  21. Wskaźniki kompozytowe (uproszczone sygnały)...")
     df_out = add_oversold_overbought_signal(df_out)
     df_out = add_market_state_indicator(df_out)
@@ -2244,29 +1867,17 @@ def _calculate_base_features(df_out: pd.DataFrame, feature_level: str = FEATURE_
     df_out = add_volume_confirmation_score(df_out)
     df_out = add_multi_factor_sentiment(df_out)
     logger.info("     ✓ Dodano 5 nowych wskaźników kompozytowych")
-    # ========================================================================
 
-    # ENHANCEMENT #3: Memory cleanup after TIER 4 composite indicators
     gc.collect()
 
-    # ========================================================================
-    # ICT & SMART MONEY CONCEPTS - TYMCZASOWO WYŁĄCZONE (0% selection rate)
-    # ========================================================================
-    # OPTIMIZATION: ICT features mają 0% selection rate (tylko 2 z 37 selected)
-    # Wyłączone aby zaoszczędzić 20% czasu training (z 138 min → 110 min)
-    # Funkcja add_ict_smart_money_features() pozostaje w kodzie do przyszłego użytku
     logger.debug("  22. ICT & Smart Money Concepts (HIGH PRIORITY + EXPERIMENT 3A)...")
-    # ENHANCEMENT #10: Use parallel computation for 2-3x speedup
     df_out = add_ict_smart_money_features(df_out, parallel=parallel_ict)
     logger.info("     ✓ ICT/Smart Money: 37+ cech dodanych (30 base + 7 rolling for reduced sparsity)")
-    # ========================================================================
 
-    # ENHANCEMENT #3: Memory cleanup after ICT features (most expensive tier)
     gc.collect()
 
     df_out.replace([np.inf, -np.inf], np.nan, inplace=True)
     
-    # Defragment DataFrame to avoid PerformanceWarning
     df_out = df_out.copy()
     
     return df_out
@@ -2286,29 +1897,23 @@ def _calculate_helper_features(df: pd.DataFrame, feature_level: str = FEATURE_LE
     """
     df[f'atr_normalized'] = _safe_atr(df, 14) / df['close']
 
-    # === PRIORYTET 1: MULTI-TIMEFRAME MOMENTUM ===
-    # RSI dla helper timeframe (BARDZO WAŻNE dla ML)
     df['rsi_14'] = _safe_rsi(df, 14)
-    df['rsi_21'] = _safe_rsi(df, 21)  # Wolniejszy RSI
+    df['rsi_21'] = _safe_rsi(df, 21)
 
-    # RSI slope (czy momentum przyspiesza/zwalnia)
     df['rsi_slope'] = df['rsi_14'].diff(3)
 
-    # RSI vs price divergence (continuous, nie binary)
     df['rsi_price_divergence_cont'] = (
         df['rsi_14'].pct_change(5) - df['close'].pct_change(5)
     )
 
-    # ROC normalized przez ATR (volatility-adjusted momentum)
     atr = _safe_atr(df, 14)
     df['roc_5_atr_norm'] = (df['close'].pct_change(5) / (atr / df['close'] + 1e-8))
     df['roc_10_atr_norm'] = (df['close'].pct_change(10) / (atr / df['close'] + 1e-8))
 
-    # MFI (volume-weighted momentum) - może być dobry na wyższych TF
     mfi = df.ta.mfi(length=14)
     if mfi is not None:
         df['mfi_14'] = mfi
-        df['mfi_slope'] = mfi.diff(3)  # Acceleration
+        df['mfi_slope'] = mfi.diff(3)
 
     swing_high, swing_low = df['high'].rolling(window=50).max(), df['low'].rolling(window=50).min()
     df[f'dist_from_swing_high_50'] = (df['close'] - swing_high) / swing_high
@@ -2318,22 +1923,17 @@ def _calculate_helper_features(df: pd.DataFrame, feature_level: str = FEATURE_LE
 
     df['rvol_ratio'] = up_volume.rolling(window=50).sum() / (down_volume.rolling(window=50).sum() + 1e-5)
 
-    # TIER 2A: Multi-timeframe Trend Alignment
-    # Moving averages dla różnych okresów
     df['sma_20'] = df['close'].rolling(20).mean()
     df['sma_50'] = df['close'].rolling(50).mean()
     df['sma_100'] = df['close'].rolling(100).mean()
 
-    # Trend direction (czy cena > MA)
     df['above_sma_20'] = (df['close'] > df['sma_20']).astype(int)
     df['above_sma_50'] = (df['close'] > df['sma_50']).astype(int)
     df['above_sma_100'] = (df['close'] > df['sma_100']).astype(int)
 
-    # MA slope (czy MA rośnie/spada)
     df['sma_20_slope'] = df['sma_20'].pct_change(5)
     df['sma_50_slope'] = df['sma_50'].pct_change(5)
 
-    # Trend strength: odległość od MA
     df['dist_from_sma_20'] = (df['close'] - df['sma_20']) / (df['sma_20'] + 1e-8)
     df['dist_from_sma_50'] = (df['close'] - df['sma_50']) / (df['sma_50'] + 1e-8)
 
@@ -2342,18 +1942,12 @@ def _calculate_helper_features(df: pd.DataFrame, feature_level: str = FEATURE_LE
         'above_sma_20', 'above_sma_50', 'above_sma_100',
         'sma_20_slope', 'sma_50_slope',
         'dist_from_sma_20', 'dist_from_sma_50',
-        # MOMENTUM FEATURES:
         'rsi_14', 'rsi_21', 'rsi_slope', 'rsi_price_divergence_cont',
         'roc_5_atr_norm', 'roc_10_atr_norm', 'mfi_14', 'mfi_slope'
     ]
-    # DON'T dropna() here - it causes ALL helper features to become NaN after merge_asof
-    # Main dropna() happens in fetch_and_prepare_data() after all features are merged
     return df[key_features]
 
 
-# ============================================================================
-# NEW ADVANCED FEATURES (from expert analysis)
-# ============================================================================
 
 def detect_pivot_points(df: pd.DataFrame, window: int = 5) -> tuple:
     """
@@ -2377,13 +1971,10 @@ def detect_pivot_points(df: pd.DataFrame, window: int = 5) -> tuple:
     highs = df['high'].values
     lows = df['low'].values
 
-    # Find pivot highs (local maxima) using scipy
-    # distance=window ensures peaks are at least 'window' bars apart
     peak_indices, _ = find_peaks(highs, distance=window)
     pivot_highs = pd.Series(False, index=df.index)
     pivot_highs.iloc[peak_indices] = True
 
-    # Find pivot lows (local minima = peaks of inverted signal)
     trough_indices, _ = find_peaks(-lows, distance=window)
     pivot_lows = pd.Series(False, index=df.index)
     pivot_lows.iloc[trough_indices] = True
@@ -2406,23 +1997,17 @@ def calculate_confluence_features(df: pd.DataFrame) -> pd.DataFrame:
     """
     confluence = {}
 
-    # 1. Multi-timeframe trend alignment score
-    # FIX: Use suffix format (feature_timeframe) instead of prefix (timeframe_feature)
     if all(col in df.columns for col in ['sma_20_slope', 'sma_20_slope_1h', 'sma_20_slope_4h']):
         slopes_15m = np.sign(df['sma_20_slope'])
         slopes_1h = np.sign(df['sma_20_slope_1h'])
         slopes_4h = np.sign(df['sma_20_slope_4h'])
         confluence['mtf_trend_alignment_score'] = (slopes_15m + slopes_1h + slopes_4h) / 3
 
-    # 2. Support + 4h uptrend confluence (LONG setup)
-    # FIX: Use suffix format (feature_timeframe) instead of prefix (timeframe_feature)
     if all(col in df.columns for col in ['testing_support', 'sma_20_slope_4h']):
         confluence['support_with_4h_uptrend'] = (
             df['testing_support'] * (df['sma_20_slope_4h'] > 0).astype(float)
         )
 
-    # 3. Resistance + 4h downtrend confluence (SHORT setup)
-    # FIX: Use suffix format (feature_timeframe) instead of prefix (timeframe_feature)
     if all(col in df.columns for col in ['testing_resistance', 'sma_20_slope_4h']):
         confluence['resistance_with_4h_downtrend'] = (
             df['testing_resistance'] * (df['sma_20_slope_4h'] < 0).astype(float)
@@ -2444,57 +2029,45 @@ def calculate_pivot_sr_features(df: pd.DataFrame, lookback: int = 100) -> pd.Dat
     """
     pivot_features = {}
 
-    # Detect pivots (already optimized with scipy)
     pivot_highs, pivot_lows = detect_pivot_points(df, window=5)
 
     pivot_features['is_pivot_high'] = pivot_highs.astype(int)
     pivot_features['is_pivot_low'] = pivot_lows.astype(int)
 
-    # OPTIMIZED: Vectorized pivot lookups using searchsorted (NO LOOPS!)
-    # Get indices and values of pivots
     pivot_high_indices = np.where(pivot_highs)[0]
     pivot_high_values = df['high'].values[pivot_high_indices]
 
     pivot_low_indices = np.where(pivot_lows)[0]
     pivot_low_values = df['low'].values[pivot_low_indices]
 
-    # Distance to nearest pivot resistance (last pivot high before each point)
     last_pivot_high_arr = np.full(len(df), np.nan)
     if len(pivot_high_indices) > 0:
-        # For each position, find index of last pivot before it using searchsorted
         positions = np.arange(len(df))
         last_pivot_idx = np.searchsorted(pivot_high_indices, positions, side='right') - 1
 
-        # Use last pivot value where valid (pivot exists before position)
         valid_mask = last_pivot_idx >= 0
         last_pivot_high_arr[valid_mask] = pivot_high_values[last_pivot_idx[valid_mask]]
 
-    # Convert to Series for compatibility with rest of code
     last_pivot_high = pd.Series(last_pivot_high_arr, index=df.index)
 
     pivot_features['dist_from_nearest_resistance_pivot'] = (
         (df['close'] - last_pivot_high) / (last_pivot_high + 1e-8)
     )
 
-    # Distance to nearest pivot support (last pivot low before each point)
     last_pivot_low_arr = np.full(len(df), np.nan)
     if len(pivot_low_indices) > 0:
-        # For each position, find index of last pivot before it using searchsorted
         positions = np.arange(len(df))
         last_pivot_idx = np.searchsorted(pivot_low_indices, positions, side='right') - 1
 
-        # Use last pivot value where valid (pivot exists before position)
         valid_mask = last_pivot_idx >= 0
         last_pivot_low_arr[valid_mask] = pivot_low_values[last_pivot_idx[valid_mask]]
 
-    # Convert to Series for compatibility with rest of code
     last_pivot_low = pd.Series(last_pivot_low_arr, index=df.index)
 
     pivot_features['dist_from_nearest_support_pivot'] = (
         (df['close'] - last_pivot_low) / (last_pivot_low + 1e-8)
     )
 
-    # Pivot strength (how many times touched)
     pivot_features['nearest_resistance_strength'] = (
         (df['high'] >= last_pivot_high * 0.995).astype(int).rolling(lookback).sum()
     )
@@ -2503,14 +2076,12 @@ def calculate_pivot_sr_features(df: pd.DataFrame, lookback: int = 100) -> pd.Dat
         (df['low'] <= last_pivot_low * 1.005).astype(int).rolling(lookback).sum()
     )
 
-    # Resistance flip detection (support became resistance)
     pivot_features['resistance_flip_signal'] = (
         (df['close'] < last_pivot_low.shift(10)) &
         (df['close'] > last_pivot_low * 0.995) &
         (df['close'] < last_pivot_low * 1.005)
     ).astype(int)
 
-    # Support flip detection (resistance became support)
     pivot_features['support_flip_signal'] = (
         (df['close'] > last_pivot_high.shift(10)) &
         (df['close'] < last_pivot_high * 1.005) &
@@ -2543,30 +2114,24 @@ def detect_double_top_bottom_patterns(df: pd.DataFrame, lookback: int = 200, tol
     """
     pattern_features = {}
 
-    # Find local peaks with stricter criteria
     pivot_highs, pivot_lows = detect_pivot_points(df, window=7)
 
-    # PRE-COMPUTE avg_vol ONCE (huge performance gain)
     avg_vol = df['volume'].mean() if 'volume' in df.columns else 1.0
     has_volume = 'volume' in df.columns
 
-    # Convert to numpy arrays for faster access
     high_values = df['high'].values
     low_values = df['low'].values
     vol_values = df['volume'].values if has_volume else None
     index_values = df.index.values
 
-    # Double top strength score
     double_top_strength = np.zeros(len(df))
     double_top_distance = np.zeros(len(df))
 
-    # Get pivot indices once
     pivot_high_indices = np.where(pivot_highs)[0]
 
-    MAX_COMPARISONS = 50  # Limit comparisons to prevent explosion
+    MAX_COMPARISONS = 50
 
     for i in range(lookback, len(df)):
-        # Find pivots in lookback window
         mask = (pivot_high_indices <= i) & (pivot_high_indices > i - lookback)
         recent_pivot_idx = pivot_high_indices[mask]
 
@@ -2574,10 +2139,8 @@ def detect_double_top_bottom_patterns(df: pd.DataFrame, lookback: int = 200, tol
             max_strength = 0.0
             best_distance = 0
 
-            # OPTIMIZATION: Limit pairs if too many pivots
             n_pivots = len(recent_pivot_idx)
             if n_pivots > 20:
-                # Keep only last 15 pivots (most recent patterns more important)
                 recent_pivot_idx = recent_pivot_idx[-15:]
                 n_pivots = 15
 
@@ -2586,7 +2149,7 @@ def detect_double_top_bottom_patterns(df: pd.DataFrame, lookback: int = 200, tol
                 for k in range(j + 1, n_pivots):
                     comparison_count += 1
                     if comparison_count > MAX_COMPARISONS:
-                        break  # Early exit
+                        break
 
                     idx1 = recent_pivot_idx[j]
                     idx2 = recent_pivot_idx[k]
@@ -2629,15 +2192,12 @@ def detect_double_top_bottom_patterns(df: pd.DataFrame, lookback: int = 200, tol
     pattern_features['double_top_strength'] = double_top_strength
     pattern_features['double_top_candles_between'] = double_top_distance
 
-    # Double bottom strength score (symmetric)
     double_bottom_strength = np.zeros(len(df))
     double_bottom_distance = np.zeros(len(df))
 
-    # Get pivot indices once
     pivot_low_indices = np.where(pivot_lows)[0]
 
     for i in range(lookback, len(df)):
-        # Find pivots in lookback window
         mask = (pivot_low_indices <= i) & (pivot_low_indices > i - lookback)
         recent_pivot_idx = pivot_low_indices[mask]
 
@@ -2645,7 +2205,6 @@ def detect_double_top_bottom_patterns(df: pd.DataFrame, lookback: int = 200, tol
             max_strength = 0.0
             best_distance = 0
 
-            # OPTIMIZATION: Limit pairs if too many pivots
             n_pivots = len(recent_pivot_idx)
             if n_pivots > 20:
                 recent_pivot_idx = recent_pivot_idx[-15:]
@@ -2699,7 +2258,6 @@ def detect_double_top_bottom_patterns(df: pd.DataFrame, lookback: int = 200, tol
     pattern_features['double_bottom_strength'] = double_bottom_strength
     pattern_features['double_bottom_candles_between'] = double_bottom_distance
 
-    # Pattern + S/R confluence
     if 'testing_resistance' in df.columns:
         pattern_features['double_top_at_resistance'] = (
             double_top_strength * df['testing_resistance']
@@ -2710,7 +2268,6 @@ def detect_double_top_bottom_patterns(df: pd.DataFrame, lookback: int = 200, tol
             double_bottom_strength * df['testing_support']
         )
 
-    # Pattern recency (continuous decay)
     pattern_features['double_top_recency'] = np.where(
         double_top_distance > 0,
         1.0 / (1.0 + double_top_distance / 10),
@@ -2743,11 +2300,9 @@ def _validate_data_preparer_inputs(ticker: str, timeframe: str, limit: int, help
     """
     errors = []
 
-    # Ticker format validation
     if not isinstance(ticker, str) or len(ticker) < 6:
         errors.append(f"Invalid ticker format: '{ticker}' (must be string, min 6 chars)")
 
-    # Timeframe validation
     supported_timeframes = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d', '1w']
 
     try:
@@ -2758,7 +2313,6 @@ def _validate_data_preparer_inputs(ticker: str, timeframe: str, limit: int, help
     if timeframe not in supported_timeframes:
         errors.append(f"Unsupported timeframe: '{timeframe}'. Supported: {supported_timeframes}")
 
-    # Limit validation
     if not isinstance(limit, int):
         errors.append(f"Invalid limit type: {type(limit).__name__} (must be int)")
     elif limit <= 0:
@@ -2766,7 +2320,6 @@ def _validate_data_preparer_inputs(ticker: str, timeframe: str, limit: int, help
     elif limit > 200000:
         errors.append(f"Limit too large: {limit} (max 200000 candles)")
 
-    # Helper timeframes validation
     if helper_timeframes:
         if not isinstance(helper_timeframes, list):
             errors.append(f"Invalid helper_timeframes type: {type(helper_timeframes).__name__} (must be list)")
@@ -2775,24 +2328,20 @@ def _validate_data_preparer_inputs(ticker: str, timeframe: str, limit: int, help
                 base_mins = pd.to_timedelta(timeframe).total_seconds() / 60
 
                 for helper_tf in helper_timeframes:
-                    # Check if valid timeframe
                     try:
                         helper_mins = pd.to_timedelta(helper_tf).total_seconds() / 60
                     except Exception:
                         errors.append(f"Invalid helper timeframe format: '{helper_tf}'")
                         continue
 
-                    # Check if supported
                     if helper_tf not in supported_timeframes:
                         errors.append(f"Unsupported helper timeframe: '{helper_tf}'. Supported: {supported_timeframes}")
 
-                    # Check if larger than base
                     if helper_mins <= base_mins:
                         errors.append(
                             f"Helper timeframe '{helper_tf}' ({helper_mins:.0f}min) must be > base '{timeframe}' ({base_mins:.0f}min)"
                         )
 
-                    # Check for duplicates
                     if helper_timeframes.count(helper_tf) > 1:
                         errors.append(f"Duplicate helper timeframe: '{helper_tf}'")
 
@@ -2805,9 +2354,6 @@ def _validate_data_preparer_inputs(ticker: str, timeframe: str, limit: int, help
     logger.info(f"✅ Input validation passed: {ticker} {timeframe} limit={limit} helpers={helper_timeframes}")
 
 
-# ============================================================================
-# ENHANCEMENT #2: PERSISTENT DISK CACHE FOR FEATURES
-# ============================================================================
 
 def _generate_cache_key(ticker: str, timeframe: str, helper_timeframes: list, limit: int, feature_level: str = FEATURE_LEVEL_FULL) -> str:
     """
@@ -2829,13 +2375,10 @@ def _generate_cache_key(ticker: str, timeframe: str, helper_timeframes: list, li
     Returns:
         MD5 hash string (32 chars)
     """
-    # Round limit to nearest 1000 for better cache hits
     rounded_limit = round(limit / 1000) * 1000
 
-    # Sort helpers for consistent hash
     helpers_str = '_'.join(sorted(helper_timeframes or []))
 
-    # Create cache key with feature_level
     key_components = f"{ticker}_{timeframe}_{helpers_str}_{rounded_limit}_{feature_level}"
     cache_hash = hashlib.md5(key_components.encode()).hexdigest()
 
@@ -2852,7 +2395,7 @@ def _get_cache_paths(cache_key: str) -> tuple:
     cache_dir = Path("cache/features")
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    data_path = cache_dir / f"{cache_key}.pkl"  # Changed from .parquet to .pkl (no deps needed)
+    data_path = cache_dir / f"{cache_key}.pkl"
     metadata_path = cache_dir / f"{cache_key}.metadata.json"
 
     return (data_path, metadata_path)
@@ -2881,24 +2424,20 @@ def _load_feature_cache(cache_key: str, ticker: str, timeframe: str, helper_time
     """
     data_path, metadata_path = _get_cache_paths(cache_key)
 
-    # Check if cache exists
     if not data_path.exists() or not metadata_path.exists():
         logger.info(f"💾 Cache miss - no cache file for key {cache_key[:8]}...")
         return pd.DataFrame()
 
     try:
-        # Load metadata
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
 
-        # Validate cache parameters match
         if (metadata.get('ticker') != ticker or
             metadata.get('timeframe') != timeframe or
             metadata.get('helper_timeframes') != helper_timeframes):
             logger.warning(f"⚠️  Cache parameters mismatch - invalidating cache")
             return pd.DataFrame()
 
-        # CRITICAL FIX #3: Validate feature_level matches
         cached_feature_level = metadata.get('feature_level')
         if cached_feature_level != feature_level:
             logger.warning(
@@ -2907,10 +2446,8 @@ def _load_feature_cache(cache_key: str, ticker: str, timeframe: str, helper_time
             )
             return pd.DataFrame()
 
-        # Load feature data (pickle format - fast and no dependencies)
         cached_df = pd.read_pickle(data_path)
 
-        # CRITICAL FIX #3: Validate column consistency
         cached_columns = set(metadata.get('column_names', []))
         actual_columns = set(cached_df.columns)
 
@@ -2961,20 +2498,17 @@ def _save_feature_cache(df: pd.DataFrame, cache_key: str, ticker: str, timeframe
     try:
         data_path, metadata_path = _get_cache_paths(cache_key)
 
-        # Save feature data (pickle = fast, no dependencies)
-        # Note: Compression disabled to avoid load errors with different pandas versions
         df.to_pickle(data_path, compression=None)
 
-        # Save metadata with enhanced validation fields
         metadata = {
             'ticker': ticker,
             'timeframe': timeframe,
             'helper_timeframes': helper_timeframes,
             'limit': limit,
-            'feature_level': feature_level,  # CRITICAL FIX #3: Store feature level for validation
+            'feature_level': feature_level,
             'rows': len(df),
             'columns': len(df.columns),
-            'column_names': list(df.columns),  # CRITICAL FIX #3: Store column list for validation
+            'column_names': list(df.columns),
             'last_timestamp': str(df.index[-1]) if not df.empty else None,
             'last_updated': str(pd.Timestamp.now()),
             'cache_key': cache_key
@@ -3055,8 +2589,7 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
             logger.error(f"  ❌ Failed to fetch {tf}: {e}")
             return (tf, None)
 
-    # Prepare all fetch tasks
-    tasks = [(timeframe, limit)]  # Base timeframe
+    tasks = [(timeframe, limit)]
     if helper_timeframes:
         for helper_tf in helper_timeframes:
             helper_limit = calc_helper_limit(helper_tf)
@@ -3064,12 +2597,10 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
 
     logger.info(f"🚀 ENHANCEMENT #1: Parallel fetching {len(tasks)} timeframes...")
 
-    # Execute all fetches in parallel
     results = {}
     with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
         future_to_tf = {executor.submit(fetch_single_timeframe, tf, lim): tf for tf, lim in tasks}
 
-        # ENHANCEMENT #9: Progress bar for API fetching
         tqdm_settings = get_tqdm_settings()
         with tqdm(total=len(tasks), desc="⬇️  Fetching timeframes", **tqdm_settings) as pbar:
             for future in as_completed(future_to_tf):
@@ -3083,17 +2614,15 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
                     logger.warning(f"  ⚠️  {tf}: NO DATA")
                 pbar.update(1)
 
-    # Process results
     base_raw_data = results.get(timeframe)
     if not base_raw_data:
         logger.error(f"❌ Base timeframe {timeframe} returned EMPTY DATA!")
         return None, {}
 
     base_df = to_dataframe(base_raw_data)
-    base_df = base_df.iloc[:-1]  # Remove last forming candle
+    base_df = base_df.iloc[:-1]
     base_df.sort_index(inplace=True)
 
-    # Process helper timeframes
     helper_dfs = {}
     if helper_timeframes:
         for helper_tf in helper_timeframes:
@@ -3107,7 +2636,7 @@ def _fetch_all_timeframes_parallel(adapter, ticker, timeframe, limit, helper_tim
     return base_df, helper_dfs
 
 
-@timer  # PHASE 4: Performance monitoring
+@timer
 def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timeframes: list = None, side: str = 'long', date_from: str = None, version: str = 'v1.0', model_features_to_preserve: list = None, fetch_max_history: bool = False, skip_slow_features: bool = False, feature_level: str = None, use_feature_feedback: bool = False, feedback_threshold: float = 0.95):
     """
     Fetch and prepare data for ML training.
@@ -3151,7 +2680,6 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     else:
         logger.info(f"ℹ️  No date_from specified, fetching backwards from current time")
 
-    # ENHANCEMENT #7: Resolve feature level (with backwards compatibility)
     resolved_feature_level = _resolve_feature_level(feature_level, skip_slow_features)
     logger.info(f"🎚️  Feature level: {resolved_feature_level} ({
         '~50' if resolved_feature_level == FEATURE_LEVEL_BASIC else
@@ -3159,23 +2687,19 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         '~300'
     } features)")
 
-    # ENHANCEMENT #4: Input validation - fail-fast before API calls
     _validate_data_preparer_inputs(ticker, timeframe, limit, helper_timeframes)
 
-    # ENHANCEMENT #2: Try loading from persistent disk cache
     cache_key = None
     cached_df = pd.DataFrame()
-    use_cache = not date_from and not fetch_max_history  # Only cache standard calls
+    use_cache = not date_from and not fetch_max_history
 
     if use_cache:
         cache_key = _generate_cache_key(ticker, timeframe, helper_timeframes, limit, resolved_feature_level)
         cached_df = _load_feature_cache(cache_key, ticker, timeframe, helper_timeframes, limit, resolved_feature_level)
 
         if not cached_df.empty:
-            # Check cache freshness
             last_cached_timestamp = cached_df.index[-1]
 
-            # Handle timezone: convert both to tz-naive for comparison
             now = pd.Timestamp.now()
             if hasattr(last_cached_timestamp, 'tz') and last_cached_timestamp.tz is not None:
                 last_cached_timestamp = last_cached_timestamp.tz_localize(None)
@@ -3183,16 +2707,11 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             cache_age_minutes = (now - last_cached_timestamp).total_seconds() / 60
             timeframe_minutes = pd.to_timedelta(timeframe).total_seconds() / 60
 
-            # If cache is fresh (< timeframe period), return immediately
-            # Using 1.5x multiplier as balance between freshness and cache utility
-            # - Live bot (regular fetches): cache age ~< timeframe → always fresh
-            # - Backtest/training: allows some staleness for better cache reuse
-            if cache_age_minutes < timeframe_minutes * 1.5:  # 1.5x timeframe = production threshold
+            if cache_age_minutes < timeframe_minutes * 1.5:
                 logger.info(
                     f"🎯 CACHE HIT - Fresh data returned "
                     f"(age: {cache_age_minutes:.1f}min < {timeframe_minutes:.1f}min)"
                 )
-                # Apply model_features_to_preserve filter if needed
                 if model_features_to_preserve:
                     available = [f for f in model_features_to_preserve if f in cached_df.columns]
                     return cached_df[available]
@@ -3202,10 +2721,8 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
                     f"⏰ Cache stale (age: {cache_age_minutes:.1f}min), "
                     f"will fetch fresh data and update cache"
                 )
-                # Clear cached_df to force full refetch
                 cached_df = pd.DataFrame()
 
-    # Load API keys from .env_demo (for training/backtesting we use demo API)
     load_dotenv('.env_demo')
     api_key, api_secret = os.getenv("BYBIT_API_KEY"), os.getenv("BYBIT_API_SECRET")
     base_url = os.getenv("BYBIT_BASE_URL")
@@ -3213,7 +2730,6 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         raise ValueError("Brak kluczy API - sprawdź czy plik .env_demo istnieje i zawiera BYBIT_API_KEY oraz BYBIT_API_SECRET")
     adapter = BybitAdapter(api_key=api_key, api_secret=api_secret, base_url=base_url)
 
-    # ENHANCEMENT #1: Parallel fetching of all timeframes (2x API speedup)
     base_df, helper_dfs_dict = _fetch_all_timeframes_parallel(
         adapter, ticker, timeframe, limit, helper_timeframes, date_from, fetch_max_history
     )
@@ -3222,7 +2738,6 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         logger.error(f"❌ Failed to fetch data for {ticker} {timeframe}!")
         return pd.DataFrame()
 
-    # BUG FIX #1: Remove duplicates from base_df BEFORE merging helper features
     if base_df.index.duplicated().any():
         n_duplicates = base_df.index.duplicated().sum()
         logger.warning(f"⚠️  Wykryto {n_duplicates} duplikatów w base_df. Usuwanie (keep='first')...")
@@ -3232,9 +2747,7 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     logger.info(f"✅ Pobrano {len(base_df)} zamkniętych świec dla interwału bazowego {timeframe}.")
     logger.info(f"📊 Base DataFrame shape after loading: {base_df.shape}")
 
-    # Process helper timeframes (data already fetched in parallel)
     if helper_timeframes and helper_dfs_dict:
-        # ENHANCEMENT #9: Progress bar for helper timeframe processing
         tqdm_settings = get_tqdm_settings()
         with tqdm(total=len(helper_timeframes), desc="⚙️  Processing helpers", **tqdm_settings) as pbar:
             for helper_tf in helper_timeframes:
@@ -3247,7 +2760,6 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
                     pbar.set_postfix_str(f"{helper_tf}")
                 helper_df = helper_dfs_dict[helper_tf]
 
-                # BUG FIX #1: Remove duplicates from helper_df BEFORE calculating features
                 if helper_df.index.duplicated().any():
                     n_dup = helper_df.index.duplicated().sum()
                     logger.warning(f"⚠️  {helper_tf}: Wykryto {n_dup} duplikatów. Usuwanie (keep='first')...")
@@ -3256,7 +2768,6 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
                 helper_features = _calculate_helper_features(helper_df.copy(), feature_level=resolved_feature_level)
                 helper_features.rename(columns=lambda x: f"{x}_{helper_tf}", inplace=True)
 
-                # BUG FIX #1: Ensure helper_features has no duplicates before merge
                 if helper_features.index.duplicated().any():
                     n_dup = helper_features.index.duplicated().sum()
                     logger.warning(f"⚠️  {helper_tf} features: {n_dup} duplikatów. Usuwanie (keep='first')...")
@@ -3265,7 +2776,6 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
                 base_df = pd.merge_asof(base_df, helper_features, left_index=True, right_index=True, direction='backward')
                 pbar.update(1)
 
-    # BUG FIX #1: Safety check - should rarely trigger now that we handle duplicates before merge
     if base_df.index.duplicated().any():
         n_duplicates = base_df.index.duplicated().sum()
         logger.warning(
@@ -3279,10 +2789,8 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     final_df = _calculate_base_features(base_df, feature_level=resolved_feature_level)
     logger.info(f"📊 DataFrame shape after feature calculation: {final_df.shape}")
 
-    # OPTIMIZATION: Multi-timeframe confluence features
     if helper_timeframes:
         logger.info("\n🔄 Calculating multi-timeframe confluence features...")
-        # Trend alignment score - are trends aligned across timeframes?
         trend_signals = []
         for helper_tf in helper_timeframes:
             slope_col = f'sma_20_slope_{helper_tf}'
@@ -3292,18 +2800,15 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         if trend_signals:
             final_df['trend_alignment_score'] = sum(trend_signals) / len(trend_signals)
             logger.info(f"   ✓ Added trend_alignment_score across {len(trend_signals)} timeframes")
-        # Swing alignment score - are we near swing highs/lows across timeframes?
         swing_high_signals = []
         swing_low_signals = []
         for helper_tf in helper_timeframes:
             swing_high_col = f'dist_from_swing_high_50_{helper_tf}'
             swing_low_col = f'dist_from_swing_low_50_{helper_tf}'
             if swing_high_col in final_df.columns:
-                # Negative distance means below swing high
-                swing_high_signals.append((final_df[swing_high_col] > -0.02).astype(int))  # Within 2% of swing high
+                swing_high_signals.append((final_df[swing_high_col] > -0.02).astype(int))
             if swing_low_col in final_df.columns:
-                # Positive distance means above swing low
-                swing_low_signals.append((final_df[swing_low_col] < 0.02).astype(int))  # Within 2% of swing low
+                swing_low_signals.append((final_df[swing_low_col] < 0.02).astype(int))
         
         if swing_high_signals:
             final_df['near_swing_high_alignment'] = sum(swing_high_signals) / len(swing_high_signals)
@@ -3311,10 +2816,8 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         if swing_low_signals:
             final_df['near_swing_low_alignment'] = sum(swing_low_signals) / len(swing_low_signals)
             logger.info(f"   ✓ Added near_swing_low_alignment across {len(swing_low_signals)} timeframes")
-        # Multi-timeframe momentum consensus
         momentum_signals = []
         for helper_tf in helper_timeframes:
-            # Check if above SMA on each timeframe
             above_sma_col = f'above_sma_20_{helper_tf}'
             if above_sma_col in final_df.columns:
                 momentum_signals.append(final_df[above_sma_col])
@@ -3323,25 +2826,19 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
             final_df['momentum_alignment_score'] = sum(momentum_signals) / len(momentum_signals)
             logger.info(f"   ✓ Added momentum_alignment_score across {len(momentum_signals)} timeframes")
         logger.info("✓ Multi-timeframe confluence features completed\n")
-    # ========================================================================
-    # NEW ADVANCED FEATURES (expert analysis implementation)
-    # ========================================================================
     if not skip_slow_features:
         logger.info("\n🔬 Calculating ADVANCED features (confluence, pivot S/R, patterns)...")
-        # Progress bar for advanced features
         advanced_tasks = [
             ("Confluence features", lambda: calculate_confluence_features(final_df)),
             ("Pivot-based S/R", lambda: calculate_pivot_sr_features(final_df, lookback=100)),
             ("Pattern detection", lambda: detect_double_top_bottom_patterns(final_df, lookback=200, tolerance=0.015))
         ]
 
-        # Disable progress bar in non-TTY environments (Docker logs)
         is_interactive = sys.stdout.isatty()
         with tqdm(total=len(advanced_tasks), desc="Advanced features", ncols=100,
                   bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]',
                   disable=not is_interactive) as pbar:
 
-            # PRIORITY 1: Confluence features
             pbar.set_description("→ Confluence features")
             confluence_df = advanced_tasks[0][1]()
             if len(confluence_df.columns) > 0:
@@ -3351,7 +2848,6 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
                 logger.warning(f"   ⚠ Skipped (missing required columns)")
             pbar.update(1)
 
-            # PRIORITY 2: Pivot-based dynamic S/R
             pbar.set_description("→ Pivot-based S/R")
             pivot_sr_df = advanced_tasks[1][1]()
             if len(pivot_sr_df.columns) > 0:
@@ -3359,7 +2855,6 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
                 logger.info(f"   ✓ Added {len(pivot_sr_df.columns)} pivot S/R features")
             pbar.update(1)
 
-            # PRIORITY 3: Double top/bottom patterns
             pbar.set_description("→ Pattern detection")
             pattern_df = advanced_tasks[2][1]()
             if len(pattern_df.columns) > 0:
@@ -3370,11 +2865,6 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         logger.info("✓ Advanced features completed\n")
     else:
         logger.info("\n⚡ SKIPPING slow features (skip_slow_features=True) - FAST MODE for live bot\n")
-    # ========================================================================
-    # UPROSZCZENIE: Brak usuwania weak features w data_preparer
-    # Feature selection jest wykonywana TYLKO w model_pipeline.py
-    # Bot/Backtest używają model_features_to_preserve do wyboru kolumn
-    # ========================================================================
     logger.info("\n" + "="*70)
     logger.info("FEATURE MANAGEMENT: Simplified approach")
     logger.info("="*70)
@@ -3390,55 +2880,39 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
     logger.info(f"\nKształt danych przed czyszczeniem (usunięciem wierszy z NaN): {final_df.shape}")
     initial_rows = len(final_df)
 
-    # ========================================================================
-    # BEST PRACTICE: Clean inf values before dropna()
-    # ========================================================================
-    # Dzielenie przez 0 może dawać inf (np. volume_acceleration, ratios)
-    # Replace inf/-inf → NaN, potem dropna() usunie te wiersze
     logger.info("🧹 Czyszczenie inf values...")
     inf_counts = np.isinf(final_df.select_dtypes(include=[np.number])).sum()
     total_infs = inf_counts.sum()
     if total_infs > 0:
         logger.warning(f"   ⚠️  Found {total_infs} inf values across {(inf_counts > 0).sum()} columns")
-        # Show top 5 columns with most infs
         top_inf_cols = inf_counts.nlargest(5)
         for col, count in top_inf_cols.items():
             if count > 0:
                 logger.info(f"      - {col}: {count} inf values")
     final_df.replace([np.inf, -np.inf], np.nan, inplace=True)
     logger.info(f"   ✅ Replaced {total_infs} inf values with NaN")
-    # DEBUG: Check which columns have all NaN
     nan_counts = final_df.isna().sum()
     all_nan_cols = nan_counts[nan_counts == len(final_df)]
     if len(all_nan_cols) > 0:
         logger.warning(f"⚠️  WARNING: {len(all_nan_cols)} columns have ALL NaN values:")
-        for col in all_nan_cols.index[:10]:  # Show first 10
+        for col in all_nan_cols.index[:10]:
             logger.info(f"     - {col}")
         if len(all_nan_cols) > 10:
             logger.info(f"     ... and {len(all_nan_cols) - 10} more")
     final_df.dropna(inplace=True)
     final_rows = len(final_df)
     logger.info(f"Usunięto {initial_rows - final_rows} początkowych wierszy z powodu okresu 'burn-in' dla wskaźników.")
-    # ========================================================================
-    # UPROSZCZENIE: remove_correlated_features() przeniesione do model_pipeline.py
-    # Tutaj zwracamy WSZYSTKIE cechy - feature selection dzieje się podczas treningu
-    # ========================================================================
 
     logger.info(f"\n✅ Przygotowywanie cech zakończone. Finalny kształt danych: {final_df.shape}")
-    # ENHANCEMENT #2: Save to persistent disk cache
     if use_cache and cache_key:
         _save_feature_cache(final_df, cache_key, ticker, timeframe, helper_timeframes, limit, resolved_feature_level)
 
-    # ========================================================================
-    # ENHANCEMENT #9: Feature Importance Feedback Loop
-    # ========================================================================
     if use_feature_feedback:
         weak_features_to_drop = get_weak_features_to_skip(
             ticker, timeframe, helper_timeframes, side, version, feedback_threshold
         )
 
         if weak_features_to_drop:
-            # Only drop features that actually exist in DataFrame
             features_to_drop = [f for f in weak_features_to_drop if f in final_df.columns]
 
             if features_to_drop:

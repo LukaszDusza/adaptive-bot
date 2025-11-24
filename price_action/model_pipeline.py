@@ -5,20 +5,16 @@ import optuna
 import joblib
 import os
 import json
-import gc  # ENHANCEMENT #2: Explicit garbage collection
+import gc
 import warnings
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, f1_score, precision_recall_curve, precision_score, recall_score
 from numba import njit
-# FIX #2: SMOTE removed - LightGBM's class_weight='balanced' is superior for trading
 from typing import Tuple, List
-# POPRAWKA #9: KS test dla feature drift monitoring
 from scipy.stats import ks_2samp
 
-# CRITICAL FIX #1: Import from data_preparer instead of duplicating (removes 113 lines)
 from data_preparer_pa import remove_correlated_features
 
-# PHASE 1 IMPROVEMENTS: Adaptive labels
 from profit_aware_optimizer import find_optimal_threshold_for_profit
 from adaptive_labels import (
     get_adaptive_triple_barrier_labels,
@@ -30,12 +26,8 @@ import sys
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
-# Suppress Optuna experimental warnings for multivariate parameter
 warnings.filterwarnings('ignore', category=optuna.exceptions.ExperimentalWarning)
 
-# ============================================================================
-# ETAP 2.1: LOGGING INFRASTRUCTURE SETUP
-# ============================================================================
 
 def setup_logging(log_dir: str = "logs", module_name: str = "model_pipeline"):
     """
@@ -51,16 +43,13 @@ def setup_logging(log_dir: str = "logs", module_name: str = "model_pipeline"):
         log_dir: Directory for log files
         module_name: Module name for log file naming
     """
-    # Create logs directory
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
-    # Generate log filename with timestamp
     from datetime import datetime
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_file = log_path / f"{module_name}_{timestamp}.log"
 
-    # Create formatters
     file_formatter = logging.Formatter(
         '[%(asctime)s] [%(levelname)-8s] %(name)s:%(lineno)d - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
@@ -69,31 +58,26 @@ def setup_logging(log_dir: str = "logs", module_name: str = "model_pipeline"):
         '[%(levelname)s] %(message)s'
     )
 
-    # Get root logger
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)  # Capture everything
+    logger.setLevel(logging.DEBUG)
 
-    # Remove existing handlers to avoid duplicates
     logger.handlers.clear()
 
-    # File handler: DEBUG and above (everything)
     file_handler = RotatingFileHandler(
         log_file,
-        maxBytes=10*1024*1024,  # 10MB per file
-        backupCount=10,  # Keep 10 old files
+        maxBytes=10*1024*1024,
+        backupCount=10,
         encoding='utf-8'
     )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(file_formatter)
     logger.addHandler(file_handler)
 
-    # Console handler: WARNING and above (clean output)
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setLevel(logging.WARNING)
     console_handler.setFormatter(console_formatter)
     logger.addHandler(console_handler)
 
-    # Log startup message
     logger.info("="*80)
     logger.info(f"Logging initialized for {module_name}")
     logger.info(f"Log file: {log_file}")
@@ -103,7 +87,6 @@ def setup_logging(log_dir: str = "logs", module_name: str = "model_pipeline"):
 
     return logger
 
-# Initialize logging when module is imported
 _logger = setup_logging(log_dir="logs", module_name="model_pipeline")
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -124,13 +107,11 @@ def _validate_input_data(df: pd.DataFrame, min_samples: int = 10000) -> None:
     """
     errors = []
 
-    # 1. Basic checks
     if df.empty:
         errors.append("DataFrame is empty")
     if len(df) < min_samples:
         errors.append(f"Insufficient samples: {len(df)} < {min_samples}")
 
-    # 2. Index checks
     if not isinstance(df.index, pd.DatetimeIndex):
         errors.append("Index must be DatetimeIndex")
     if df.index.duplicated().any():
@@ -138,13 +119,11 @@ def _validate_input_data(df: pd.DataFrame, min_samples: int = 10000) -> None:
     if not df.index.is_monotonic_increasing:
         errors.append("Index must be sorted chronologically")
 
-    # 3. Required columns
     required_cols = ['open', 'high', 'low', 'close', 'volume']
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         errors.append(f"Missing required columns: {missing}")
 
-    # 4. Data quality
     nan_counts = df.isnull().sum()
     nan_cols = nan_counts[nan_counts > 0]
     if len(nan_cols) > 0:
@@ -156,9 +135,7 @@ def _validate_input_data(df: pd.DataFrame, min_samples: int = 10000) -> None:
     if len(inf_cols) > 0:
         errors.append(f"Inf values in {len(inf_cols)} columns: {dict(list(inf_cols.items())[:5])}")
 
-    # 5. Feature types
     non_numeric = df.select_dtypes(exclude=[np.number]).columns.tolist()
-    # Remove DatetimeIndex from non-numeric list
     non_numeric = [col for col in non_numeric if col in df.columns]
     if non_numeric:
         errors.append(f"Non-numeric columns (will be dropped): {non_numeric[:10]}")
@@ -184,7 +161,7 @@ def _check_feature_drift(train_df: pd.DataFrame, test_df: pd.DataFrame,
         Tuple[List[str], pd.DataFrame]: Lista features z driftem, DataFrame z wynikami
     """
     if selected_features is None:
-        selected_features = train_df.columns[:20].tolist()  # Top 20 features
+        selected_features = train_df.columns[:20].tolist()
 
     drift_results = []
     drifted_features = []
@@ -199,7 +176,6 @@ def _check_feature_drift(train_df: pd.DataFrame, test_df: pd.DataFrame,
         if len(train_vals) < 10 or len(test_vals) < 10:
             continue
 
-        # KS test: null hypothesis = same distribution
         statistic, p_value = ks_2samp(train_vals, test_vals)
 
         drift_results.append({
@@ -251,12 +227,10 @@ def _check_feature_drift_enhanced(
     """
     from scipy.stats import chisquare
 
-    # 1. Feature drift (existing logic)
     drifted_features, results_df = _check_feature_drift(
         train_df, test_df, selected_features, drift_threshold
     )
 
-    # 2. Target drift
     target_drift = False
     target_drift_pvalue = None
 
@@ -264,11 +238,9 @@ def _check_feature_drift_enhanced(
         y_train = train_df[target_col]
         y_test = test_df[target_col]
 
-        # Chi-square test dla dystrybucji kategorycznych
         train_dist = y_train.value_counts(normalize=True).sort_index()
         test_dist = y_test.value_counts(normalize=True).sort_index()
 
-        # Align indices (w przypadku różnych klas)
         all_classes = sorted(set(train_dist.index) | set(test_dist.index))
         train_dist = train_dist.reindex(all_classes, fill_value=1e-10)
         test_dist = test_dist.reindex(all_classes, fill_value=1e-10)
@@ -279,7 +251,6 @@ def _check_feature_drift_enhanced(
             target_drift_pvalue = chi2_p
         except Exception as e:
             logging.warning(f"⚠ Could not compute target drift: {e}")
-    # 3. Generate alerts
     alerts = []
     if len(drifted_features) > alert_threshold:
         alerts.append(
@@ -291,8 +262,6 @@ def _check_feature_drift_enhanced(
             f"⚠ ALERT: Target distribution has drifted (p={target_drift_pvalue:.4f} < {drift_threshold})"
         )
 
-    # 4. Retraining recommendation
-    # Retrain if: >alert_threshold features drifted OR target drifted
     should_retrain = len(drifted_features) > alert_threshold or target_drift
 
     return {
@@ -324,7 +293,7 @@ def _compute_labels_fast(prices: np.ndarray, event_indices: np.ndarray, profit_t
     """
     n_events = len(event_indices)
     outcomes = np.zeros(n_events, dtype=np.int64)
-    for i in range(n_events):  # Sequential loop (Numba JIT still 50-100x faster than Python)
+    for i in range(n_events):
         event_idx = event_indices[i]
         start_price = prices[event_idx]
         upper_barrier = start_price * (1 + profit_take_pct)
@@ -346,7 +315,6 @@ def get_triple_barrier_labels(prices: pd.Series, t_events: pd.Index, profit_take
                               time_limit: int, verbose=True):
     if verbose:
         logging.info("Rozpoczynanie etykietowania danych...")
-    # Handle duplicate index values by keeping the first occurrence
     if not prices.index.is_unique:
         if verbose:
             logging.warning(f"Warning: prices index has {prices.index.duplicated().sum()} duplicates. Keeping first occurrence.")
@@ -360,8 +328,6 @@ def get_triple_barrier_labels(prices: pd.Series, t_events: pd.Index, profit_take
         logging.info(f"Etykietowanie zakończone. Rozkład etykiet:\n{labels.value_counts(normalize=True)}")
     return labels
 
-# CRITICAL FIX #1: remove_correlated_features() moved to data_preparer_pa.py (imported above)
-# Removed duplicate (113 lines) - now using single source of truth
 
 def _get_strategy_id(ticker, timeframe, helper_timeframes, side: str):
     helpers_str = '_plus_' + '_'.join(helper_timeframes) if helper_timeframes else ""
@@ -399,7 +365,6 @@ def _get_optuna_storage(version: str, study_type: str = "study") -> str:
     storage_type = os.environ.get('OPTUNA_STORAGE_TYPE', 'sqlite').lower()
 
     if storage_type == 'postgresql':
-        # PostgreSQL configuration
         host = os.environ.get('OPTUNA_DB_HOST', 'localhost')
         port = os.environ.get('OPTUNA_DB_PORT', '5432')
         db_name = os.environ.get('OPTUNA_DB_NAME', 'optuna')
@@ -414,7 +379,6 @@ def _get_optuna_storage(version: str, study_type: str = "study") -> str:
             logging.info(f"✓ Using PostgreSQL storage: {user}@{host}:{port}/{db_name}")
             return storage_url
 
-    # SQLite (default lub fallback)
     optuna_dir = os.path.join("models", version, "optuna")
     os.makedirs(optuna_dir, exist_ok=True)
     storage_url = f"sqlite:///{optuna_dir}/{study_type}.db"
@@ -447,17 +411,15 @@ def walk_forward_split(X, n_splits=6, test_size=0.15, gap_size=0.02):
     """
     n_samples = len(X)
     test_samples = int(n_samples * test_size)
-    # POPRAWKA #7: Gap musi być >= max feature lookback (200 candles) żeby uniknąć data leakage
-    gap_samples = max(200, int(n_samples * gap_size))  # NEW: gap between train/test
+    gap_samples = max(200, int(n_samples * gap_size))
     min_train_samples = int(n_samples * 0.30)
 
-    # Adjust available range to account for gap
     available_range = n_samples - min_train_samples - test_samples - gap_samples
     step_size = available_range // (n_splits - 1) if n_splits > 1 else 0
 
     for i in range(n_splits):
         train_end = min_train_samples + (i * step_size)
-        test_start = train_end + gap_samples  # CRITICAL: Add gap!
+        test_start = train_end + gap_samples
         test_end = test_start + test_samples
 
         if test_end > n_samples:
@@ -466,9 +428,8 @@ def walk_forward_split(X, n_splits=6, test_size=0.15, gap_size=0.02):
         train_idx = list(range(0, train_end))
         test_idx = list(range(test_start, test_end))
 
-        # Debug info dla pierwszego fold:
         if i == 0:
-            gap_days = gap_samples * 15 / (60 * 24)  # Assuming 15m candles
+            gap_days = gap_samples * 15 / (60 * 24)
             logging.info(f"   CV Fold {i+1}: Train[0:{train_end}], GAP[{train_end}:{test_start}] ({gap_days:.1f} days), Test[{test_start}:{test_end}]")
         yield train_idx, test_idx
 
@@ -496,7 +457,6 @@ def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, vers
     """
     logging.info("\n--- ETAP 1.5: Rozpoczynanie optymalizowanej selekcji cech (Feature Importance + CV) ---")
     logging.info(f"Cechy początkowe: {len(X.columns)}")
-    # POPRAWKA #2: Zbieranie feature importance z 5 CV folds
     importance_accumulator = np.zeros(len(X.columns))
     n_folds = 5
 
@@ -509,27 +469,23 @@ def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, vers
         scaler.set_output(transform="pandas")
         X_scaled = scaler.fit_transform(X_train_fold)
 
-        # OPTIMIZED: Reduced trees for feature selection (50% faster, same quality)
         model = lgb.LGBMClassifier(
             random_state=42,
             objective='binary',
-            n_estimators=50,      # REDUCED from 100 (sufficient for feature importance)
-            learning_rate=0.1,    # INCREASED for faster convergence
-            max_depth=5,          # ADDED: simpler trees for faster training
-            num_leaves=15,        # ADDED: fewer leaves
+            n_estimators=50,
+            learning_rate=0.1,
+            max_depth=5,
+            num_leaves=15,
             verbose=-1
         )
         model.fit(X_scaled, y_train_fold, feature_name=X.columns.to_list())
 
-        # Accumulate importances
         importance_accumulator += model.feature_importances_
 
-        # ENHANCEMENT #2: Explicit memory cleanup - critical dla dużych datasets
         del X_train_fold, y_train_fold, X_scaled, model, scaler
         gc.collect()
 
         logging.info(f"  Fold {fold_idx+1}/{n_folds} complete (memory freed)")
-    # Average importance across folds
     feature_importances = importance_accumulator / n_folds
 
     importance_df = pd.DataFrame({
@@ -539,15 +495,12 @@ def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, vers
 
     importance_df['cumulative_importance'] = importance_df['importance'].cumsum() / importance_df['importance'].sum()
 
-    # ENHANCEMENT v2.2: Choose selection method
     if top_n_features is not None:
-        # Method 1: Select top N features (explicit count)
         selected_features = importance_df.head(top_n_features)['feature'].tolist()
         logging.info(f"\n✂️  FEATURE PRUNING MODE: Selecting top {top_n_features} features")
         final_cumulative = importance_df.iloc[top_n_features-1]['cumulative_importance']
         logging.info(f"   → Cumulative importance at position {top_n_features}: {final_cumulative:.1%}")
     else:
-        # Method 2: Select by cumulative importance threshold (original)
         selected_features = importance_df[importance_df['cumulative_importance'] <= importance_threshold]['feature'].tolist()
 
         min_features = max(5, int(len(X.columns) * 0.1))
@@ -560,14 +513,11 @@ def _run_feature_selection(X: pd.DataFrame, y: pd.Series, strategy_id: str, vers
     logging.info(f"Top 10 najważniejszych cech:")
     for idx, row in importance_df.head(10).iterrows():
         logging.info(f"  {row['feature']}: {row['importance']:.4f} (skumulowane: {row['cumulative_importance']:.2%})")
-    # UPROSZCZENIE: Nie zapisujemy weak_features.json
-    # Zapisujemy TYLKO selected features do features.joblib
     removed_features = [f for f in X.columns if f not in selected_features]
     logging.info(f"\nUsunięto {len(removed_features)} słabych cech z feature selection")
     if removed_features:
         logging.info(f"Przykłady usuniętych cech: {removed_features[:5]}")
 
-    # ENHANCEMENT #9: Save feature importance rankings for feedback loop
     importance_rankings_path = os.path.join(version_dir, "feature_importance_rankings.csv")
     importance_df.to_csv(importance_rankings_path, index=False)
     logging.info(f"\n💾 ENHANCEMENT #9: Feature importance rankings saved to: {importance_rankings_path}")
@@ -608,7 +558,6 @@ def _rescue_interaction_features(
 
     logging.info(f"\n--- ENHANCEMENT #8: Checking feature interactions ---")
     logging.info(f"  Testing {min(len(dropped_features), max_features_to_test)} dropped features for interactions...")
-    # Train baseline model z selected features
     X_base = X[selected_features]
     scaler = StandardScaler()
     X_scaled = scaler.fit_transform(X_base)
@@ -623,9 +572,8 @@ def _rescue_interaction_features(
     base_model.fit(X_scaled, y)
     base_score = base_model.score(X_scaled, y)
 
-    # Test każdej dropped feature + base
     rescue_candidates = []
-    features_to_test = dropped_features[:max_features_to_test]  # Limit dla speedu
+    features_to_test = dropped_features[:max_features_to_test]
 
     for i, feat in enumerate(features_to_test):
         if (i + 1) % 10 == 0:
@@ -647,12 +595,11 @@ def _rescue_interaction_features(
         if improvement > improvement_threshold:
             rescue_candidates.append((feat, improvement))
 
-    # Sort by improvement
     rescue_candidates = sorted(rescue_candidates, key=lambda x: x[1], reverse=True)
 
     if rescue_candidates:
         logging.info(f"\n  ✓ Rescued {len(rescue_candidates)} features due to interaction effects:")
-        for feat, imp in rescue_candidates[:10]:  # Show top 10
+        for feat, imp in rescue_candidates[:10]:
             logging.info(f"      {feat}: +{imp:.4f} accuracy")
         if len(rescue_candidates) > 10:
             logging.info(f"      ... and {len(rescue_candidates)-10} more")
@@ -684,9 +631,7 @@ def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close
     Returns:
         Dict z ranges dla każdego hyperparametra
     """
-    # Base ranges (conservative defaults)
     ranges = {
-        # Model params
         'n_estimators': (300, 1200),
         'learning_rate': (0.005, 0.05),
         'reg_alpha': (5.0, 80.0),
@@ -697,39 +642,32 @@ def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close
         'subsample_freq': (1, 5),
         'min_child_samples': (50, 200),
 
-        # Label params
-        # ENHANCEMENT v2.2: Zwiększone dolne granice barrier_size (0.015 min)
-        # Powód: Dla SOLUSDT 1.17% było za niskie - traciliśmy większe ruchy
-        'barrier_size': (0.015, 0.040),  # Zwiększone z (0.008, 0.035)
+        'barrier_size': (0.015, 0.040),
         'time_limit': (12, 48)
     }
 
-    # Adjust for dataset size
-    if n_samples < 30000:  # Small dataset
+    if n_samples < 30000:
         logging.info(f"  ➤ Small dataset detected ({n_samples:,} samples) - increasing regularization")
-        ranges['reg_alpha'] = (20.0, 150.0)  # Stronger regularization
+        ranges['reg_alpha'] = (20.0, 150.0)
         ranges['reg_lambda'] = (20.0, 150.0)
-        ranges['num_leaves'] = (10, 30)  # Simpler trees
-        ranges['min_child_samples'] = (100, 300)  # Larger leaf size
-        ranges['n_estimators'] = (200, 800)  # Fewer trees
-    elif n_samples > 100000:  # Large dataset
+        ranges['num_leaves'] = (10, 30)
+        ranges['min_child_samples'] = (100, 300)
+        ranges['n_estimators'] = (200, 800)
+    elif n_samples > 100000:
         logging.info(f"  ➤ Large dataset detected ({n_samples:,} samples) - increasing model capacity")
-        ranges['n_estimators'] = (500, 2000)  # More trees
-        ranges['num_leaves'] = (20, 80)  # More complex
-        ranges['reg_alpha'] = (1.0, 50.0)  # Less regularization
+        ranges['n_estimators'] = (500, 2000)
+        ranges['num_leaves'] = (20, 80)
+        ranges['reg_alpha'] = (1.0, 50.0)
         ranges['reg_lambda'] = (1.0, 50.0)
 
-    # Adjust for feature count
-    if n_features > 200:  # High-dimensional
+    if n_features > 200:
         logging.info(f"  ➤ High-dimensional dataset ({n_features} features) - increasing feature sampling")
-        ranges['colsample_bytree'] = (0.4, 0.7)  # More aggressive feature sampling
+        ranges['colsample_bytree'] = (0.4, 0.7)
 
-    # ENHANCEMENT #17: Computed volatility zamiast hardcoded ticker lists
     volatility = None
-    volatility_classification = "medium"  # Default
+    volatility_classification = "medium"
 
     if df_close is not None and len(df_close) > 100:
-        # Parse timeframe to get minutes per candle
         try:
             if timeframe.endswith('m'):
                 minutes_per_candle = int(timeframe[:-1])
@@ -746,38 +684,27 @@ def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close
             logging.warning(f"Failed to parse timeframe: {timeframe} ({type(e).__name__}: {e}), defaulting to 15m")
             minutes_per_candle = 15
 
-        # Calculate candles per year (24/7 trading)
         candles_per_year = (365 * 24 * 60) / minutes_per_candle
 
-        # Calculate 30-day rolling volatility (annualized)
-        # Use last 30 days for recent market conditions
         candles_per_day = (24 * 60) / minutes_per_candle
         lookback_days = min(30, int(len(df_close) / candles_per_day))
         lookback_candles = int(lookback_days * candles_per_day)
         recent_close = df_close.iloc[-lookback_candles:] if lookback_candles < len(df_close) else df_close
 
-        # Compute returns volatility (annualized)
         returns = recent_close.pct_change().dropna()
         candle_vol = returns.std()
 
-        # Annualize: sqrt(number of candles per year)
         volatility = candle_vol * np.sqrt(candles_per_year)
 
-        # Classify volatility
-        # Thresholds based on typical crypto volatility:
-        # - High: >100% annualized (memecoins, small caps)
-        # - Medium: 50-100% annualized (most altcoins)
-        # - Low: <50% annualized (BTC, ETH, stablecoins)
-        if volatility > 1.0:  # >100% annualized
+        if volatility > 1.0:
             volatility_classification = "high"
-        elif volatility < 0.5:  # <50% annualized
+        elif volatility < 0.5:
             volatility_classification = "low"
         else:
             volatility_classification = "medium"
 
         logging.info(f"  ➤ Computed volatility: {volatility*100:.1f}% annualized (classification: {volatility_classification})")
     elif ticker:
-        # FALLBACK: Use hardcoded lists jako backup (deprecated)
         volatile_tickers = ['DOGEUSDT', 'SHIBUSDT', 'PEPEUSDT', 'FLOKIUSDT']
         stable_tickers = ['BTCUSDT', 'ETHUSDT']
 
@@ -789,15 +716,14 @@ def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close
             logging.info(f"  ➤ Ticker-based classification: {ticker} → low volatility (DEPRECATED: use df_close)")
         else:
             logging.info(f"  ➤ Unknown ticker {ticker}, using medium volatility defaults")
-    # Adjust ranges based on volatility
     if volatility_classification == "high":
         logging.info(f"  ➤ High volatility detected - wider barriers, shorter time limits")
-        ranges['barrier_size'] = (0.015, 0.050)  # Zwiększone z (0.012, 0.045)
-        ranges['time_limit'] = (8, 36)  # Shorter time limits (faster signals)
+        ranges['barrier_size'] = (0.015, 0.050)
+        ranges['time_limit'] = (8, 36)
     elif volatility_classification == "low":
         logging.info(f"  ➤ Low volatility detected - tighter barriers, longer time limits")
-        ranges['barrier_size'] = (0.012, 0.030)  # Zwiększone z (0.006, 0.025)
-        ranges['time_limit'] = (16, 60)  # Longer time limits (patient trades)
+        ranges['barrier_size'] = (0.012, 0.030)
+        ranges['time_limit'] = (16, 60)
 
     return ranges
 
@@ -825,7 +751,6 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
     ENHANCEMENT #1: Failed trials handling - kontynuacja mimo błędów
     ENHANCEMENT #6 + #17: Adaptive hyperparameter ranges z computed volatility
     """
-    # ENHANCEMENT #6 + #17: Get adaptive ranges z computed volatility
     logging.info("\n--- ENHANCEMENT #6 + #17: Computing adaptive hyperparameter ranges ---")
     ranges = get_adaptive_hyperparameter_ranges(len(X), len(X.columns), df_close=df_close, ticker=ticker, timeframe=timeframe)
 
@@ -836,7 +761,6 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
             'verbosity': -1,
             'boosting_type': 'gbdt',
             'class_weight': 'balanced',
-            # ENHANCEMENT #6: Adaptive ranges zamiast hardcoded
             'n_estimators': trial.suggest_int('n_estimators', *ranges['n_estimators']),
             'learning_rate': trial.suggest_float('learning_rate', *ranges['learning_rate'], log=True),
             'reg_alpha': trial.suggest_float('reg_alpha', *ranges['reg_alpha'], log=True),
@@ -849,7 +773,6 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
         }
         
         scores = []
-        # OPTYMALIZACJA: Zredukowano z 6 do 3 splits (2x szybciej)
         for fold_idx, (train_index, val_index) in enumerate(walk_forward_split(X, n_splits=3, test_size=0.15)):
             X_train, X_val = X.iloc[train_index], X.iloc[val_index]
             y_train, y_val = y.iloc[train_index], y.iloc[val_index]
@@ -857,19 +780,10 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
             if y_train.nunique() < 2:
                 continue
 
-            # ============================================================================
-            # FIX #2 (CRITICAL): REMOVE SMOTE - use class_weight='balanced' instead
-            # ============================================================================
-            # PROBLEM v1.1: SMOTE created synthetic samples that:
-            #   1. Don't respect time-series structure (mixes past/future)
-            #   2. Creates artifacts in sparse ICT features
-            #   3. Overfits to training data
-            # FIX v2.0: LightGBM's class_weight='balanced' handles imbalance naturally
-            # ============================================================================
 
             scaler = StandardScaler()
             scaler.set_output(transform="pandas")
-            X_train_scaled = scaler.fit_transform(X_train)  # FIX #2: No SMOTE resampling
+            X_train_scaled = scaler.fit_transform(X_train)
             X_val_scaled = scaler.transform(X_val)
 
             model = lgb.LGBMClassifier(**params)
@@ -878,25 +792,18 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
 
             probas = model.predict_proba(X_val_scaled)
 
-            # POPRAWKA #1 & #10: RECALL-FOCUSED OPTIMIZATION z fine-grained threshold search
-            # Strategia: Maksymalizuj recall przy minimum 50% precision
             best_score = 0
-            # POPRAWKA #10: Fine-grained search (0.30-0.70 co 0.02 = 21 wartości)
-            for thresh in np.arange(0.30, 0.71, 0.02):  # Było: tylko 5 wartości
+            for thresh in np.arange(0.30, 0.71, 0.02):
                 preds_at_thresh = (probas[:, 1] > thresh).astype(int)
                 prec = precision_score(y_val, preds_at_thresh, zero_division=0)
                 rec = recall_score(y_val, preds_at_thresh, zero_division=0)
 
-                # Minimum precision threshold (jakość sygnałów: min 50% = 1:1 TP:FP ratio)
-                if prec >= 0.50:  # Było: rec >= 0.15
-                    # Recall-weighted score: 60% recall + 40% precision
-                    score = 0.60 * rec + 0.40 * prec  # Było: 0.70 * prec + 0.30 * rec
+                if prec >= 0.50:
+                    score = 0.60 * rec + 0.40 * prec
                     best_score = max(best_score, score)
 
             scores.append(best_score if best_score > 0 else 0.0)
 
-            # OPTYMALIZACJA: Pruning po drugim fold (oszczędność ~33% czasu, ale mniej agresywne)
-            # POPRAWKA #4: Zmieniono z fold 0 na fold 1 - lepsze dla zmiennych market conditions
             if fold_idx == 1 and len(scores) > 1:
                 trial.report(np.mean(scores), fold_idx)
                 if trial.should_prune():
@@ -906,21 +813,18 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
             return 0.0
         return np.mean(scores)
 
-    # ENHANCEMENT #3: Adaptive storage (PostgreSQL lub SQLite)
     storage_name = _get_optuna_storage(version, f"{strategy_id}_model_study")
 
-    # OPTYMALIZACJA: TPE sampler z mniejszą liczbą startup trials
     sampler = optuna.samplers.TPESampler(
-        n_startup_trials=5,  # Było domyślnie 10
+        n_startup_trials=5,
         multivariate=True,
-        warn_independent_sampling=False,  # Suppress warnings for dynamic search space
+        warn_independent_sampling=False,
         seed=42
     )
     
-    # OPTYMALIZACJA: MedianPruner do early stopping słabych trials
     pruner = optuna.pruners.MedianPruner(
-        n_startup_trials=3,  # Pruning po 3 trials
-        n_warmup_steps=0,    # Natychmiastowy pruning
+        n_startup_trials=3,
+        n_warmup_steps=0,
         interval_steps=1
     )
     
@@ -933,18 +837,15 @@ def _run_model_optimization(X: pd.DataFrame, y: pd.Series, n_model_trials: int, 
         pruner=pruner
     )
     
-    # OPTYMALIZACJA: Równoległe wykonywanie trials (n_jobs=-1 = wszystkie CPU)
-    # ENHANCEMENT #1: catch=(Exception,) - kontynuuj mimo błędów w trials
     study.optimize(
         objective_model,
         n_trials=n_model_trials,
-        n_jobs=-1,  # Wszystkie dostępne CPU cores
+        n_jobs=-1,
         show_progress_bar=True,
-        catch=(Exception,),  # Kontynuuj mimo błędów
+        catch=(Exception,),
         callbacks=[_failed_trial_callback]
     )
 
-    # Log summary of failed trials
     failed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.FAIL]
     if failed_trials:
         logging.error(f"\n⚠ {len(failed_trials)} trials failed during optimization (continued anyway)")
@@ -966,17 +867,13 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     logging.info(f"Training pipeline initialized for version: {version}")
     logging.info(f"Output directory: {version_dir}")
     logging.info(f"{'='*60}\n")
-    # ENHANCEMENT #4: Input validation - fail-fast
     logging.info(f"\n{'='*60}")
     logging.info("ENHANCEMENT #4: Input Data Validation")
     logging.info(f"{'='*60}")
     _validate_input_data(df_features, min_samples=10000)
     logging.info("")
-    # KROK 0: Usuń OHLCV (podstawowe kolumny nie są features)
     df_model_base = df_features.drop(columns=['open', 'high', 'low', 'close', 'volume', 'turnover'], errors='ignore')
     logging.info(f"📊 Features after removing OHLCV: {df_model_base.shape[1]}")
-    # KROK 0.5: Usuń skorelowane cechy PRZED feature selection
-    # To zapewnia, że model będzie trenowany na tych samych cechach co używane w produkcji
     logging.info(f"\n{'='*60}")
     logging.info("ETAP 0.5: Usuwanie skorelowanych cech (przed feature selection)")
     logging.info(f"{'='*60}")
@@ -984,32 +881,17 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         df_model_base,
         target_col=None,
         correlation_threshold=0.90,
-        keep_important=None  # Używa domyślnej listy ICT + ważne cechy
+        keep_important=None
     )
 
-    # Zapisz listę usuniętych skorelowanych cech
     if removed_corr_features:
         corr_features_path = os.path.join(version_dir, "correlated_features_removed.json")
         with open(corr_features_path, 'w') as f:
             json.dump(removed_corr_features, f, indent=2)
         logging.info(f"💾 Zapisano listę {len(removed_corr_features)} skorelowanych cech do: {corr_features_path}")
-    # ============================================================================
-    # FIX #5 (HIGH): 3-WAY SPLIT - train/calibration/holdout
-    # ============================================================================
-    # PROBLEM v1.1: Threshold tuning używał holdout set → burned przez CV
-    # FIX v2.0: Split na 3 części:
-    #   - 80% train/val (dla Optuna + feature selection) - UPDATED v1.2 from 60%
-    #   - 10% calibration (dla threshold tuning - NIGDY nie widzi go model!)
-    #   - 10% holdout (dla final evaluation - NIGDY nie używane do decyzji!)
-    #
-    # ZMIANA 60/20/20 → 80/10/10 (v1.2):
-    #   - Model trenuje na 80% zamiast 60% (więcej recent data)
-    #   - 10% holdout = ~13,824 świec = ~7 miesięcy (wystarczy do walidacji)
-    #   - NIE zmienia features, tylko proporcję split
-    # ============================================================================
-    calibration_size = int(len(df_model_base) * 0.1)  # 10% for threshold tuning
-    holdout_size = int(len(df_model_base) * 0.1)      # 10% for final evaluation
-    train_val_size = len(df_model_base) - calibration_size - holdout_size  # ~80%
+    calibration_size = int(len(df_model_base) * 0.1)
+    holdout_size = int(len(df_model_base) * 0.1)
+    train_val_size = len(df_model_base) - calibration_size - holdout_size
 
     train_val_df = df_model_base.iloc[:train_val_size]
     calibration_df = df_model_base.iloc[train_val_size:train_val_size+calibration_size]
@@ -1020,35 +902,17 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     logging.info(f"  Calibration: {len(calibration_df):,} samples ({len(calibration_df)/len(df_model_base)*100:.1f}%)")
     logging.info(f"  Holdout: {len(holdout_df):,} samples ({len(holdout_df)/len(df_model_base)*100:.1f}%)")
     logging.info(f"  ✅ Model trenuje na 80% (było 60%) = ~7 więcej miesięcy recent data")
-    # ENHANCEMENT #6 + #17: Get adaptive ranges z computed volatility dla label optimization
     logging.info("\n--- ENHANCEMENT #6 + #17: Computing adaptive ranges for label optimization ---")
     label_ranges = get_adaptive_hyperparameter_ranges(len(train_val_df), len(train_val_df.columns), df_close=df_features['close'], ticker=ticker, timeframe=timeframe)
 
     def objective_labels(trial):
-        # ============================================================================
-        # FIX #1 (CRITICAL): SYMMETRIC BARRIERS - Eliminacja positive bias
-        # ============================================================================
-        # PROBLEM v1.1: Asymmetric barriers (PT=2%, SL=1%) tworzyły 86% win rate
-        #               na random walk (drift=0), co jest mathematical artifact.
-        # FIX v2.0: Symmetric barriers (PT=SL) eliminują bias, dając fair 50% win rate
-        #           na random walk. R:R można kontrolować przez position sizing, NIE barriers.
-        #
-        # Expected impact:
-        # - Train accuracy: 78% → 58% (LOWER, ale honest)
-        # - Live win rate: 38% → 48% (HIGHER, less overfit)
-        # ============================================================================
 
-        # ENHANCEMENT #6: Adaptive ranges zamiast hardcoded
         barrier_size = trial.suggest_float('barrier_size', *label_ranges['barrier_size'], log=True)
 
-        # SYMMETRIC barriers - fair dla random walk, eliminują mathematical bias
-        pt = barrier_size  # e.g., 1.5%
-        sl = barrier_size  # e.g., 1.5% (SAME as PT!)
+        pt = barrier_size
+        sl = barrier_size
 
-        # Note: If you want asymmetric R:R, adjust POSITION SIZE, not barriers:
-        # Example: 2:1 R:R = trade 2x bigger position (same $ risk, 2x $ reward)
 
-        # ENHANCEMENT #6: Adaptive time_limit range
         time_limit = trial.suggest_int('time_limit', *label_ranges['time_limit'])
         labels = get_triple_barrier_labels(df_features['close'], df_features.index, pt, sl, time_limit, verbose=False)
 
@@ -1058,26 +922,11 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         if y.nunique() < 3:
             return 0.0
 
-        # ============================================================================
-        # FIX #4 (HIGH): REMOVE BALANCE PENALTY - Natural label distribution
-        # ============================================================================
-        # PROBLEM v1.1: Forcing 50/25/25 distribution poprzez penalty odrzucało
-        #               profitable opportunities w trending markets (np. bull = więcej LONG).
-        # FIX v2.0: Let market decide natural opportunity frequency. LightGBM's
-        #           class_weight='balanced' already handles imbalance properly.
-        #
-        # Expected impact:
-        # - +15% more training samples (labels not rejected for balance)
-        # - Better adaptation to market regimes (bull/bear/range)
-        # ============================================================================
 
-        # Log actual distribution for monitoring (no penalty):
         actual_dist = y.value_counts(normalize=True)
         trial.set_user_attr("label_distribution", actual_dist.to_dict())
 
         scores = []
-        # FIX #4: Increased from 3 to 5 splits for better validation robustness
-        # (Prevents overfitting to specific period, especially important with rolling window)
         for fold_idx, (train_index, val_index) in enumerate(walk_forward_split(X, n_splits=5, test_size=0.15)):
             X_train, X_val, y_train, y_val = X.iloc[train_index], X.iloc[val_index], y.iloc[train_index], y.iloc[val_index]
             if y_train.nunique() < 3:
@@ -1085,14 +934,13 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
             scaler = StandardScaler()
             scaler.set_output(transform="pandas")
             X_train_scaled, X_val_scaled = scaler.fit_transform(X_train), scaler.transform(X_val)
-            # OPTIMIZED: Faster probe model for label optimization (40% faster)
             probe_model = lgb.LGBMClassifier(
                 random_state=42,
                 objective='multiclass',
                 num_class=3,
-                n_estimators=50,   # ADDED: limit trees (sufficient for probing)
-                learning_rate=0.1, # ADDED: faster convergence
-                max_depth=5,       # ADDED: simpler model
+                n_estimators=50,
+                learning_rate=0.1,
+                max_depth=5,
                 verbose=-1
             )
             probe_model.fit(X_train_scaled, y_train, feature_name=X_train.columns.to_list())
@@ -1100,27 +948,20 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
             fold_score = f1_score(y_val, preds, average='macro')
             scores.append(fold_score)
 
-            # OPTYMALIZACJA: Pruning po drugim fold (oszczędność ~33% czasu, ale mniej agresywne)
-            # POPRAWKA #4: Zmieniono z fold 0 na fold 1 - lepsze dla zmiennych market conditions
             if fold_idx == 1 and len(scores) > 1:
-                trial.report(np.mean(scores), fold_idx)  # FIX #4: No balance_penalty
+                trial.report(np.mean(scores), fold_idx)
                 if trial.should_prune():
                     raise optuna.TrialPruned()
 
         if not scores:
             return 0.0
 
-        # Calculate base score
         base_score = np.mean(scores)
 
-        # FIX #4 (NEW): Add regularization penalty for extreme barrier values
-        # Penalize very tight barriers (< 0.8%) or very wide barriers (> 3.5%)
-        # This prevents overfitting to extreme parameter values
         regularization_penalty = 1.0
         if barrier_size < 0.008 or barrier_size > 0.035:
-            regularization_penalty = 0.85  # 15% penalty for extreme values
+            regularization_penalty = 0.85
 
-        # Apply penalty
         final_score = base_score * regularization_penalty
 
         trial.set_user_attr("f1_score", base_score)
@@ -1129,18 +970,15 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
 
     logging.info("\n--- ETAP 1: Rozpoczynanie optymalizacji parametrów etykiet ---")
     logging.info("OPTYMALIZACJA: Zredukowano CV splits (6→3), dodano pruning i równoległe wykonywanie")
-    # ENHANCEMENT #3: Adaptive storage (PostgreSQL lub SQLite)
     storage_name_labels = _get_optuna_storage(version, f"{strategy_id}_labels_study")
 
-    # OPTYMALIZACJA: TPE sampler z mniejszą liczbą startup trials
     sampler_labels = optuna.samplers.TPESampler(
         n_startup_trials=5,
         multivariate=True,
-        warn_independent_sampling=False,  # Suppress warnings for dynamic search space
+        warn_independent_sampling=False,
         seed=42
     )
     
-    # OPTYMALIZACJA: MedianPruner do early stopping słabych trials
     pruner_labels = optuna.pruners.MedianPruner(
         n_startup_trials=3,
         n_warmup_steps=0,
@@ -1156,18 +994,15 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         pruner=pruner_labels
     )
     
-    # OPTYMALIZACJA: Równoległe wykonywanie trials (n_jobs=-1)
-    # ENHANCEMENT #1: catch=(Exception,) - kontynuuj mimo błędów w trials
     study_labels.optimize(
         objective_labels,
         n_trials=n_label_trials,
         n_jobs=-1,
         show_progress_bar=True,
-        catch=(Exception,),  # Kontynuuj mimo błędów
+        catch=(Exception,),
         callbacks=[_failed_trial_callback]
     )
 
-    # Log summary of failed trials
     failed_trials = [t for t in study_labels.trials if t.state == optuna.trial.TrialState.FAIL]
     if failed_trials:
         logging.error(f"\n⚠ {len(failed_trials)} trials failed during label optimization (continued anyway)")
@@ -1177,12 +1012,9 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     with open(label_params_path, 'w') as f:
         json.dump(best_label_params, f, indent=2)
     logging.info(f"Parametry labelowania zapisane do: {label_params_path}")
-    # ============================================================================
-    # FIX #1: Use symmetric barrier_size (no separate PT/SL multipliers)
-    # ============================================================================
     barrier_size = best_label_params['barrier_size']
-    pt = barrier_size  # Symmetric barriers
-    sl = barrier_size  # PT = SL (eliminates positive bias)
+    pt = barrier_size
+    sl = barrier_size
 
     logging.info(f"\n📊 FIX #1: Symmetric barriers applied:")
     logging.info(f"  Profit Target: {pt*100:.2f}%")
@@ -1190,7 +1022,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     logging.info(f"  Time Limit: {best_label_params['time_limit']} candles")
     logging.info(f"  Expected 50% win rate on random walk (unbiased)")
 
-    # PHASE 1 IMPROVEMENT #3: Adaptive labels (if enabled)
     if use_adaptive_labels:
         logging.info(f"\n🔥 PHASE 1 IMPROVEMENT #3: Using ADAPTIVE barriers (ATR-based)")
         final_labels = get_adaptive_triple_barrier_labels(
@@ -1204,7 +1035,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
             verbose=True
         )
 
-        # Analyze barrier distribution
         logging.info("\n📊 Analyzing adaptive barrier distribution...")
         barrier_analysis = analyze_barrier_distribution(
             df_features,
@@ -1213,7 +1043,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
             atr_multiplier=1.5
         )
 
-        # Save barrier analysis
         barrier_analysis_path = os.path.join(version_dir, "adaptive_barrier_analysis.csv")
         barrier_analysis.to_csv(barrier_analysis_path)
         logging.info(f"💾 Barrier analysis saved to: {barrier_analysis_path}")
@@ -1242,7 +1071,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
 
     selected_features = _run_feature_selection(X_full, y_full, strategy_id, version_dir, top_n_features=top_n_features)
 
-    # ENHANCEMENT #8: Check for interaction effects w dropped features
     rescued_features = _rescue_interaction_features(
         X_full, y_full,
         selected_features,
@@ -1250,7 +1078,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         max_features_to_test=50
     )
 
-    # Add rescued features to selected features
     if rescued_features:
         selected_features = selected_features + rescued_features
         logging.info(f"\n✓ Final feature count: {len(selected_features)} (including {len(rescued_features)} rescued)")
@@ -1261,13 +1088,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     best_model_params = _run_model_optimization(X_full, y_full, n_model_trials, strategy_id, version, side, ticker, df_features['close'], timeframe)
     logging.info(f"Najlepsze parametry modelu: {best_model_params}")
     logging.info("\n--- Trenowanie finalnego modelu binarnego ... ---")
-    # ============================================================================
-    # FIX #2 (CRITICAL): REMOVE SMOTE from final model training
-    # ============================================================================
-    # Use original data - LightGBM's class_weight='balanced' handles imbalance
-    # ============================================================================
 
-    # POPRAWKA #5: Split train na train+val dla early stopping (80/20 split)
     val_split_idx = int(len(X_full) * 0.8)
     X_train_final = X_full.iloc[:val_split_idx]
     X_val_final = X_full.iloc[val_split_idx:]
@@ -1280,7 +1101,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     X_val_scaled = final_scaler.transform(X_val_final)
 
     final_model = lgb.LGBMClassifier(objective='binary', **best_model_params)
-    # POPRAWKA #5: Early stopping (50 rounds) zapobiega overfittingowi
     final_model.fit(
         X_train_scaled, y_train_final,
         eval_set=[(X_val_scaled, y_val_final)],
@@ -1298,11 +1118,7 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     joblib.dump(selected_features, features_path)
 
     logging.info(f"Model, skaler i lista cech zostały zapisane w: {version_dir}")
-    # ============================================================================
-    # FIX #5: Use CALIBRATION set for threshold tuning (not holdout!)
-    # ============================================================================
     logging.info("\n--- Przygotowanie zbiorów CALIBRATION i HOLDOUT ---")
-    # CALIBRATION SET - used ONLY for threshold tuning
     y_calib_multi = final_labels.reindex(calibration_df.index).dropna()
     X_calib_multi = calibration_df.loc[y_calib_multi.index]
 
@@ -1318,7 +1134,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     X_calib_scaled = final_scaler.transform(X_calib)
     calib_probas = final_model.predict_proba(X_calib_scaled)
 
-    # HOLDOUT SET - used ONLY for final evaluation (never for decisions!)
     y_holdout_multi = final_labels.reindex(holdout_df.index).dropna()
     X_holdout_multi = holdout_df.loc[y_holdout_multi.index]
 
@@ -1337,15 +1152,9 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
 
     logging.info(f"Calibration set: {len(y_calib):,} samples (for threshold tuning)")
     logging.info(f"Holdout set: {len(y_holdout):,} samples (for final evaluation)")
-    # ============================================================================
-    # POPRAWKA #9 + ENHANCEMENT #5: Enhanced feature drift monitoring
-    # ============================================================================
     logging.info("\n--- POPRAWKA #9 + ENHANCEMENT #5: Enhanced Feature Drift Monitoring ---")
-    # Pobierz top 20 features z importance_df (jeśli dostępne)
     top_20_features = selected_features[:20] if len(selected_features) >= 20 else selected_features
 
-    # ENHANCEMENT #5: Use enhanced drift monitoring z alertami
-    # Prepare DataFrames with target for drift checking
     X_full_with_target = X_full[selected_features].copy()
     X_full_with_target['target'] = y_full
 
@@ -1355,7 +1164,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     X_holdout_with_target = X_holdout[selected_features].copy()
     X_holdout_with_target['target'] = y_holdout
 
-    # Check drift: train/val vs calibration (ENHANCED)
     drift_calib_result = _check_feature_drift_enhanced(
         X_full_with_target, X_calib_with_target,
         selected_features=top_20_features,
@@ -1364,7 +1172,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         alert_threshold=10
     )
 
-    # Check drift: train/val vs holdout (ENHANCED)
     drift_holdout_result = _check_feature_drift_enhanced(
         X_full_with_target, X_holdout_with_target,
         selected_features=top_20_features,
@@ -1380,7 +1187,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     logging.info(f"  Train → Holdout: {drift_holdout_result['n_drifted']}/{drift_holdout_result['n_total']} features with drift")
     if drift_holdout_result['target_drift']:
         logging.warning(f"    ⚠ Target drift detected (p={drift_holdout_result['target_drift_pvalue']:.4f})")
-    # Display alerts
     if drift_calib_result['alerts']:
         logging.info(f"\n📢 CALIBRATION SET ALERTS:")
         for alert in drift_calib_result['alerts']:
@@ -1389,11 +1195,9 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         logging.info(f"\n📢 HOLDOUT SET ALERTS:")
         for alert in drift_holdout_result['alerts']:
             logging.info(f"  {alert}")
-    # Retraining recommendation
     if drift_calib_result['should_retrain'] or drift_holdout_result['should_retrain']:
         logging.info(f"\n🚨 RETRAINING RECOMMENDED 🚨")
         logging.info(f"  Significant drift detected - consider retraining model with fresh data")
-    # Save enhanced drift report
     drift_report_path = os.path.join(version_dir, "feature_drift_report.csv")
     drift_calib_df = drift_calib_result['drift_df'].copy()
     drift_calib_df['set'] = 'calibration'
@@ -1401,54 +1205,41 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
     drift_holdout_df['set'] = 'holdout'
     pd.concat([drift_calib_df, drift_holdout_df]).to_csv(drift_report_path, index=False)
     logging.info(f"💾 Drift report saved to: {drift_report_path}")
-    # ============================================================================
-    # FIX #5 + PHASE 1 IMPROVEMENT #1: Threshold tuning on CALIBRATION set
-    # ============================================================================
     logging.info("\n--- ANALIZA PROGÓW DECYZYJNYCH (Threshold Tuning na CALIBRATION) ---")
     logging.info("FIX #5: Using CALIBRATION set (never seen by model during training)")
 
-    # PHASE 1 IMPROVEMENT #1: Profit-aware threshold tuning (if enabled)
     if use_profit_aware_threshold:
         logging.info(f"\n🔥 PHASE 1 IMPROVEMENT #1: Using PROFIT-AWARE threshold optimization")
 
-        # Get calibration prices for trade simulation
         calib_prices = df_features.loc[X_calib.index, 'close']
 
-        # Find optimal threshold for profit (not accuracy!)
-        # CRITICAL FIX: Uses forward simulation (no look-ahead bias)
-        # FIX #1: Use same TP/SL as live bot (configurable)
-        # FIX #5: Pass max_holding_period from label params
         optimal_threshold, profit_metrics = find_optimal_threshold_for_profit(
             model=final_model,
             X_calib=X_calib,
             prices=calib_prices,
-            side=side,  # 'long' or 'short'
-            tp_pct=live_tp_pct,  # FIXED: From config (matches live bot)
-            sl_pct=live_sl_pct,  # FIXED: From config (matches live bot)
-            fee_pct=live_fee_pct,  # FIXED: From config (matches live bot)
+            side=side,
+            tp_pct=live_tp_pct,
+            sl_pct=live_sl_pct,
+            fee_pct=live_fee_pct,
             threshold_range=(0.30, 0.85),
             threshold_step=0.01,
             min_trades=10,
-            max_holding_period=best_label_params['time_limit']  # FIX #5: Match label params
+            max_holding_period=best_label_params['time_limit']
         )
 
-        # Save profit metrics
         profit_metrics_path = os.path.join(version_dir, "profit_aware_threshold_metrics.json")
         with open(profit_metrics_path, 'w') as f:
-            # Convert numpy types to native Python for JSON serialization
             metrics_serializable = {k: float(v) if isinstance(v, (np.floating, np.integer)) else v
                                    for k, v in profit_metrics.items()}
             json.dump(metrics_serializable, f, indent=2)
         logging.info(f"💾 Profit metrics saved to: {profit_metrics_path}")
 
     else:
-        # LEGACY: Traditional accuracy-based threshold tuning
         logging.info(f"\n⚠️  Using LEGACY threshold optimization (recall-focused)")
         logging.info(f"POPRAWKA #4 & #6: Threshold optimization - target {min_recall_target*100:.0f}% recall")
 
         precisions, recalls, thresholds = precision_recall_curve(y_calib, calib_probas[:, 1])
 
-        # POPRAWKA #6: Parametryzowany min_recall (domyślnie 0.55, było hardcoded)
         min_recall = min_recall_target
         valid_indices = np.where(recalls[:-1] >= min_recall)[0]
 
@@ -1475,16 +1266,6 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
             logging.info(f"✓ Osiągnięto minimalny recall {min_recall}")
         else:
             logging.warning(f"⚠ Nie udało się osiągnąć recall >= {min_recall}. Najlepszy recall: {optimal_recall:.3f}")
-    # ============================================================================
-    # POPRAWKA #1: Heurystyczna rekomendacja dla min_confidence_ratio
-    # ============================================================================
-    # Bot używa dual-model logic: BUY gdy (proba_long > threshold) AND
-    # (proba_long / proba_short > min_confidence_ratio). Nie możemy tu w pełni
-    # zoptymalizować min_confidence_ratio (wymaga obu modeli), ale dajemy heurystykę.
-    #
-    # Heurystyka: min_confidence_ratio = 1.0 + 0.5 * optimal_threshold
-    # Przykład: threshold=0.60 → ratio=1.30 (30% bardziej pewny)
-    # Uzasadnienie: Jeśli long=0.70, short=0.40 → diff=0.30 (70% sure LONG vs 40% SHORT)
     recommended_min_confidence_ratio = round(1.0 + optimal_threshold * 0.5, 2)
     logging.info(f"\n--- POPRAWKA #1: Rekomendacja min_confidence_ratio ---")
     logging.info(f"  Recommended min_confidence_ratio: {recommended_min_confidence_ratio:.2f}")
@@ -1522,13 +1303,13 @@ def run_training_pipeline(df_features: pd.DataFrame, n_label_trials: int, n_mode
         "best_label_params": best_label_params,
         "best_model_params": best_model_params,
         "optimal_threshold": float(optimal_threshold),
-        "recommended_min_confidence_ratio": float(recommended_min_confidence_ratio),  # POPRAWKA #1
+        "recommended_min_confidence_ratio": float(recommended_min_confidence_ratio),
         "n_features_selected": len(selected_features),
         "n_features_total": len(df_model_base.columns),
         "n_samples_train": len(X_full),
-        "n_samples_calibration": len(X_calib),  # FIX #5: Added calibration set info
+        "n_samples_calibration": len(X_calib),
         "n_samples_holdout": len(X_holdout),
-        "pipeline_version": "v2.1",  # POPRAWKI #1-10: Enhanced pipeline
+        "pipeline_version": "v2.1",
         "fixes_applied": [
             "FIX #1: Symmetric barriers (PT=SL) - eliminates positive bias",
             "FIX #2: Removed SMOTE - use class_weight='balanced'",
