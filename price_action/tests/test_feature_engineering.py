@@ -362,3 +362,50 @@ class TestFeatureEngineering:
 
         # Should have reasonable number of features (50-400 depending on config)
         assert 50 <= feature_count <= 400, f"Unexpected feature count: {feature_count}"
+
+    def test_detect_market_structure_shift_no_lookahead(self, sample_ohlcv_df):
+        """
+        Regression Test: Ensure detect_market_structure_shift does not use future data.
+        
+        We verify this by:
+        1. Calculating MSS on original data.
+        2. Modifying data in the FUTURE relative to a split point.
+        3. Recalculating MSS.
+        4. Asserting that MSS values in the PAST (before split) are identical.
+        """
+        from price_action.data_preparer_pa import detect_market_structure_shift
+        
+        df = sample_ohlcv_df.copy()
+        # Ensure enough data
+        if len(df) < 100:
+            # Extend data if needed
+            df = pd.concat([df] * 5).reset_index(drop=True)
+            
+        # 1. Calculate original
+        df_orig = detect_market_structure_shift(df, swing_period=5)
+        
+        # 2. Modify future data
+        # We'll modify data starting from index 50
+        split_idx = 50
+        df_mod = df.copy()
+        
+        # Make a massive change in the future that would definitely change a centered rolling max
+        df_mod.iloc[split_idx+1:, df_mod.columns.get_loc('high')] = df_mod.iloc[split_idx+1:, df_mod.columns.get_loc('high')] * 2.0
+        df_mod.iloc[split_idx+1:, df_mod.columns.get_loc('low')] = df_mod.iloc[split_idx+1:, df_mod.columns.get_loc('low')] * 0.5
+        df_mod.iloc[split_idx+1:, df_mod.columns.get_loc('close')] = df_mod.iloc[split_idx+1:, df_mod.columns.get_loc('close')] * 1.5
+        
+        # 3. Recalculate
+        df_new = detect_market_structure_shift(df_mod, swing_period=5)
+        
+        # 4. Assert past is unchanged
+        # We check up to split_idx. 
+        # Note: If the function is truly causal, changes at T+1 should not affect T.
+        
+        original_past = df_orig['market_structure_shift'].iloc[:split_idx]
+        new_past = df_new['market_structure_shift'].iloc[:split_idx]
+        
+        pd.testing.assert_series_equal(
+            original_past, 
+            new_past, 
+            obj="Market Structure Shift (Past Values)"
+        )

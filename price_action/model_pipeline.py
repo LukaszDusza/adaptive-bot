@@ -643,7 +643,7 @@ def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close
         'min_child_samples': (50, 200),
 
         'barrier_size': (0.015, 0.040),
-        'time_limit': (12, 48)
+        'time_limit': (24, 96)  # POPRAWKA #11 (ICT-FOCUSED): Zwiększono z (12, 48) → (24, 96) dla dłuższych ICT sygnałów
     }
 
     if n_samples < 30000:
@@ -717,13 +717,13 @@ def get_adaptive_hyperparameter_ranges(n_samples: int, n_features: int, df_close
         else:
             logging.info(f"  ➤ Unknown ticker {ticker}, using medium volatility defaults")
     if volatility_classification == "high":
-        logging.info(f"  ➤ High volatility detected - wider barriers, shorter time limits")
+        logging.info(f"  ➤ High volatility detected - wider barriers, longer time limits for ICT")
         ranges['barrier_size'] = (0.015, 0.050)
-        ranges['time_limit'] = (8, 36)
+        ranges['time_limit'] = (18, 72)  # POPRAWKA #11: Zwiększono z (8, 36) dla ICT
     elif volatility_classification == "low":
-        logging.info(f"  ➤ Low volatility detected - tighter barriers, longer time limits")
+        logging.info(f"  ➤ Low volatility detected - tighter barriers, extended time limits for ICT development")
         ranges['barrier_size'] = (0.012, 0.030)
-        ranges['time_limit'] = (16, 60)
+        ranges['time_limit'] = (36, 120)  # POPRAWKA #11: Zwiększono z (16, 60) dla ICT
 
     return ranges
 

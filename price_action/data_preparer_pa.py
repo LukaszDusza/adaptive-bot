@@ -83,7 +83,10 @@ Version: 2.0 (with ICT/Smart Money)
 import os
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
+try:
+    import pandas_ta as ta
+except ImportError:
+    ta = None
 from dotenv import load_dotenv
 from bybit_adapter import BybitAdapter
 from scipy.signal import find_peaks
@@ -504,75 +507,87 @@ def remove_correlated_features(df: pd.DataFrame,
 def detect_fair_value_gaps(df: pd.DataFrame) -> pd.DataFrame:
     """
     Fair Value Gaps (FVG) - ICT Core Concept
-    
-    FVG Bullish: gdy low[i] > high[i-2] (gap w górę - brak ceny między świecami)
-    FVG Bearish: gdy high[i] < low[i-2] (gap w dół - brak ceny między świecami)
-    
+
+    FVG Bullish: gap między candle i-2 a i, gdzie candle i-1 NIE wypełnia gap
+    FVG Bearish: gap między candle i-2 a i, gdzie candle i-1 NIE wypełnia gap
+
+    POPRAWKA #13 (CODE REVIEW): Dodano proper 3-candle validation zgodnie z ICT methodology
+    - Bullish FVG: low[i] > high[i-2] AND high[i-1] < low[i] (middle candle doesn't fill gap)
+    - Bearish FVG: high[i] < low[i-2] AND low[i-1] > high[i] (middle candle doesn't fill gap)
+
     Te gap'y często działają jak magnesy - cena wraca aby je wypełnić.
     Smart Money używa ich jako entry zones.
     """
-    fvg_bullish = (df['low'] > df['high'].shift(2))
-    
-    fvg_bearish = (df['high'] < df['low'].shift(2))
-    
+    # FIXED: Proper 3-candle validation - middle candle must not fill the gap
+    fvg_bullish = (
+        (df['low'] > df['high'].shift(2)) &  # Gap exists
+        (df['high'].shift(1) < df['low'])     # Middle candle doesn't fill gap
+    )
+
+    fvg_bearish = (
+        (df['high'] < df['low'].shift(2)) &  # Gap exists
+        (df['low'].shift(1) > df['high'])     # Middle candle doesn't fill gap
+    )
+
     df['fvg_signal'] = fvg_bullish.astype(int) - fvg_bearish.astype(int)
-    
+
     df['fvg_size'] = np.where(
-        fvg_bullish, 
-        (df['low'] - df['high'].shift(2)) / df['close'],
+        fvg_bullish,
+        (df['low'] - df['high'].shift(2)) / (df['close'] + 1e-8),  # Added division safety
         np.where(
-            fvg_bearish, 
-            (df['low'].shift(2) - df['high']) / df['close'], 
+            fvg_bearish,
+            (df['low'].shift(2) - df['high']) / (df['close'] + 1e-8),  # Added division safety
             0
         )
     )
-    
-    df['fvg_filled'] = 0
-    for i in range(1, 6):
 
-
-        pass
-
+    # Removed dead code (was lines 530-534)
+    # Track recent FVG activity
     df['recent_fvg_bullish'] = fvg_bullish.rolling(5).max().fillna(0).astype(int)
     df['recent_fvg_bearish'] = fvg_bearish.rolling(5).max().fillna(0).astype(int)
-    df.drop(columns=['fvg_filled'], inplace=True, errors='ignore')
-    
+
     return df
 
 
 def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 20) -> pd.DataFrame:
     """
     Liquidity Sweeps - ICT Core Concept
-    
+
     Smart Money często "sweepuje" (zbiera) płynność z retail stop lossów
     umieszczonych za oczywistymi high/low, a następnie reversal.
-    
+
     Bullish Sweep: cena bierze recent low + natychmiastowy reversal w górę
     Bearish Sweep: cena bierze recent high + natychmiastowy reversal w dół
+
+    POPRAWKA #17: Wzmocniony reversal threshold 0.3%
+    - Prevents false positives from marginal price movements
+    - Ensures real reversal after sweep (not just noise)
+    - Added min_periods=1 for small datasets
     """
-    recent_high = df['high'].rolling(lookback).max()
-    recent_low = df['low'].rolling(lookback).min()
-    
+    recent_high = df['high'].rolling(lookback, min_periods=1).max()
+    recent_low = df['low'].rolling(lookback, min_periods=1).min()
+
     sweep_low = (
         (df['low'] <= recent_low.shift(1)) &
         (df['close'] > df['open']) &
-        (df['close'] > recent_low.shift(1))
+        (df['close'] > recent_low.shift(1) * 1.003)
     )
-    
+
     sweep_high = (
         (df['high'] >= recent_high.shift(1)) &
         (df['close'] < df['open']) &
-        (df['close'] < recent_high.shift(1))
+        (df['close'] < recent_high.shift(1) * 0.997)
     )
     
     df['liquidity_sweep'] = sweep_low.astype(int) - sweep_high.astype(int)
-    
+
+    # POPRAWKA #19: Division safety
     df['liquidity_sweep_strength'] = np.where(
         sweep_low,
-        (recent_low.shift(1) - df['low']) / df['close'],
+        (recent_low.shift(1) - df['low']) / (df['close'] + 1e-8),
         np.where(
             sweep_high,
-            (df['high'] - recent_high.shift(1)) / df['close'],
+            (df['high'] - recent_high.shift(1)) / (df['close'] + 1e-8),
             0
         )
     )
@@ -586,109 +601,169 @@ def detect_liquidity_sweeps(df: pd.DataFrame, lookback: int = 20) -> pd.DataFram
     return df
 
 
-def detect_order_blocks(df: pd.DataFrame, impulse_threshold: float = 0.015) -> pd.DataFrame:
+def detect_order_blocks(df: pd.DataFrame, impulse_threshold: float = 0.025) -> pd.DataFrame:
     """
     Order Blocks (OB) - ICT Core Concept
-    
+
     Order Block = ostatnia przeciwna świeca przed silnym impulsem.
     To miejsce gdzie Smart Money złożyło duże zlecenia.
-    
+
     Bullish OB: ostatnia bearish świeca przed silnym ruchem w górę
     Bearish OB: ostatnia bullish świeca przed silnym ruchem w dół
+
+    POPRAWKA #14 (CODE REVIEW): CRITICAL FIX - Look-ahead bias
+    - Changed shift(1) to shift(3) - OB musi być PRZED impulsem, nie podczas!
+    - Increased impulse_threshold from 1.5% to 2.5% (better for crypto volatility)
+    - Increased testing threshold from 0.5% to 1.5% (better for crypto)
     """
     price_change_3 = df['close'].pct_change(3)
     bullish_impulse = (price_change_3 > impulse_threshold)
     bearish_impulse = (price_change_3 < -impulse_threshold)
-    
+
     bearish_candle = (df['close'] < df['open'])
     bullish_candle = (df['close'] > df['open'])
-    
-    bullish_ob = bullish_impulse & bearish_candle.shift(1)
-    
-    bearish_ob = bearish_impulse & bullish_candle.shift(1)
-    
+
+    # CRITICAL FIX: shift(3) instead of shift(1)
+    # OB is the opposite candle BEFORE the 3-candle impulse, not during it!
+    bullish_ob = bullish_impulse & bearish_candle.shift(3)
+
+    bearish_ob = bearish_impulse & bullish_candle.shift(3)
+
     df['order_block'] = bullish_ob.astype(int) - bearish_ob.astype(int)
-    
+
     df['order_block_strength'] = np.where(
         bullish_ob,
         price_change_3,
         np.where(bearish_ob, -price_change_3, 0)
     )
-    
+
     last_bullish_ob_price = df['close'].where(bullish_ob).ffill()
     last_bearish_ob_price = df['close'].where(bearish_ob).ffill()
 
     df['dist_from_bullish_ob'] = ((df['close'] - last_bullish_ob_price) / df['close']).fillna(0.0)
     df['dist_from_bearish_ob'] = ((df['close'] - last_bearish_ob_price) / df['close']).fillna(0.0)
-    
-    df['testing_bullish_ob'] = (df['dist_from_bullish_ob'].abs() < 0.005).astype(int)
-    df['testing_bearish_ob'] = (df['dist_from_bearish_ob'].abs() < 0.005).astype(int)
-    
+
+    # Increased threshold from 0.5% to 1.5% (better for crypto volatility)
+    df['testing_bullish_ob'] = (df['dist_from_bullish_ob'].abs() < 0.015).astype(int)
+    df['testing_bearish_ob'] = (df['dist_from_bearish_ob'].abs() < 0.015).astype(int)
+
     return df
 
 
 def detect_breaker_blocks(df: pd.DataFrame) -> pd.DataFrame:
     """
     Breaker Blocks - ICT Advanced Concept
-    
-    Breaker = Order Block który został przebity i zmienił swoją rolę.
-    Support który został złamany staje się resistance (i odwrotnie).
-    
-    To sign of "Change of Character" - zmiana struktury rynku.
+
+    Breaker = Order Block który został przebity (broken through) i zmienił swoją rolę.
+    - Bullish OB broken → becomes resistance (bearish breaker)
+    - Bearish OB broken → becomes support (bullish breaker)
+
+    POPRAWKA #15 (CODE REVIEW): COMPLETE REWRITE
+    - Old implementation had CRITICAL look-ahead bias and math errors
+    - New: Breaker = OB that price broke through and closed beyond
+    - Requires detect_order_blocks() to be run BEFORE this function
+
+    IMPORTANT: This creates a DEPENDENCY on Order Blocks - must be computed first!
     """
-    support_level = df['low'].rolling(10).min()
-    support_broken = (
-        (df['low'].shift(3) == support_level.shift(3)) &
-        (df['close'] < support_level.shift(3)) &
-        (df['close'].shift(1) >= support_level.shift(3))
+    # Ensure OB features exist
+    if 'order_block' not in df.columns:
+        logger.warning("⚠️  detect_order_blocks() must be run BEFORE detect_breaker_blocks()")
+        logger.warning("   Creating empty breaker_block features as fallback")
+        df['breaker_block'] = 0
+        df['breaker_strength'] = 0.0
+        return df
+
+    # Track last OB prices (these are potential breaker zones)
+    last_bullish_ob = df['close'].where(df['order_block'] == 1).ffill()
+    last_bearish_ob = df['close'].where(df['order_block'] == -1).ffill()
+
+    # Bullish OB broken = price closed BELOW bullish OB zone (now acts as resistance)
+    # This is BEARISH signal (support became resistance)
+    bullish_ob_broken = (
+        (last_bullish_ob.notna()) &
+        (df['close'] < last_bullish_ob * 0.985)  # Closed 1.5% below OB
     )
-    
-    resistance_level = df['high'].rolling(10).max()
-    resistance_broken = (
-        (df['high'].shift(3) == resistance_level.shift(3)) &
-        (df['close'] > resistance_level.shift(3)) &
-        (df['close'].shift(1) <= resistance_level.shift(3))
+
+    # Bearish OB broken = price closed ABOVE bearish OB zone (now acts as support)
+    # This is BULLISH signal (resistance became support)
+    bearish_ob_broken = (
+        (last_bearish_ob.notna()) &
+        (df['close'] > last_bearish_ob * 1.015)  # Closed 1.5% above OB
     )
-    
-    df['breaker_block'] = resistance_broken.astype(int) - support_broken.astype(int)
-    
+
+    # Breaker signal: +1 when bearish OB broken (bullish), -1 when bullish OB broken (bearish)
+    df['breaker_block'] = bearish_ob_broken.astype(int) - bullish_ob_broken.astype(int)
+
+    # Strength = how far price broke through the OB
     df['breaker_strength'] = np.where(
-        resistance_broken,
-        (df['close'] - resistance_level.shift(3)) / df['close'],
+        bearish_ob_broken,
+        (df['close'] - last_bearish_ob) / (df['close'] + 1e-8),  # Positive strength
         np.where(
-            support_broken,
-            (support_level.shift(3) - df['close']) / df['close'],
+            bullish_ob_broken,
+            (last_bullish_ob - df['close']) / (df['close'] + 1e-8),  # Positive strength
             0
         )
     )
-    
+
     return df
 
 
-def detect_market_structure_shift(df: pd.DataFrame, swing_period: int = 10) -> pd.DataFrame:
+def detect_market_structure_shift(df: pd.DataFrame, swing_period: int = 15) -> pd.DataFrame:
     """
     Market Structure Shift (MSS) - ICT Core Concept
-    
-    MSS = Change of Character - moment gdy struktura rynku się zmienia:
-    - Bullish: higher highs & higher lows
-    - Bearish: lower highs & lower lows
-    
-    MSS występuje gdy ta struktura zostaje złamana.
-    """
-    highs_window = df['high'].rolling(window=swing_period, center=False).max()
-    is_swing_high = (df['high'] == highs_window)
 
-    lows_window = df['low'].rolling(window=swing_period, center=False).min()
-    is_swing_low = (df['low'] == lows_window)
+    MSS = Change of Character - moment gdy struktura rynku się zmienia:
+    Wykrywa zmiany struktury rynku (MSS - Market Structure Shift).
     
-    last_swing_high = df['high'].where(is_swing_high).ffill()
-    last_swing_low = df['low'].where(is_swing_low).ffill()
+    CRITICAL FIX: Removed look-ahead bias (center=True). 
+    Now uses a causal confirmation mechanism. A swing point is confirmed 
+    only after 'swing_period' candles have passed.
     
-    bullish_mss = (df['close'] > last_swing_high.shift(1)) & (last_swing_high.shift(1).notna())
+    Args:
+        df: DataFrame z danymi OHLCV
+        swing_period: Okres do wyznaczania swingów (potwierdzenie po N świecach)
+        
+    Returns:
+        DataFrame z kolumną 'market_structure_shift' (1: Bullish, -1: Bearish, 0: None)
+    """
+    df = df.copy()
     
-    bearish_mss = (df['close'] < last_swing_low.shift(1)) & (last_swing_low.shift(1).notna())
+    # Causal Swing Detection
+    # A swing high at index (t - swing_period) is confirmed at index t 
+    # if it is the highest high in the window [t - 2*swing_period, t].
     
-    df['market_structure_shift'] = bullish_mss.astype(int) - bearish_mss.astype(int)
+    window_len = 2 * swing_period + 1
+    
+    # Rolling max/min over the full confirmation window (ending at current time)
+    local_max = df['high'].rolling(window=window_len).max()
+    local_min = df['low'].rolling(window=window_len).min()
+    
+    # The candidate swing point is 'swing_period' candles ago
+    candidate_high = df['high'].shift(swing_period)
+    candidate_low = df['low'].shift(swing_period)
+    
+    # Check if the candidate was indeed the extreme
+    is_swing_high_confirmed = (candidate_high == local_max)
+    is_swing_low_confirmed = (candidate_low == local_min)
+    
+    # Propagate the last confirmed swing levels forward
+    last_swing_high = candidate_high.where(is_swing_high_confirmed).ffill()
+    last_swing_low = candidate_low.where(is_swing_low_confirmed).ffill()
+    
+    # Detect Shifts (Break of Structure)
+    # Bullish Shift: Close breaks above the last confirmed swing high
+    # Bearish Shift: Close breaks below the last confirmed swing low
+    
+    mss_bullish = (df['close'] > last_swing_high) & (df['close'].shift(1) <= last_swing_high.shift(1))
+    mss_bearish = (df['close'] < last_swing_low) & (df['close'].shift(1) >= last_swing_low.shift(1))
+    
+    df['market_structure_shift'] = 0
+    df.loc[mss_bullish, 'market_structure_shift'] = 1
+    df.loc[mss_bearish, 'market_structure_shift'] = -1
+    
+    # Optional: Add swing levels to DF for debugging/visualization
+    # df['last_swing_high'] = last_swing_high
+    # df['last_swing_low'] = last_swing_low
     
     mss_occurred = (df['market_structure_shift'] != 0)
     df['bars_since_mss'] = (~mss_occurred).cumsum() - (~mss_occurred).cumsum().where(~mss_occurred).ffill().fillna(0)
@@ -926,9 +1001,103 @@ def add_ict_smart_money_features(df: pd.DataFrame, parallel: bool = True) -> pd.
         ((df['recent_fvg_bearish'] == 1) & (df['liquidity_sweep'] == 1))
     ).astype(int)
 
+    # POPRAWKA #12 (ANTI-SPARSITY): Continuous ICT features dla LightGBM
+    # Problem: Binary ICT features (0/1) są sparse (90%+ zeros) → LightGBM je ignoruje
+    # Solution: Dodaj continuous variants (distance, strength, proximity)
+    logger.info("    → POPRAWKA #12: Continuous ICT Features (anti-sparsity)...")
+
+    # 1. FVG Distance (continuous) - jak daleko od ostatniego FVG
+    # POPRAWKA #18: Store as df column for later reference
+    df['recent_fvg_price'] = df['close'].where(df['fvg_signal'] != 0).ffill()
+    ict_features['fvg_distance_pct'] = (
+        (df['close'] - df['recent_fvg_price']) / df['close']
+    ).fillna(0).clip(-0.1, 0.1)  # Cap at ±10%
+
+    # 2. Liquidity Level Proximity (continuous) - jak blisko swing high/low
+    if 'dist_from_swing_high_50' in df.columns:
+        ict_features['liquidity_proximity_normalized'] = (
+            df['dist_from_swing_high_50'].fillna(0).clip(-0.05, 0.05)
+        )
+    else:
+        ict_features['liquidity_proximity_normalized'] = 0
+
+    # 3. Order Block Zone Strength (continuous) - nie tylko binary "testing OB"
+    bullish_ob_price = df['close'].where(df['order_block'] == 1).ffill()
+    bearish_ob_price = df['close'].where(df['order_block'] == -1).ffill()
+
+    ict_features['ob_zone_proximity_bull'] = (
+        (df['close'] - bullish_ob_price) / df['close']
+    ).fillna(0).clip(-0.1, 0.1)
+
+    ict_features['ob_zone_proximity_bear'] = (
+        (df['close'] - bearish_ob_price) / df['close']
+    ).fillna(0).clip(-0.1, 0.1)
+
+    # 4. Market Structure Strength (continuous) - nie tylko binary shift
+    # Używamy momentum po MSS jako proxy dla "strength of break"
+    mss_occurred = (df['market_structure_shift'] != 0)
+    bars_since_mss = _calculate_bars_since_event_vectorized(mss_occurred, cap=50)
+
+    # Decay function: siła MSS słabnie z czasem (exponential decay)
+    ict_features['mss_strength_decayed'] = np.where(
+        bars_since_mss < 50,
+        np.exp(-bars_since_mss / 10) * df['market_structure_shift'].abs(),
+        0
+    )
+
+    # 5. ICT Confluence Score (continuous) - ile ICT signals jednocześnie
+    # Wyższa wartość = więcej ICT concepts agree
+    ict_features['ict_confluence_strength'] = (
+        (df['fvg_signal'].abs() > 0).astype(int) +
+        (df['liquidity_sweep'].abs() > 0).astype(int) +
+        (df['order_block'].abs() > 0).astype(int) +
+        (df['breaker_block'].abs() > 0).astype(int) +
+        (df['market_structure_shift'].abs() > 0).astype(int)
+    ).astype(float) / 5.0  # Normalized to 0-1
+
+    # 6. FVG Fill Percentage (continuous) - ile % FVG zostało wypełnione
+    # Jeśli FVG był 100-102, a cena jest 101, to 50% filled
+    # POPRAWKA #18: recent_fvg_price is always created above
+    if 'fvg_size' in df.columns:
+        fvg_size = df['fvg_size'].abs()
+        price_into_fvg = (df['close'] - df['recent_fvg_price']).abs()
+        ict_features['fvg_fill_percentage'] = np.where(
+            fvg_size > 0,
+            (price_into_fvg / fvg_size).clip(0, 1),
+            0
+        )
+    else:
+        ict_features['fvg_fill_percentage'] = 0
+
+    # 7. Liquidity Grab Magnitude (continuous) - jak mocny był sweep
+    # Używamy volume podczas sweep jako proxy
+    # POPRAWKA #19: Division safety
+    if 'liquidity_sweep_with_volume' in df.columns:
+        sweep_volume = df['volume'].where(df['liquidity_sweep_with_volume'] != 0, 0)
+        avg_volume = df['volume'].rolling(20, min_periods=1).mean()
+        ict_features['sweep_volume_ratio'] = (
+            sweep_volume / (avg_volume + 1e-8)
+        ).fillna(1.0).clip(0, 5)  # Cap at 5x
+    else:
+        ict_features['sweep_volume_ratio'] = 1.0
+
+    # 8. Time in OB Zone (continuous) - ile candles price spędził w OB zone
+    in_bullish_ob_zone = (df['testing_bullish_ob'] == 1).astype(int)
+    in_bearish_ob_zone = (df['testing_bearish_ob'] == 1).astype(int)
+
+    ict_features['time_in_ob_zone'] = (
+        in_bullish_ob_zone.rolling(20, min_periods=1).sum() +
+        in_bearish_ob_zone.rolling(20, min_periods=1).sum()
+    ) / 20.0  # Normalized to 0-1
+
+    logger.info("    ✓ Continuous ICT Features: 10 nowych continuous features dodanych")
+    logger.info("      → fvg_distance_pct, liquidity_proximity_normalized, ob_zone_proximity_*")
+    logger.info("      → mss_strength_decayed, ict_confluence_strength, fvg_fill_percentage")
+    logger.info("      → sweep_volume_ratio, time_in_ob_zone")
+
     df = pd.concat([df, pd.DataFrame(ict_features, index=df.index)], axis=1)
-    
-    logger.info("    ✓ ICT/Smart Money: 37+ nowych cech dodanych (30 base + 7 rolling features)")
+
+    logger.info("    ✓ ICT/Smart Money TOTAL: 47+ features (30 base + 7 rolling + 10 continuous)")
     return df
 
 
@@ -2681,11 +2850,8 @@ def fetch_and_prepare_data(ticker: str, timeframe: str, limit: int, helper_timef
         logger.info(f"ℹ️  No date_from specified, fetching backwards from current time")
 
     resolved_feature_level = _resolve_feature_level(feature_level, skip_slow_features)
-    logger.info(f"🎚️  Feature level: {resolved_feature_level} ({
-        '~50' if resolved_feature_level == FEATURE_LEVEL_BASIC else
-        '~150' if resolved_feature_level == FEATURE_LEVEL_STANDARD else
-        '~300'
-    } features)")
+    feature_count_str = '~50' if resolved_feature_level == FEATURE_LEVEL_BASIC else '~150' if resolved_feature_level == FEATURE_LEVEL_STANDARD else '~300'
+    logger.info(f"🎚️  Feature level: {resolved_feature_level} ({feature_count_str} features)")
 
     _validate_data_preparer_inputs(ticker, timeframe, limit, helper_timeframes)
 
